@@ -34,11 +34,7 @@ const (
 // same time on a cold checkout would race; add a lock file if that ever bites.
 func Generate(t testing.TB) string {
 	t.Helper()
-	_, self, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("demorepo: cannot locate the package source")
-	}
-	root := filepath.Dir(filepath.Dir(filepath.Dir(self)))
+	root := moduleRoot(t)
 	repo := filepath.Join(root, "testdata", "versioned-demo-repo")
 	if !complete(repo) {
 		script := filepath.Join(root, "testdata", "gen-versioned-demo-repo.sh")
@@ -59,6 +55,17 @@ func Revision(t testing.TB, repo, branch string) string {
 		t.Fatalf("demorepo: git rev-parse %s: %v", branch, err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// moduleRoot returns the module directory, found from this file's own path so a
+// test can be run from any working directory.
+func moduleRoot(t testing.TB) string {
+	t.Helper()
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("demorepo: cannot locate the package source")
+	}
+	return filepath.Dir(filepath.Dir(filepath.Dir(self)))
 }
 
 // complete reports whether repo already holds all three branches, which is the
