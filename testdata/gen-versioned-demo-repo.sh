@@ -32,6 +32,19 @@ commit() {
 rm -rf "$repo"
 git init -q -b main "$repo"
 
+# Pin the git directory before any other git call. Without this, a git command
+# run against a $repo that has no .git does not fail: it searches upward and
+# finds the enclosing vacmcp repository, so `add -A` + `commit` commits the
+# developer's uncommitted work and `checkout -b release/v1` switches their
+# branch. That happened. It is data loss, not flakiness, so the guard is
+# explicit rather than assumed.
+if [ ! -d "$repo/.git" ]; then
+	echo "gen-versioned-demo-repo: $repo/.git missing after git init; refusing to run git against the parent repository" >&2
+	exit 1
+fi
+export GIT_DIR="$repo/.git"
+export GIT_WORK_TREE="$repo"
+
 cat >"$repo/go.mod" <<'EOF'
 module example.com/demo
 

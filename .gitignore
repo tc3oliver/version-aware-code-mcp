@@ -5,6 +5,7 @@
 # Test fixtures generated at test/CI setup time (see CONTRIBUTING.md)
 /testdata/versioned-demo-repo/
 /testdata/fixture/
+/testdata/.demorepo-lock/
 
 # Local configuration
 *.local.yaml
