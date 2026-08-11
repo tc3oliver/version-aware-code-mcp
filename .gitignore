@@ -1,0 +1,21 @@
+# Build output
+/bin/
+/dist/
+
+# Test fixtures generated at test/CI setup time (see CONTRIBUTING.md)
+/testdata/versioned-demo-repo/
+
+# Local configuration
+*.local.yaml
+*.local.yml
+
+# Internal development tooling, not part of the published project
+/backlog/
+/.agent-workflow/
+/.claude/
+/.omc/
+/CLAUDE.md
+/AGENTS.md
+
+# macOS
+.DS_Store
