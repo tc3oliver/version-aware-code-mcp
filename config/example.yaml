@@ -1,0 +1,39 @@
+# vacmcp configuration.
+#
+# Two contexts over one repository: the same file name means different code in
+# release/1.x and release/2.x, and every tool call has to say which one it means.
+#
+# There are no LLM settings here, by design. This server does not talk to a
+# model: it serves search, graph, source, version and evidence to whichever
+# agent your MCP client runs.
+
+server:
+  # Address for `vacmcp serve` in Streamable HTTP mode. Ignored with --stdio.
+  address: 127.0.0.1:8080
+
+providers:
+  zoekt:
+    # Zoekt web server that holds the indexes of the branches below.
+    url: http://127.0.0.1:6070
+  cbm:
+    # codebase-memory-mcp >=0.10.1 binary, run as a subprocess.
+    command: codebase-memory-mcp
+
+repositories:
+  example/backend:
+    # Local clone. vacmcp reads it, it never writes to it.
+    path: /srv/repos/backend
+
+contexts:
+  app-v1:
+    repository: example/backend
+    branch: release/1.x
+    revision: 8af31e2
+    # CBM project holding the graph built for this revision. Each version needs
+    # its own project, otherwise trace_calls answers from the wrong graph.
+    graph_ref: backend-v1
+  app-v2:
+    repository: example/backend
+    branch: release/2.x
+    revision: 94cb821
+    graph_ref: backend-v2
