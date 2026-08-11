@@ -1,0 +1,89 @@
+name: Bug report
+description: Report incorrect behavior, including a wrong-version result
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please do not include
+        proprietary source code from your repositories — describe the shape
+        of the problem instead (file/symbol names, context config, expected
+        vs. actual result).
+
+  - type: input
+    id: vacmcp-version
+    attributes:
+      label: vacmcp version
+      description: Output of `vacmcp --version`, or the commit/tag you built from.
+      placeholder: v0.x.y or commit SHA
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - STDIO
+        - Streamable HTTP
+    validations:
+      required: true
+
+  - type: input
+    id: zoekt-version
+    attributes:
+      label: Zoekt version
+      description: Version of `zoekt-git-index` / `zoekt-webserver` in use.
+    validations:
+      required: false
+
+  - type: input
+    id: cbm-version
+    attributes:
+      label: codebase-memory-mcp version
+      description: Version of the CBM binary in use (must be >=0.10.1).
+    validations:
+      required: false
+
+  - type: textarea
+    id: context-config
+    attributes:
+      label: Context configuration
+      description: >
+        The relevant `contexts:` / `repositories:` entries involved, with any
+        sensitive paths or names redacted. Optional, but usually the key to
+        reproducing a wrong-version result.
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >
+        What did you ask for, and what came back? If this is a wrong-version
+        result, say which context/branch/revision you expected versus what
+        the result's evidence actually pointed to.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: false
