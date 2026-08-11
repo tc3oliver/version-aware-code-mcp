@@ -2,14 +2,102 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
+
+// serveConfigEnv makes this test binary run `vacmcp serve --stdio` against the
+// configuration file it names, instead of running tests. That way the tools an
+// agent can reach are the ones the real CLI registered, over a real pipe.
+const serveConfigEnv = "VACMCP_TEST_SERVE_CONFIG"
+
+func TestMain(m *testing.M) {
+	if path, ok := os.LookupEnv(serveConfigEnv); ok {
+		args := []string{"serve", "--stdio"}
+		if path != "" {
+			args = append(args, "--config", path)
+		}
+		// Nothing may go to stdout but the protocol stream, which is why the
+		// output writer here is stderr.
+		if err := run(args, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// TestServeExposesTheConfiguredContexts is the wiring check: `serve --config`
+// has to hand the loaded contexts to list_contexts, so an agent connecting to
+// the server sees the same versions `vacmcp contexts` prints.
+func TestServeExposesTheConfiguredContexts(t *testing.T) {
+	got := callListContexts(t, write(t, twoContexts))
+
+	want := []map[string]string{
+		{"id": "app-v1", "repository": "example/backend", "branch": "release/1.x", "revision": "8af31e2"},
+		{"id": "app-v2", "repository": "example/backend", "branch": "release/2.x", "revision": "94cb821"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("list_contexts returned\n%v\nwant\n%v", got, want)
+	}
+}
+
+// TestServeWithoutConfigExposesNoContexts pins the other half of --config being
+// optional: a server started without one serves an empty list, not an error.
+func TestServeWithoutConfigExposesNoContexts(t *testing.T) {
+	if got := callListContexts(t, ""); len(got) != 0 {
+		t.Errorf("list_contexts returned %v, want no contexts", got)
+	}
+}
+
+// callListContexts runs the CLI as an MCP server over STDIO and calls
+// list_contexts on it, returning the contexts it listed.
+func callListContexts(t *testing.T, configPath string) []map[string]string {
+	t.Helper()
+
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), serveConfigEnv+"="+configPath)
+	cmd.Stderr = os.Stderr
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "vacmcp-test", Version: version}, nil)
+	session, err := client.Connect(t.Context(), &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_contexts"})
+	if err != nil {
+		t.Fatalf("tools/call list_contexts: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("list_contexts reported an error result: %v", res.Content)
+	}
+
+	text, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("result content = %#v, want text", res.Content[0])
+	}
+	var payload struct {
+		Contexts []map[string]string `json:"contexts"`
+	}
+	if err := json.Unmarshal([]byte(text.Text), &payload); err != nil {
+		t.Fatalf("decode %s: %v", text.Text, err)
+	}
+	return payload.Contexts
+}
 
 const twoContexts = `
 repositories:
