@@ -1,0 +1,36 @@
+# Template for the configuration baked into the vacmcp image. The revisions are
+# substituted by docker/Dockerfile from the demo repository it generates, so
+# this file never carries a commit SHA that can go stale.
+#
+# The paths and hosts here are the ones inside the compose network, not on your
+# machine. To point the stack at your own repository, replace the repositories
+# and contexts blocks and mount the clone into the vacmcp and cbm containers.
+
+providers:
+  zoekt:
+    # The zoekt service, reached over the compose network. Its published port is
+    # bound to loopback on the host; nothing outside this machine talks to it.
+    url: http://zoekt:6070
+  cbm:
+    # codebase-memory-mcp runs as a subprocess of vacmcp, so this is a binary in
+    # the vacmcp image and not an address. The graphs it reads are built by the
+    # cbm service into the volume both containers share.
+    command: codebase-memory-mcp
+
+repositories:
+  # The name Zoekt derives from the indexed directory. The search adapter only
+  # accepts matches Zoekt reports under this name.
+  versioned-demo-repo:
+    path: /srv/versioned-demo-repo
+
+contexts:
+  demo-v1:
+    repository: versioned-demo-repo
+    branch: release/v1
+    revision: "@REVISION_V1@"
+    graph_ref: vacmcp-demo-v1
+  demo-v2:
+    repository: versioned-demo-repo
+    branch: release/v2
+    revision: "@REVISION_V2@"
+    graph_ref: vacmcp-demo-v2
