@@ -11,10 +11,13 @@ import (
 	"os"
 	"slices"
 
+	"github.com/tc3oliver/version-aware-code-mcp/adapters/cbm"
+	"github.com/tc3oliver/version-aware-code-mcp/adapters/git"
+	"github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
 	"github.com/tc3oliver/version-aware-code-mcp/tools"
-	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
 // version is the build version of the vacmcp binary.
@@ -74,17 +77,27 @@ func serve(args []string) error {
 	path := fs.String("config", "", "path to the vacmcp configuration file")
 	_ = fs.Parse(args)
 
-	var contexts map[string]vacctx.CodeContext
+	cfg := &config.Config{}
 	if *path != "" {
-		cfg, err := config.Load(*path)
+		loaded, err := config.Load(*path)
 		if err != nil {
 			return err
 		}
-		contexts = cfg.Contexts
+		cfg = loaded
 	}
 
 	srv := server.New(version)
-	tools.AddListContexts(srv, contexts)
+	// All four tools are registered whether or not a configuration was given.
+	// The tool surface is what the server can do, not what it happens to be
+	// configured for, and a request naming a context that does not exist
+	// already has a defined answer: the resolver returns CONTEXT_NOT_FOUND
+	// before any provider is reached. Hiding the tools instead would leave an
+	// agent unable to tell "not supported" from "not configured".
+	contexts := resolver.New(cfg)
+	tools.AddListContexts(srv, cfg.Contexts)
+	tools.AddSearchCode(srv, contexts, zoekt.New(cfg))
+	tools.AddTraceCalls(srv, contexts, cbm.New(cfg))
+	tools.AddGetCode(srv, contexts, git.New(cfg))
 
 	// Nothing may write to stdout in STDIO mode: it carries the protocol
 	// stream. Errors go to stderr, and only after the server has stopped.

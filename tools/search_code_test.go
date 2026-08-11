@@ -93,7 +93,7 @@ func TestSearchCodeRejectsAnUnknownContext(t *testing.T) {
 
 	// A query that has matches in every configured context, so an empty result
 	// could not be blamed on the query.
-	raw, isError := call(t, session, "demo-v3", "Process")
+	raw, isError := callSearchCode(t, session, "demo-v3", "Process")
 	if !isError {
 		t.Fatalf("search_code(demo-v3, Process) succeeded with %s, want an error result", raw)
 	}
@@ -131,7 +131,7 @@ func TestSearchCodeOutputCarriesContextAndEvidence(t *testing.T) {
 	cfg := fixtureConfig(t)
 	session := searchSession(t, cfg)
 
-	raw, isError := call(t, session, v2, "NewHandler")
+	raw, isError := callSearchCode(t, session, v2, "NewHandler")
 	if isError {
 		t.Fatalf("search_code(%s, NewHandler) failed: %s", v2, raw)
 	}
@@ -167,7 +167,7 @@ func TestSearchCodeOutputCarriesContextAndEvidence(t *testing.T) {
 	// An empty answer is still scoped and still evidence-backed, and both lists
 	// reach the client as [] rather than null: to an agent those are different
 	// answers.
-	empty, isError := call(t, session, v1, "NewHandler")
+	empty, isError := callSearchCode(t, session, v1, "NewHandler")
 	if isError {
 		t.Fatalf("search_code(%s, NewHandler) failed: %s", v1, empty)
 	}
@@ -329,7 +329,7 @@ func searchSession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 func searchCode(t *testing.T, session *mcp.ClientSession, contextID, query string) searchCodeOutput {
 	t.Helper()
 
-	raw, isError := call(t, session, contextID, query)
+	raw, isError := callSearchCode(t, session, contextID, query)
 	if isError {
 		t.Fatalf("search_code(%s, %q) failed: %s", contextID, query, raw)
 	}
@@ -344,7 +344,7 @@ func searchCode(t *testing.T, session *mcp.ClientSession, contextID, query strin
 // with whether it was an error result. It reads the text content rather than
 // the decoded structured content on purpose: the difference between [] and null
 // only survives in the bytes.
-func call(t *testing.T, session *mcp.ClientSession, contextID, query string) (string, bool) {
+func callSearchCode(t *testing.T, session *mcp.ClientSession, contextID, query string) (string, bool) {
 	t.Helper()
 
 	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{
