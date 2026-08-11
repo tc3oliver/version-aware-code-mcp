@@ -13,6 +13,8 @@ import (
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
+	"github.com/tc3oliver/version-aware-code-mcp/tools"
+	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
 // version is the build version of the vacmcp binary.
@@ -21,7 +23,8 @@ const version = "0.0.0-dev"
 const usage = `vacmcp serves version-aware code intelligence over MCP.
 
 Usage:
-  vacmcp serve [--stdio] [--address ADDR]   run the MCP server
+  vacmcp serve [--stdio] [--address ADDR] [--config FILE]
+                                            run the MCP server
   vacmcp validate --config FILE             load and check a configuration file
   vacmcp contexts --config FILE             list the configured contexts
   vacmcp version                            print the vacmcp version`
@@ -57,14 +60,31 @@ func run(args []string, out io.Writer) error {
 }
 
 // serve runs the MCP server, over Streamable HTTP unless --stdio asks for
-// STDIO. It only picks the transport; serving one is the server package's job.
+// STDIO. It picks the transport and registers the tools; serving is the server
+// package's job.
+//
+// --config is optional: a server started without one is a server with no
+// contexts configured, and list_contexts reports that as an empty list rather
+// than an error. A configuration file that exists must still be a valid one,
+// so a load failure stops the server instead of silently serving nothing.
 func serve(args []string) error {
 	fs := flag.NewFlagSet("vacmcp serve", flag.ExitOnError)
 	stdio := fs.Bool("stdio", false, "serve over STDIO instead of Streamable HTTP")
 	address := fs.String("address", server.DefaultAddress, "address to listen on in Streamable HTTP mode")
+	path := fs.String("config", "", "path to the vacmcp configuration file")
 	_ = fs.Parse(args)
 
+	var contexts map[string]vacctx.CodeContext
+	if *path != "" {
+		cfg, err := config.Load(*path)
+		if err != nil {
+			return err
+		}
+		contexts = cfg.Contexts
+	}
+
 	srv := server.New(version)
+	tools.AddListContexts(srv, contexts)
 
 	// Nothing may write to stdout in STDIO mode: it carries the protocol
 	// stream. Errors go to stderr, and only after the server has stopped.
