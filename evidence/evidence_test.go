@@ -5,18 +5,25 @@
 package evidence_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
+	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
-var fullContext = evidence.Context{
+// fullContext carries a GraphRef on purpose: every test that marshals it also
+// asserts the exact output, so a leak of the internal field fails the suite.
+var fullContext = vacctx.CodeContext{
 	ID:         "app-v2",
 	Repository: "example/backend",
 	Branch:     "release/2.x",
 	Revision:   "94cb821",
+	GraphRef:   "backend-v2",
 }
 
 func TestNewMarshalsContractShape(t *testing.T) {
@@ -34,6 +41,35 @@ func TestNewMarshalsContractShape(t *testing.T) {
 		`"evidence":[{"location":{"path":"internal/process.go","start_line":12,"end_line":14},"snippet":"NewHandler()"}]}`
 	if string(got) != want {
 		t.Errorf("Marshal() =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestGraphRefNeverReachesTheWire pins the one field of a CodeContext that is
+// internal: it tells the graph adapter which CBM project to query and means
+// nothing to a client.
+func TestGraphRefNeverReachesTheWire(t *testing.T) {
+	out, err := evidence.New(fullContext)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	got, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if bytes.Contains(got, []byte(fullContext.GraphRef)) {
+		t.Fatalf("Marshal() leaked graph_ref: %s", got)
+	}
+
+	var payload struct {
+		Context map[string]string `json:"context"`
+	}
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	want := []string{"branch", "id", "repository", "revision"}
+	if diff := slices.Sorted(maps.Keys(payload.Context)); !slices.Equal(diff, want) {
+		t.Errorf("context keys = %v, want %v", diff, want)
 	}
 }
 
@@ -69,13 +105,16 @@ func TestZeroOutputCannotMarshalAsSuccess(t *testing.T) {
 }
 
 func TestNewRejectsIncompleteContext(t *testing.T) {
-	tests := map[string]evidence.Context{
+	tests := map[string]vacctx.CodeContext{
 		"empty":            {},
 		"missing id":       {Repository: "example/backend", Branch: "release/2.x", Revision: "94cb821"},
 		"missing repo":     {ID: "app-v2", Branch: "release/2.x", Revision: "94cb821"},
 		"missing branch":   {ID: "app-v2", Repository: "example/backend", Revision: "94cb821"},
 		"missing revision": {ID: "app-v2", Repository: "example/backend", Branch: "release/2.x"},
 		"blank revision":   {ID: "app-v2", Repository: "example/backend", Branch: "release/2.x", Revision: "  "},
+		// A graph_ref is not part of the wire contract, so it is neither
+		// required nor a substitute for the fields that are.
+		"only graph ref": {GraphRef: "backend-v2"},
 	}
 
 	for name, codeCtx := range tests {

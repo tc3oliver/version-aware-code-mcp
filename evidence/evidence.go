@@ -10,6 +10,10 @@
 // package makes it unrepresentable: [Output] has no exported fields, [New] is
 // the only way to build one, and [Output.MarshalJSON] refuses to emit an
 // output whose context is incomplete.
+//
+// An output is scoped by a [vacctx.CodeContext], of which only the four fields
+// above reach the client: GraphRef is the CBM project backing the context and
+// stays internal.
 package evidence
 
 import (
@@ -17,24 +21,27 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
 // ErrIncompleteContext reports that an output is not scoped to a full version
 // context and therefore cannot be emitted as a successful result.
 var ErrIncompleteContext = errors.New("evidence: incomplete context")
 
-// Context is the version scope every successful output is bound to. It mirrors
-// the id/repository/branch/revision subset of the CodeContext that the config
-// package resolves; only these four fields are part of the wire contract.
-type Context struct {
+// wireContext is the only shape of a context a client ever sees. It exists so
+// that adding a field to [vacctx.CodeContext] cannot leak it into tool output.
+type wireContext struct {
 	ID         string `json:"id"`
 	Repository string `json:"repository"`
 	Branch     string `json:"branch"`
 	Revision   string `json:"revision"`
 }
 
-// Validate reports whether c is complete enough to scope a successful output.
-func (c Context) Validate() error {
+// validate reports whether c is complete enough to scope a successful output.
+// Only the four fields on the wire are required: an output does not carry the
+// graph reference, so it does not need one.
+func validate(c vacctx.CodeContext) error {
 	for _, field := range []struct{ name, value string }{
 		{"id", c.ID},
 		{"repository", c.Repository},
@@ -74,15 +81,15 @@ func At(path string, start, end int, snippet string) Evidence {
 // is the only way around that, and marshalling it fails with
 // [ErrIncompleteContext].
 type Output struct {
-	codeCtx Context
+	codeCtx vacctx.CodeContext
 	items   []Evidence
 	result  any
 }
 
 // New builds a successful output scoped to c and backed by ev. It fails when c
 // is missing any part of the version context.
-func New(c Context, ev ...Evidence) (Output, error) {
-	if err := c.Validate(); err != nil {
+func New(c vacctx.CodeContext, ev ...Evidence) (Output, error) {
+	if err := validate(c); err != nil {
 		return Output{}, err
 	}
 	return Output{codeCtx: c, items: ev}, nil
@@ -99,7 +106,7 @@ func (o Output) WithResult(data any) Output {
 // MarshalJSON implements [json.Marshaler]. context and evidence always win over
 // payload fields of the same name, and evidence is emitted as [] when empty.
 func (o Output) MarshalJSON() ([]byte, error) {
-	if err := o.codeCtx.Validate(); err != nil {
+	if err := validate(o.codeCtx); err != nil {
 		return nil, err
 	}
 
@@ -114,7 +121,12 @@ func (o Output) MarshalJSON() ([]byte, error) {
 		}
 	}
 
-	codeCtx, err := json.Marshal(o.codeCtx)
+	codeCtx, err := json.Marshal(wireContext{
+		ID:         o.codeCtx.ID,
+		Repository: o.codeCtx.Repository,
+		Branch:     o.codeCtx.Branch,
+		Revision:   o.codeCtx.Revision,
+	})
 	if err != nil {
 		return nil, err
 	}
