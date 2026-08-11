@@ -39,6 +39,31 @@ docker/         Docker Compose setup
 Exported packages live in the root package hierarchy; implementation that must
 not be imported from outside this module goes under `internal/`.
 
+## Versioned demo repository
+
+`testdata/versioned-demo-repo/` is the fixture the version-correctness checks
+run against: a git repository with three branches whose `Process()` calls a
+different handler per release.
+
+| Branch | `Process()` calls |
+| --- | --- |
+| `main` | `LegacyHandler()` |
+| `release/v1` | `LegacyHandler()` |
+| `release/v2` | `NewHandler()` |
+
+It is generated, never committed — a nested `.git` directory cannot be tracked
+by this repository, so the path is in `.gitignore`:
+
+```bash
+./testdata/gen-versioned-demo-repo.sh
+```
+
+The script rebuilds the fixture from scratch on every run and pins the commit
+identity and dates, so repeated runs produce the same commit hashes and an
+already indexed fixture stays valid. Go tests reach it through
+`internal/demorepo`, which generates it on demand and resolves each branch's
+revision with `git rev-parse`; never hard-code a commit hash.
+
 ## Pull requests
 
 - Keep a pull request to one reviewable change.
