@@ -26,8 +26,19 @@ const DefaultAddress = "127.0.0.1:8080"
 
 // New returns the vacmcp MCP server with no tools registered, identifying
 // itself to clients as vacmcp at the given version.
+//
+// The empty ServerCapabilities is not a no-op: left nil, the SDK advertises
+// `logging` by default "for historical reasons", and vacmcp never sends a log
+// notification, so that is a capability it does not have. Claiming it breaks
+// real clients — MCP Inspector 2.1.0 sets a log level on every server that
+// advertises `logging`, and 2026-07-28 removed `logging/setLevel` (SEP-2577),
+// so the client's own guard fails the connection before a single tool can be
+// called. The tools capability is still inferred from the registered tools.
 func New(version string) *mcp.Server {
-	return mcp.NewServer(&mcp.Implementation{Name: "vacmcp", Version: version}, nil)
+	return mcp.NewServer(
+		&mcp.Implementation{Name: "vacmcp", Version: version},
+		&mcp.ServerOptions{Capabilities: &mcp.ServerCapabilities{}},
+	)
 }
 
 // ServeStdio serves srv over STDIO, speaking newline-delimited JSON-RPC on

@@ -101,6 +101,52 @@ codebase-memory-mcp cli trace_path --project vacmcp-demo-v2 \
 	--function-name Process --direction outbound --depth 3
 ```
 
+## CI pipeline
+
+`.github/workflows/pr.yml` runs on every pull request. It builds the fixture
+first, then runs, in order:
+
+| Step | Command |
+| --- | --- |
+| `go fmt` | `gofmt -l .`, non-empty output fails |
+| `go vet` | `make vet` |
+| staticcheck | `make lint` (golangci-lint, staticcheck enabled) |
+| unit test | `go test -v` on everything but `integration/` |
+| race test | `go test -race` on the same packages |
+| integration test | `go test -v ./integration/...` |
+| MCP conformance | `.github/mcp-conformance.sh` |
+| `govulncheck` | `govulncheck ./...` |
+| license check | `.github/license-check.sh` |
+| build | `make build` |
+
+Every step is a hard gate: none carries `continue-on-error` or `if: always()`,
+so the job stops at the first failure.
+
+The two test steps also run `.github/assert-no-skips.sh` over their output. A
+test that skips is a test that verified nothing, and every skip here means a
+missing engine or an unbuilt fixture — on an unprepared checkout `go test ./...`
+reports ten skips and still exits 0. CI treats that as a failure.
+
+Zoekt and codebase-memory-mcp are pinned to exact versions in the workflow's
+`env:` block, and the CBM archive is checked against the SHA-256 recorded there
+as well as against its release's `checksums.txt`. Do not replace either with a
+floating version.
+
+The three scripts run outside CI too, against a fixture prepared as above:
+
+```bash
+./.github/mcp-conformance.sh   # MCP Inspector against the built binary
+./.github/license-check.sh     # THIRD_PARTY_NOTICES.md vs. the linked modules
+```
+
+`license-check.sh` compares the table in `THIRD_PARTY_NOTICES.md` against
+`go list -deps ./cmd/vacmcp`, so adding, removing or upgrading a dependency
+that reaches the binary means updating that table in the same pull request.
+
+`mcp-conformance.sh` drives the built binary with the MCP Inspector CLI: it
+asserts the session negotiated protocol `2026-07-28` through `server/discover`,
+and invokes all four tools for real.
+
 ## Pull requests
 
 - Keep a pull request to one reviewable change.

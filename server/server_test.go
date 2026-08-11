@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -82,6 +84,19 @@ func assertDiscoverable(t *testing.T, session *mcp.ClientSession) {
 	// handshake the client falls back to negotiates 2025-11-25 at best.
 	if res.ProtocolVersion != "2026-07-28" {
 		t.Errorf("protocol version = %q, want 2026-07-28", res.ProtocolVersion)
+	}
+	// vacmcp sends no log notifications, so advertising `logging` would be a
+	// capability it does not have — and a costly one: a client that sets a log
+	// level on every server that advertises it (MCP Inspector does) cannot
+	// connect at all, because 2026-07-28 removed logging/setLevel. Checked on
+	// the marshalled capabilities rather than the typed field, because that is
+	// the form a client reads and the field is deprecated with the feature.
+	capabilities, err := json.Marshal(res.Capabilities)
+	if err != nil {
+		t.Fatalf("marshalling the advertised capabilities: %v", err)
+	}
+	if bytes.Contains(capabilities, []byte(`"logging"`)) {
+		t.Errorf("capabilities %s advertise logging, which vacmcp does not implement", capabilities)
 	}
 
 	tools, err := session.ListTools(t.Context(), nil)
