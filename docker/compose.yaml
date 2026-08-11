@@ -1,0 +1,111 @@
+# The three services of doc-1 §12, wired up so `vacmcp doctor` passes with
+# nothing installed on the host but Docker.
+#
+#   docker compose -f docker/compose.yaml up -d
+#   docker compose -f docker/compose.yaml exec vacmcp \
+#           vacmcp doctor --config /etc/vacmcp/config.yaml
+#   docker compose -f docker/compose.yaml down -v
+#
+# The stack serves the demo repository baked into the images: three branches
+# whose Process() calls a different handler, which is what makes the version
+# isolation visible. Point it at your own repository by mounting a clone into
+# the vacmcp and cbm containers and replacing the repositories and contexts
+# blocks of the configuration.
+#
+# Both published ports are bound to 127.0.0.1. This server is local-first: it
+# reads your source, so nothing here listens on an address other machines can
+# reach unless you say so.
+#
+# Where each artifact comes from, and why:
+#
+#   the repository   built into the images. It is a generated fixture, and one
+#                    build stage is copied into both runtime images, so every
+#                    container holds the same commits — no shared writable
+#                    volume, and no ordering needed to populate one.
+#   the Zoekt index  a volume owned by the zoekt service. Nothing else reads it;
+#                    vacmcp queries Zoekt over HTTP.
+#   the CBM graphs   a volume the cbm service writes and vacmcp reads. vacmcp
+#                    drives codebase-memory-mcp as a subprocess of its own
+#                    container, so the graphs have to be on that container's
+#                    filesystem, and a volume is how another service can put
+#                    them there. That is also why cbm builds the graphs and
+#                    exits instead of listening on a port: in this architecture
+#                    CBM is a binary vacmcp runs, not a service it calls.
+
+name: vacmcp
+
+services:
+  zoekt:
+    image: vacmcp/zoekt:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: zoekt
+    # One index holds every branch, and a query picks its version with branch:.
+    # Indexing is incremental, so a restart re-reads the repository and finds
+    # nothing to do.
+    command:
+      - sh
+      - -c
+      - |
+        zoekt-git-index -index /data/zoekt-index \
+                -branches main,release/v1,release/v2 /srv/versioned-demo-repo
+        exec zoekt-webserver -index /data/zoekt-index -listen 0.0.0.0:6070 -rpc
+    volumes:
+      - zoekt-index:/data/zoekt-index
+    ports:
+      - "127.0.0.1:6070:6070"
+    # The gate is for vacmcp: a search against a Zoekt that is still indexing
+    # answers with no matches rather than an error, which reads as a wrong
+    # answer instead of a missing service.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:6070/"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  cbm:
+    # The vacmcp image, built by the vacmcp service below and named here rather
+    # than built a second time: the container that answers trace_calls needs the
+    # CBM binary just as much as the one that builds the graphs, so there is one
+    # image and two commands.
+    image: vacmcp/vacmcp:dev
+    command: ["cbm-index.sh"]
+    # A build step, not a daemon: it indexes both releases and exits 0. A later
+    # `up` finds the graphs already in the store and does nothing; `down -v`
+    # empties the store and the next `up` rebuilds them.
+    restart: "no"
+    volumes:
+      - cbm-graphs:/home/vacmcp/.cache/codebase-memory-mcp
+
+  vacmcp:
+    image: vacmcp/vacmcp:dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: vacmcp
+    depends_on:
+      zoekt:
+        condition: service_healthy
+      cbm:
+        condition: service_completed_successfully
+    # Listening on 0.0.0.0 inside the container is what makes the loopback port
+    # mapping above reachable; the container's network is not the host's.
+    #
+    # No resident CBM daemon is started here, though doctor will suggest one.
+    # CBM coordinates its processes through the graph store this container
+    # shares with cbm, and a daemon holding that store made the cbm service fail
+    # with "a pre-coordination or unverified CBM generation is active" the next
+    # time it ran. Every trace_calls pays a cold start instead, which is slow
+    # rather than broken.
+    command:
+      ["vacmcp", "serve", "--config", "/etc/vacmcp/config.yaml", "--address", "0.0.0.0:8080"]
+    volumes:
+      - cbm-graphs:/home/vacmcp/.cache/codebase-memory-mcp
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  zoekt-index:
+  cbm-graphs:
