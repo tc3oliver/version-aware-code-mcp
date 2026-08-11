@@ -91,6 +91,16 @@ func serve(args []string) error {
 		cfg = loaded
 	}
 
+	// The flag's default value is indistinguishable from the user typing it, so
+	// ask the flag set what was actually set.
+	explicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "address" {
+			explicit = true
+		}
+	})
+	listen := listenAddress(*address, explicit, cfg)
+
 	srv := server.New(version)
 	addTools(srv, cfg)
 
@@ -99,7 +109,18 @@ func serve(args []string) error {
 	if *stdio {
 		return server.ServeStdio(context.Background(), srv)
 	}
-	return server.ServeHTTP(srv, *address)
+	return server.ServeHTTP(srv, listen)
+}
+
+// listenAddress resolves the Streamable HTTP listen address the way serve does,
+// so the precedence can be tested without binding a port: an explicitly given
+// --address wins, then the configuration file's server.address, then the
+// built-in default.
+func listenAddress(flagValue string, explicit bool, cfg *config.Config) string {
+	if explicit || cfg.Server.Address == "" {
+		return flagValue
+	}
+	return cfg.Server.Address
 }
 
 // addTools registers the four tools of doc-1 §5 on srv, backed by cfg.
