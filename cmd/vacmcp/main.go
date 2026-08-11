@@ -3,31 +3,121 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
-	"log"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"slices"
 
+	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
 )
 
 // version is the build version of the vacmcp binary.
 const version = "0.0.0-dev"
 
+const usage = `vacmcp serves version-aware code intelligence over MCP.
+
+Usage:
+  vacmcp serve [--stdio] [--address ADDR]   run the MCP server
+  vacmcp validate --config FILE             load and check a configuration file
+  vacmcp contexts --config FILE             list the configured contexts
+  vacmcp version                            print the vacmcp version`
+
 func main() {
-	stdio := flag.Bool("stdio", false, "serve over STDIO instead of Streamable HTTP")
-	address := flag.String("address", server.DefaultAddress, "address to listen on in Streamable HTTP mode")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "vacmcp: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// run executes one subcommand and writes its output to out. Failures come back
+// as an error instead of exiting, which is what lets a test observe the exit
+// code the CLI would produce: an error here is a non-zero exit.
+func run(args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("no command given\n\n" + usage)
+	}
+
+	switch command := args[0]; command {
+	case "serve":
+		return serve(args[1:])
+	case "validate":
+		return validate(args[1:], out)
+	case "contexts":
+		return contexts(args[1:], out)
+	case "version":
+		_, err := fmt.Fprintln(out, version)
+		return err
+	default:
+		return fmt.Errorf("unknown command %q\n\n%s", command, usage)
+	}
+}
+
+// serve runs the MCP server, over Streamable HTTP unless --stdio asks for
+// STDIO. It only picks the transport; serving one is the server package's job.
+func serve(args []string) error {
+	fs := flag.NewFlagSet("vacmcp serve", flag.ExitOnError)
+	stdio := fs.Bool("stdio", false, "serve over STDIO instead of Streamable HTTP")
+	address := fs.String("address", server.DefaultAddress, "address to listen on in Streamable HTTP mode")
+	_ = fs.Parse(args)
 
 	srv := server.New(version)
 
-	// log writes to stderr, which is what keeps stdout free for the STDIO
-	// protocol stream.
-	var err error
+	// Nothing may write to stdout in STDIO mode: it carries the protocol
+	// stream. Errors go to stderr, and only after the server has stopped.
 	if *stdio {
-		err = server.ServeStdio(context.Background(), srv)
-	} else {
-		err = server.ServeHTTP(srv, *address)
+		return server.ServeStdio(context.Background(), srv)
 	}
+	return server.ServeHTTP(srv, *address)
+}
+
+// validate reports whether a configuration file loads and passes validation.
+// The error is returned as config produced it, so the caller sees the vacerr
+// code and message rather than a rephrasing of them.
+func validate(args []string, out io.Writer) error {
+	path, cfg, err := loadConfig("validate", args)
 	if err != nil {
-		log.Fatalf("vacmcp: %v", err)
+		return err
 	}
+	_, err = fmt.Fprintf(out, "%s: ok, %d contexts\n", path, len(cfg.Contexts))
+	return err
+}
+
+// contexts lists the configured contexts, one per line, sorted by ID.
+//
+// graph_ref is left out on purpose: it is the CBM project backing the context,
+// an implementation detail no consumer of a context needs.
+func contexts(args []string, out io.Writer) error {
+	_, cfg, err := loadConfig("contexts", args)
+	if err != nil {
+		return err
+	}
+	for _, id := range slices.Sorted(maps.Keys(cfg.Contexts)) {
+		codeCtx := cfg.Contexts[id]
+		if _, err := fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", codeCtx.ID, codeCtx.Repository, codeCtx.Branch, codeCtx.Revision); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loadConfig parses the flags shared by the commands that read a configuration
+// file and loads it. --config has no default: which configuration is in force
+// is not something to guess at.
+func loadConfig(command string, args []string) (string, *config.Config, error) {
+	fs := flag.NewFlagSet("vacmcp "+command, flag.ExitOnError)
+	path := fs.String("config", "", "path to the vacmcp configuration file")
+	_ = fs.Parse(args)
+
+	if *path == "" {
+		return "", nil, fmt.Errorf("%s: --config is required", command)
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return "", nil, err
+	}
+	return *path, cfg, nil
 }
