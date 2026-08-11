@@ -64,6 +64,42 @@ already indexed fixture stays valid. Go tests reach it through
 `internal/demorepo`, which generates it on demand and resolves each branch's
 revision with `git rev-parse`; never hard-code a commit hash.
 
+### Indexes and graphs
+
+Integration tests query real engines, so the fixture has to be indexed before
+they can run. That needs [Zoekt](https://github.com/sourcegraph/zoekt)
+(`zoekt-git-index` on `PATH`) and
+[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.10.1
+or newer (on `PATH`, or pointed at with `CBM_BIN`):
+
+```bash
+./testdata/prepare-fixture.sh
+```
+
+It wipes and rebuilds everything under `testdata/fixture/`, which is in
+`.gitignore` like the repository itself:
+
+| Path | What it holds |
+| --- | --- |
+| `zoekt-index/` | one index carrying `main`, `release/v1` and `release/v2` |
+| `worktrees/` | a checkout per release, the directories CBM indexes |
+| `config.yaml` | repositories and contexts naming both, with resolved revisions |
+
+Each release is indexed into its own CBM project, named after the `graph_ref`
+of its context. Two versions sharing one project would trace calls against the
+other version's graph.
+
+Tests reach the result through `demorepo.Prepared`, which skips when the
+fixture has not been built, so `make test` still passes without Zoekt and CBM
+installed. Verify the fixture directly, never through `vacmcp` — otherwise a
+broken fixture looks like a broken adapter:
+
+```bash
+zoekt -index_dir testdata/fixture/zoekt-index 'NewHandler branch:release/v2'
+codebase-memory-mcp cli trace_path --project vacmcp-demo-v2 \
+	--function-name Process --direction outbound --depth 3
+```
+
 ## Pull requests
 
 - Keep a pull request to one reviewable change.
