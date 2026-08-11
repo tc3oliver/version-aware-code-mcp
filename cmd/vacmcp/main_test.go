@@ -205,7 +205,7 @@ func TestVersionPrintsAVersion(t *testing.T) {
 }
 
 func TestUnknownCommandFails(t *testing.T) {
-	for _, args := range [][]string{{}, {"doctor"}} {
+	for _, args := range [][]string{{}, {"diagnose"}} {
 		if err := run(args, &bytes.Buffer{}); err == nil {
 			t.Errorf("run(%q) returned nil, want an error", args)
 		}

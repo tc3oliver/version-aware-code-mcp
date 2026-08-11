@@ -11,6 +11,8 @@ import (
 	"os"
 	"slices"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/cbm"
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/git"
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
@@ -30,6 +32,7 @@ Usage:
                                             run the MCP server
   vacmcp validate --config FILE             load and check a configuration file
   vacmcp contexts --config FILE             list the configured contexts
+  vacmcp doctor --config FILE               check the dependencies and contexts
   vacmcp version                            print the vacmcp version`
 
 func main() {
@@ -54,6 +57,8 @@ func run(args []string, out io.Writer) error {
 		return validate(args[1:], out)
 	case "contexts":
 		return contexts(args[1:], out)
+	case "doctor":
+		return doctor(args[1:], out)
 	case "version":
 		_, err := fmt.Fprintln(out, version)
 		return err
@@ -87,17 +92,7 @@ func serve(args []string) error {
 	}
 
 	srv := server.New(version)
-	// All four tools are registered whether or not a configuration was given.
-	// The tool surface is what the server can do, not what it happens to be
-	// configured for, and a request naming a context that does not exist
-	// already has a defined answer: the resolver returns CONTEXT_NOT_FOUND
-	// before any provider is reached. Hiding the tools instead would leave an
-	// agent unable to tell "not supported" from "not configured".
-	contexts := resolver.New(cfg)
-	tools.AddListContexts(srv, cfg.Contexts)
-	tools.AddSearchCode(srv, contexts, zoekt.New(cfg))
-	tools.AddTraceCalls(srv, contexts, cbm.New(cfg))
-	tools.AddGetCode(srv, contexts, git.New(cfg))
+	addTools(srv, cfg)
 
 	// Nothing may write to stdout in STDIO mode: it carries the protocol
 	// stream. Errors go to stderr, and only after the server has stopped.
@@ -105,6 +100,25 @@ func serve(args []string) error {
 		return server.ServeStdio(context.Background(), srv)
 	}
 	return server.ServeHTTP(srv, *address)
+}
+
+// addTools registers the four tools of doc-1 §5 on srv, backed by cfg.
+//
+// All of them are registered whether or not a configuration was given. The tool
+// surface is what the server can do, not what it happens to be configured for,
+// and a request naming a context that does not exist already has a defined
+// answer: the resolver returns CONTEXT_NOT_FOUND before any provider is
+// reached. Hiding the tools instead would leave an agent unable to tell "not
+// supported" from "not configured".
+//
+// doctor registers them too, on a server of its own, which is how it can report
+// on the MCP layer without going near a port.
+func addTools(srv *mcp.Server, cfg *config.Config) {
+	contexts := resolver.New(cfg)
+	tools.AddListContexts(srv, cfg.Contexts)
+	tools.AddSearchCode(srv, contexts, zoekt.New(cfg))
+	tools.AddTraceCalls(srv, contexts, cbm.New(cfg))
+	tools.AddGetCode(srv, contexts, git.New(cfg))
 }
 
 // validate reports whether a configuration file loads and passes validation.
