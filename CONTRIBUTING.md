@@ -15,29 +15,59 @@ make fmt     # gofmt -l -w .
 make vet     # go vet ./...
 ```
 
-Run `make lint` and `make test` before opening a pull request.
-
 ## Repository layout
 
-Packages are added as the code that belongs in them lands, so not every
-directory below exists yet.
-
 ```text
-cmd/vacmcp/     binary entry point
-server/         MCP server and transports
-context/        CodeContext type, resolver, config loading
+cmd/vacmcp/     binary entry point: serve, validate, contexts, doctor, version
+server/         MCP server construction and the STDIO and HTTP transports
+tools/          the four MCP tool handlers
 provider/       SearchProvider / GraphProvider / SourceProvider interfaces
-adapters/       provider implementations (zoekt, cbm, git)
-tools/          MCP tool handlers
-evidence/       evidence and location types
-config/         example configuration
-testdata/       test fixtures
-integration/    integration tests
-docker/         Docker Compose setup
+adapters/       the v0.1.0 implementations: zoekt, cbm, git
+resolver/       context id to CodeContext, and the fail-closed worktree check
+vacctx/         CodeContext, the version scope everything else is written against
+config/         configuration loading and validation, plus example.yaml
+evidence/       the output contract: context and evidence on every result
+vacerr/         the error model and its ten codes
+integration/    tests against real engines, including the release gate
+internal/       code that must not be imported from outside this module
+docker/         Compose stack for vacmcp, Zoekt and CBM
+testdata/       fixture generation scripts
 ```
 
 Exported packages live in the root package hierarchy; implementation that must
 not be imported from outside this module goes under `internal/`.
+
+## Layering
+
+Dependencies point one way, and the direction is what keeps version isolation
+enforceable in one place:
+
+```text
+cmd/vacmcp  ── wires the adapters to the tools; the only place that knows both
+    │
+tools/      ── resolves a context, calls a provider, returns evidence.Output
+    │
+    ├── resolver/  the only thing that turns an id into a version scope
+    ├── provider/  the three interfaces, in provider/provider.go
+    └── evidence/  builds the result; a bare answer is unrepresentable
+            │
+adapters/   ── implement provider's interfaces; cmd/vacmcp is the only
+                non-test package that imports them
+```
+
+A tool that imported `adapters/zoekt` would break that. The tools are written
+against `provider.SearchProvider`, `provider.GraphProvider` and
+`provider.SourceProvider`, so a different engine is a new package under
+`adapters/` plus one line in `cmd/vacmcp`, and no change anywhere else. Tests
+are the exception and import adapters freely — several of the tool tests run
+against a real engine, which is the point of them.
+
+Two rules hold across all of it. Every provider method takes a
+`vacctx.CodeContext` and must confine its work to it — the branch for search,
+the graph reference for the graph, the revision for source. And a successful
+result is built by `evidence.New`, which refuses a context missing any of id,
+repository, branch or revision, so a result that cannot say which version it
+came from cannot be returned.
 
 ## Versioned demo repository
 
@@ -152,6 +182,16 @@ and invokes all four tools for real.
 - Keep a pull request to one reviewable change.
 - Include tests for behavior changes.
 - Update documentation affected by the change in the same pull request.
+- Run `make fmt`, `make vet`, `make lint`, `make test` and `make build` before
+  opening it. The pull request template asks for each of them, and CI runs the
+  same checks against real engines on top.
+- Every step of the pipeline is a hard gate. A red run is something to fix, not
+  something to re-run.
+
+Commit subjects follow `type(scope): imperative summary` — `feat(tools):`,
+`fix(cmd):`, `test(integration):`, `docs:`, `chore:`. The subject says what
+changed; the body is for why, which is the part a reader a year from now cannot
+reconstruct from the diff.
 
 ## License
 
