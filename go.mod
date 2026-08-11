@@ -1,3 +1,3 @@
 module github.com/tc3oliver/version-aware-code-mcp
 
-go 1.26.5
+go 1.26
