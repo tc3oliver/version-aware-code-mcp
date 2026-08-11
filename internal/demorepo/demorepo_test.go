@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -91,24 +92,49 @@ func TestRevisionResolvesADistinctCommitPerBranch(t *testing.T) {
 // TestRegeneratingKeepsTheRevisions is the idempotency check: the generator
 // wipes and rebuilds the fixture, and a rebuild must land on the same commits
 // so an already indexed fixture stays valid.
+//
+// The rebuild runs on a copy of the generator in a temporary root instead of on
+// the shared fixture. `go test ./...` runs the packages in parallel, and while
+// this one runs most of the others are reading testdata/versioned-demo-repo
+// through git, Zoekt and CBM; deleting it under them failed unrelated packages
+// with REVISION_NOT_FOUND on a revision that does exist. The script pins the
+// commit identity and the dates and rebuilds from scratch wherever it is run,
+// so where it runs cannot change what it produces — which is the claim under
+// test.
 func TestRegeneratingKeepsTheRevisions(t *testing.T) {
 	repo := demorepo.Generate(t)
+	rebuilt := regenerateElsewhere(t)
 
-	before := map[string]string{}
 	for _, branch := range []string{demorepo.Main, demorepo.V1, demorepo.V2} {
-		before[branch] = demorepo.Revision(t, repo, branch)
-	}
-
-	if err := os.RemoveAll(repo); err != nil {
-		t.Fatalf("remove fixture: %v", err)
-	}
-	if again := demorepo.Generate(t); again != repo {
-		t.Fatalf("path = %q, want %q", again, repo)
-	}
-
-	for branch, rev := range before {
-		if got := demorepo.Revision(t, repo, branch); got != rev {
-			t.Fatalf("%s revision = %s after regeneration, want %s", branch, got, rev)
+		want := demorepo.Revision(t, repo, branch)
+		if got := demorepo.Revision(t, rebuilt, branch); got != want {
+			t.Fatalf("%s revision = %s after regeneration, want %s", branch, got, want)
 		}
 	}
+}
+
+// regenerateElsewhere runs a copy of the generator in a temporary root and
+// returns the repository it produced there.
+func regenerateElsewhere(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+
+	// The generator finds everything from its own path, so a copy in the same
+	// place relative to a different root builds that root's fixture.
+	src, err := os.ReadFile(filepath.Join("..", "..", "testdata", "gen-versioned-demo-repo.sh"))
+	if err != nil {
+		t.Fatalf("read generator: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "testdata"), 0o750); err != nil {
+		t.Fatalf("mkdir testdata: %v", err)
+	}
+	script := filepath.Join(root, "testdata", "gen-versioned-demo-repo.sh")
+	if err := os.WriteFile(script, src, 0o700); err != nil {
+		t.Fatalf("write generator: %v", err)
+	}
+
+	if out, err := exec.Command(script).CombinedOutput(); err != nil {
+		t.Fatalf("generator failed: %v\n%s", err, out)
+	}
+	return filepath.Join(root, "testdata", "versioned-demo-repo")
 }
