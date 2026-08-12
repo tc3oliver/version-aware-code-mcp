@@ -15,6 +15,7 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
+	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
 // indexer is the Zoekt indexing binary. It is invoked rather than imported:
@@ -115,10 +116,8 @@ func indexRepository(ctx context.Context, s *store.Store, repository string) err
 	return nil
 }
 
-// dropShards deletes the shards of one repository, for the case a rebuild
-// cannot cover: the last context is gone, and an index of no branches is not
-// something Zoekt can be asked to build. Leaving the shard would leave the
-// removed context's source in the served index.
+// repositoryShards returns the paths of the search index files of one
+// repository.
 //
 // Zoekt names both the shard and the repository inside it after the directory
 // it indexed, which is the clone, which is named after the repository — the
@@ -126,21 +125,80 @@ func indexRepository(ctx context.Context, s *store.Store, repository string) err
 // assumption made only here. The match is anchored around the version and shard
 // numbers rather than being a prefix glob: "app_v*" would also select the
 // shards of a repository called app_v1.
-func dropShards(indexDir, repository string) error {
+func repositoryShards(indexDir, repository string) ([]string, error) {
 	shard := regexp.MustCompile(`^` + regexp.QuoteMeta(repository) + `_v[0-9]+\.[0-9]+\.zoekt$`)
 	entries, err := os.ReadDir(indexDir)
 	if err != nil {
-		return fmt.Errorf("cannot list the search index at %s: %w", indexDir, err)
+		return nil, fmt.Errorf("cannot list the search index at %s: %w", indexDir, err)
 	}
+	var paths []string
 	for _, entry := range entries {
 		if entry.IsDir() || !shard.MatchString(entry.Name()) {
 			continue
 		}
-		if err := os.Remove(filepath.Join(indexDir, entry.Name())); err != nil {
+		paths = append(paths, filepath.Join(indexDir, entry.Name()))
+	}
+	return paths, nil
+}
+
+// dropShards deletes the shards of one repository, for the case a rebuild
+// cannot cover: the last context is gone, and an index of no branches is not
+// something Zoekt can be asked to build. Leaving the shard would leave the
+// removed context's source in the served index.
+func dropShards(indexDir, repository string) error {
+	shards, err := repositoryShards(indexDir, repository)
+	if err != nil {
+		return err
+	}
+	for _, path := range shards {
+		if err := os.Remove(path); err != nil {
 			return fmt.Errorf("cannot delete the search index of repository %q: %w", repository, err)
 		}
 	}
 	return nil
+}
+
+// verifySearchRef checks that the source a context is searched through is
+// there: the ref its record names, on the commit it pins, and a shard of its
+// repository in the index.
+//
+// Both halves are needed and neither is the other. The ref is what the index is
+// built from and what the query plane filters on, so a ref that is missing or
+// on another commit is a context that would be searched against the wrong
+// source; the shard is whether any of it was ever indexed, or has been deleted
+// since. A ref on the wrong commit is SOURCE_MISMATCH like every other
+// disagreement about a revision, and everything else is the same
+// SEARCH_PROVIDER_UNAVAILABLE a search that cannot be served produces.
+//
+// It reads git and the index directory rather than asking a running
+// zoekt-webserver: a context is created and verified on the management plane,
+// where no server need be running yet, and requiring one would make a context
+// created before the server unable to ever become READY.
+func verifySearchRef(ctx context.Context, repoDir, indexDir string, c store.Context) error {
+	found, err := gitOutput(ctx, "-C", repoDir, "rev-parse", "--verify", "--end-of-options", "refs/heads/"+c.Branch)
+	if err != nil {
+		return searchUnavailable(c, fmt.Sprintf("its search ref %q is not in the clone of repository %q: %v", c.Branch, c.Repository, err))
+	}
+	if found != c.Revision {
+		return vacerr.NewSourceMismatch(c.Revision, found, map[string]any{"context": c.ID, "repository": c.Repository, "branch": c.Branch})
+	}
+
+	shards, err := repositoryShards(indexDir, c.Repository)
+	if err != nil {
+		return err
+	}
+	if len(shards) == 0 {
+		return searchUnavailable(c, fmt.Sprintf("repository %q has no search index in %s", c.Repository, indexDir))
+	}
+	return nil
+}
+
+func searchUnavailable(c store.Context, reason string) error {
+	return vacerr.New(
+		vacerr.SearchProviderUnavailable,
+		fmt.Sprintf("context %q: %s", c.ID, reason),
+		map[string]any{"context": c.ID, "repository": c.Repository},
+	)
 }
 
 // searchRefIndexed reports whether the Zoekt server at zoektURL has c's search

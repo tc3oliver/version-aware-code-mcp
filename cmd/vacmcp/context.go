@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,16 +16,104 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
-// contextCreating is the state a context is recorded in when it is created.
+// The states a context record carries, in the order decision-4 gives them.
 //
-// decision-4 defines the whole machine — CREATING, RESOLVING, PREPARING_SOURCE,
-// INDEXING_SEARCH, INDEXING_GRAPH, VERIFYING, READY, and FAILED for any step
-// that fails — and driving a context along it is the readiness lifecycle's job,
-// not this command's. Creating a context resolves its revision and writes it
-// down; the search index and the graph behind it do not exist yet. So this is
-// the only state written here: a record that claimed READY would be one the
-// query plane serves with nothing behind it.
-const contextCreating = "CREATING"
+// Each one names what is happening to the context, so a record read while a
+// create is running — or left behind by one that was killed — says which stage
+// it is in. READY is the only state the query plane serves and the only one a
+// context reaches with all of its artifacts built and checked; FAILED is where
+// a context that failed any stage stops.
+const (
+	contextCreating        = "CREATING"
+	contextResolving       = "RESOLVING"
+	contextPreparingSource = "PREPARING_SOURCE"
+	contextIndexingSearch  = "INDEXING_SEARCH"
+	contextIndexingGraph   = "INDEXING_GRAPH"
+	contextVerifying       = "VERIFYING"
+	contextReady           = "READY"
+	contextFailed          = "FAILED"
+)
+
+// contextLifecycle is the order a context goes through: every state's only
+// successor is the next element. READY is last, and FAILED is deliberately not
+// in it at all — the two terminal states, which nothing follows.
+var contextLifecycle = []string{
+	contextCreating,
+	contextResolving,
+	contextPreparingSource,
+	contextIndexingSearch,
+	contextIndexingGraph,
+	contextVerifying,
+	contextReady,
+}
+
+// advances reports whether a context may move from one state to the other.
+//
+// The machine only goes forwards, one state at a time, and out of READY or
+// FAILED it does not go at all: a context that is being served must not be
+// walked back into a state where its artifacts are being rebuilt under it, and
+// re-running a failed create is `context retry` creating the lifecycle again
+// rather than a record quietly reverting.
+func advances(from, to string) bool {
+	at := slices.Index(contextLifecycle, from)
+	if at < 0 || from == contextReady {
+		return false
+	}
+	// Any stage can fail; otherwise the next state is the only move.
+	return to == contextFailed || to == contextLifecycle[at+1]
+}
+
+// advance moves c to the next state and writes it down before the stage it
+// names runs.
+//
+// Persisting first is what makes the record answer where a create is, and where
+// one that was killed got to: a state written only after a stage succeeded
+// would leave every interrupted context looking like it had never started.
+func advance(s *store.Store, c *store.Context, next string) error {
+	if !advances(c.State, next) {
+		return fmt.Errorf("context %q: cannot move from %s to %s", c.ID, c.State, next)
+	}
+	c.State = next
+	return s.PutContext(*c)
+}
+
+// fail records that the context stopped in the stage it is in and returns the
+// cause it stopped for.
+//
+// The record is what keeps a failure observable — a context nothing built is
+// still listed, still inspectable and still removable, and is one `context
+// retry` can later take over — while the error is still what the command exits
+// with. A store that cannot even be written is reported alongside the cause
+// rather than instead of it, since the cause is what the user has to read.
+func fail(s *store.Store, c *store.Context, cause error) error {
+	if err := advance(s, c, contextFailed); err != nil {
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
+// readyContext returns the context id only if it is READY.
+//
+// This is the whole of what the query plane may read: a context that is being
+// built, or one that failed, is not half a context to be served with whatever
+// of it exists — decision-4 makes it indistinguishable from a context that is
+// not there, down to the error. So a non-READY id comes back as exactly the
+// [vacerr.ContextNotFound] an unknown one does, with no new code and nothing in
+// it that says the difference.
+func readyContext(s *store.Store, id string) (store.Context, error) {
+	c, err := s.Context(id)
+	if err != nil {
+		return store.Context{}, err
+	}
+	if c.State != contextReady {
+		return store.Context{}, vacerr.New(
+			vacerr.ContextNotFound,
+			fmt.Sprintf("store: context %q is not managed in %s", id, s.Root()),
+			map[string]any{"context": id},
+		)
+	}
+	return c, nil
+}
 
 const (
 	// fullSHA is the length of the only kind of revision a record may carry. A
@@ -76,11 +165,20 @@ func contextCommand(args []string, out io.Writer) error {
 	}
 }
 
-// contextCreate resolves a ref to a commit and records a context pinned to it.
+// contextCreate resolves a ref to a commit, records a context pinned to it and
+// drives it to READY.
 //
 // The ref is read exactly once, here. What lands in the record is the full
 // commit SHA it resolved to, so the branch it came from can move, be rewritten
 // or be deleted afterwards without this context changing.
+//
+// Resolution is the RESOLVING stage, and it runs before the record exists
+// because it is what the record is made of: the pinned revision and the search
+// and graph names derived from it. A ref that does not resolve therefore
+// records nothing at all, which is what leaves the same command runnable again
+// with the ref the user meant — a FAILED record carrying no revision would only
+// be one they had to remove first, and one nothing could ever retry, since the
+// ref that failed is not part of a context.
 //
 // Creating over an existing context ID is refused whatever state it is in. That
 // is the same rule `repo add` follows, and here it is what makes immutability a
@@ -141,7 +239,8 @@ func contextCreate(args []string, out io.Writer) error {
 		return err
 	}
 
-	revision, err := resolveRevision(context.Background(), repoDir, *repository, *ref)
+	ctx := context.Background()
+	revision, err := resolveRevision(ctx, repoDir, *repository, *ref)
 	if err != nil {
 		return err
 	}
@@ -153,27 +252,137 @@ func contextCreate(args []string, out io.Writer) error {
 		GraphRef:   graphRef(*repository, id, revision),
 		State:      contextCreating,
 	}
+	// The record first, the artifacts after: a checkout, a graph or a search ref
+	// that outlived a failed create would be artifacts no record names and no
+	// command can remove. This way a create that stops half way leaves a context
+	// that is still managed, still listed and still removable, in a state that
+	// is not one the query plane serves.
 	if err := s.PutContext(record); err != nil {
 		return err
 	}
-	// The record first, the artifacts after: a checkout, a graph or a search ref
-	// that outlived a failed create would be artifacts no record names and no
-	// command can remove. This way a create that fails half way leaves a
-	// context that is still managed, still listed and still removable, in
-	// CREATING, which is not a state the query plane serves.
-	if err := prepareSource(context.Background(), repoDir, worktree, record); err != nil {
+
+	// RESOLVING is entered and left in the same breath: the revision was
+	// resolved above, before there was a record to write it into. The state
+	// exists all the same, because the order of the machine is what makes a
+	// stage impossible to skip.
+	if err := advance(s, &record, contextResolving); err != nil {
 		return err
 	}
-	// Indexing is driven by the records: it creates the search ref of every
-	// context the repository has, this one now among them, and indexes them
-	// together. A failure here fails the command for the same reason as above —
-	// a context whose source is not in the index is not partially usable, it is
-	// a context the query plane would search and find nothing in.
-	if err := indexRepository(context.Background(), s, record.Repository); err != nil {
+
+	// One stage at a time, each one written down before it runs and none of them
+	// optional: the whole of what a context is made of is built here, in this
+	// order, and a context that fails any of it is FAILED rather than a context
+	// with some of its artifacts that the query plane would serve anyway.
+	for _, stage := range []struct {
+		state string
+		run   func() error
+	}{
+		{contextPreparingSource, func() error { return prepareSource(ctx, repoDir, worktree, record) }},
+		// Indexing is driven by the records: it creates the search ref of every
+		// context the repository has, this one now among them, and indexes them
+		// together.
+		{contextIndexingSearch, func() error { return indexRepository(ctx, s, record.Repository) }},
+		{contextIndexingGraph, func() error { return indexGraph(ctx, worktree, record) }},
+		{contextVerifying, func() error { return verifyContext(ctx, s, record) }},
+	} {
+		if err := advance(s, &record, stage.state); err != nil {
+			return err
+		}
+		if err := stage.run(); err != nil {
+			return fail(s, &record, err)
+		}
+	}
+	if err := advance(s, &record, contextReady); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(out, "%s\t%s\t%s\n", record.ID, record.State, record.Revision)
 	return err
+}
+
+// verifyContext is decision-4's verification: the six checks a context has to
+// pass to be READY, and the same six `context verify` re-runs afterwards.
+//
+// It is one function because it is one question — is every artifact this record
+// names really there and really this revision — and asking it in two places
+// with two implementations is how the answers drift apart. Nothing here writes:
+// verification reports what it found, and a record that disagrees with its
+// artifacts is a failure rather than something to quietly adopt.
+//
+// Every check asks the artifact itself. A create that once succeeded is not
+// evidence: a clone can be replaced, a worktree checked out by hand, a shard
+// deleted and a graph dropped by anything else driving the same CBM store.
+func verifyContext(ctx context.Context, s *store.Store, c store.Context) error {
+	repoDir, err := s.RepositoryDir(c.Repository)
+	if err != nil {
+		return err
+	}
+	// The pinned revision is still a commit this repository has, and still the
+	// same one. Re-resolving it is what catches a clone that was deleted or
+	// replaced under a context.
+	found, err := gitOutput(ctx, "-C", repoDir, "rev-parse", "--verify", "--end-of-options", c.Revision+"^{commit}")
+	if err != nil {
+		return vacerr.New(
+			vacerr.RevisionNotFound,
+			fmt.Sprintf("context %q pins revision %s, which repository %q cannot resolve: %v", c.ID, c.Revision, c.Repository, err),
+			map[string]any{"context": c.ID, "repository": c.Repository, "revision": c.Revision},
+		)
+	}
+	if found != c.Revision {
+		return vacerr.NewSourceMismatch(c.Revision, found, map[string]any{"context": c.ID, "repository": c.Repository})
+	}
+
+	// The checkout is on the pinned commit. Asked here, after the indexing,
+	// this is also the check that the source did not move while it was being
+	// indexed: the same worktree answered the same commit on both sides of it,
+	// so the index and the graph were built from the revision the record pins.
+	worktree, err := s.WorktreeDir(c.Repository, c.ID)
+	if err != nil {
+		return err
+	}
+	if err := verifySource(ctx, worktree, c); err != nil {
+		return err
+	}
+	if err := verifySearchRef(ctx, repoDir, s.ZoektDir(), c); err != nil {
+		return err
+	}
+	if err := verifyGraph(ctx, c); err != nil {
+		return err
+	}
+	return verifyIdentity(c)
+}
+
+// verifyIdentity checks that the four fields the query plane resolves a context
+// into — repository, branch, revision, graph_ref — are the ones this context's
+// own name and revision generate.
+//
+// They are generated on create and never written again, so this can only fail
+// on a record that was edited by hand or written by another version. It is
+// checked anyway, and fails closed: a search ref or a graph carrying a
+// different revision than the one the record pins is the wrong-version answer
+// this server exists to prevent, and it would be served silently.
+func verifyIdentity(c store.Context) error {
+	if len(c.Revision) != fullSHA {
+		return vacerr.New(
+			vacerr.SourceMismatch,
+			fmt.Sprintf("context %q pins %q, which is not a full commit SHA", c.ID, c.Revision),
+			map[string]any{"context": c.ID, "repository": c.Repository, "declared_revision": c.Revision},
+		)
+	}
+	if branch := searchRef(c.ID, c.Revision); c.Branch != branch {
+		return vacerr.New(
+			vacerr.SourceMismatch,
+			fmt.Sprintf("context %q is searched on branch %q, but its name and revision %s generate %q: the record names another context's source", c.ID, c.Branch, c.Revision, branch),
+			map[string]any{"context": c.ID, "repository": c.Repository, "declared_revision": c.Revision, "branch": c.Branch},
+		)
+	}
+	if graph := graphRef(c.Repository, c.ID, c.Revision); c.GraphRef != graph {
+		return vacerr.New(
+			vacerr.SourceMismatch,
+			fmt.Sprintf("context %q is traced in graph %q, but its repository, name and revision %s generate %q: the record names another context's graph", c.ID, c.GraphRef, c.Revision, graph),
+			map[string]any{"context": c.ID, "repository": c.Repository, "declared_revision": c.Revision, "graph_ref": c.GraphRef},
+		)
+	}
+	return nil
 }
 
 // contextList prints one line per managed context, ordered by ID.
@@ -243,23 +452,15 @@ func contextStatus(args []string, out io.Writer) error {
 	return nil
 }
 
-// contextVerify re-checks a context and writes nothing.
+// contextVerify re-runs the checks that made a context READY and writes
+// nothing.
 //
-// It re-resolves the pinned revision in the repository's object database and
-// requires the same commit back, which is what catches a clone that was deleted
-// or replaced under a context. Not writing is the point: a verification that
-// could update a record would be a way for a pinned revision to move, so it
-// reports a disagreement as SOURCE_MISMATCH and stops rather than adopting what
-// it found.
-//
-// Then the artifacts `context create` built: the worktree is on the pinned
-// commit, and CBM still holds the graph the record names. Both are asked of the
-// thing itself rather than assumed from a create that once succeeded — a
-// worktree can be checked out elsewhere by hand and a graph can be deleted by
-// anything else driving the same CBM store.
-//
-// This is deliberately a part of decision-4's verification, not all of it: the
-// search ref in the index belongs to the step that creates it.
+// It is the same [verifyContext] the create ran, so what `context verify` says
+// about a context is what READY meant when it was granted, asked again of the
+// artifacts as they are now. Not writing is the point: a verification that
+// could update a record would be a way for a pinned revision to move, and a
+// verification that could grant READY would be a way around the lifecycle. It
+// reports what it found and stops.
 func contextVerify(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vacmcp context verify", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "vacmcp data directory (default ~/.vacmcp)")
@@ -279,31 +480,7 @@ func contextVerify(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	repoDir, err := s.RepositoryDir(c.Repository)
-	if err != nil {
-		return err
-	}
-
-	found, err := gitOutput(context.Background(), "-C", repoDir, "rev-parse", "--verify", "--end-of-options", c.Revision+"^{commit}")
-	if err != nil {
-		return vacerr.New(
-			vacerr.RevisionNotFound,
-			fmt.Sprintf("context verify: context %q pins revision %s, which repository %q cannot resolve: %v", c.ID, c.Revision, c.Repository, err),
-			map[string]any{"context": c.ID, "repository": c.Repository, "revision": c.Revision},
-		)
-	}
-	if found != c.Revision {
-		return vacerr.NewSourceMismatch(c.Revision, found, map[string]any{"context": c.ID, "repository": c.Repository})
-	}
-
-	worktree, err := s.WorktreeDir(c.Repository, c.ID)
-	if err != nil {
-		return err
-	}
-	if err := verifySource(context.Background(), worktree, c); err != nil {
-		return err
-	}
-	if err := verifyGraph(context.Background(), c); err != nil {
+	if err := verifyContext(context.Background(), s, c); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(out, "%s\tOK\t%s\n", c.ID, c.Revision)

@@ -41,12 +41,11 @@ import (
 // shells out to.
 const cbmCommand = "codebase-memory-mcp"
 
-// prepareSource checks out the revision a context pins and indexes it into the
-// context's own graph.
+// prepareSource checks out the revision a context pins.
 //
 // The record is written before this runs, so a failure anywhere below leaves a
-// context that is still managed and still removable rather than a checkout or a
-// graph nothing knows about.
+// context that is still managed and still removable rather than a checkout
+// nothing knows about.
 func prepareSource(ctx context.Context, repoDir, worktree string, c store.Context) error {
 	// A worktree of the repository's clone, not a clone of its own: every
 	// context of one repository reads the same object database, so a second
@@ -56,14 +55,13 @@ func prepareSource(ctx context.Context, repoDir, worktree string, c store.Contex
 	if err := runGit(ctx, "-C", repoDir, "worktree", "add", "--detach", worktree, c.Revision); err != nil {
 		return fmt.Errorf("context create: cannot check revision %s of repository %q out at %s: %w", c.Revision, c.Repository, worktree, err)
 	}
-	// Before indexing, never after: the graph is built from whatever is in the
-	// worktree, so a checkout that is not the pinned revision would produce a
-	// graph that answers about another version for the rest of the context's
-	// life.
-	if err := verifySource(ctx, worktree, c); err != nil {
-		return err
-	}
-	return indexGraph(ctx, worktree, c)
+	// Before anything is indexed, never after: the search index and the graph
+	// are both built from whatever is in the worktree, so a checkout that is
+	// not the pinned revision would answer about another version for the rest of
+	// the context's life. The lifecycle asks again once the indexing is done,
+	// which is what makes the pair of checks say the source did not move
+	// underneath it.
+	return verifySource(ctx, worktree, c)
 }
 
 // discardSource deletes the graph and the checkout of one context.
