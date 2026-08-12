@@ -1,0 +1,211 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+
+	"github.com/tc3oliver/version-aware-code-mcp/store"
+	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
+)
+
+// The artifacts a context owns: a checkout of the revision it pins, and the
+// graph built from that checkout.
+//
+// Both are created here and nowhere else, so `context create` is the whole of
+// what puts them on disk and `context remove` is the whole of what takes them
+// off it. A user never runs `git worktree add` or `codebase-memory-mcp cli
+// index_repository` themselves.
+//
+// codebase-memory-mcp is reached twice over, through two different code paths
+// that must not be confused. adapters/cbm holds one long-lived MCP session and
+// asks the query tools through it, because a trace pays for a process start
+// otherwise. Building and deleting a graph is not a query: it happens once per
+// context, at management-plane speed, and is a one-shot `cli` subprocess here.
+//
+// CBM 0.10.1 indexes different projects concurrently without interfering with
+// them — measured, not assumed: two, four and six `cli index_repository` runs
+// launched together, with and without a warm daemon, all exited 0 and left
+// graphs that query independently. So there is deliberately no semaphore around
+// the call below. If a later CBM ever needs one, this file is the only place it
+// goes, and it wraps runIndex alone: the per-repository concurrency of git,
+// Zoekt and the context lifecycle is a separate question that must not be
+// answered with a global lock.
+
+// cbmCommand is the graph engine, run as a subprocess. It is the binary name
+// config/example.yaml names, resolved on PATH like every other tool this CLI
+// shells out to.
+const cbmCommand = "codebase-memory-mcp"
+
+// prepareSource checks out the revision a context pins and indexes it into the
+// context's own graph.
+//
+// The record is written before this runs, so a failure anywhere below leaves a
+// context that is still managed and still removable rather than a checkout or a
+// graph nothing knows about.
+func prepareSource(ctx context.Context, repoDir, worktree string, c store.Context) error {
+	// A worktree of the repository's clone, not a clone of its own: every
+	// context of one repository reads the same object database, so a second
+	// version of it costs a checkout instead of a second copy of the history.
+	// --detach because the revision is a commit and nothing here may create or
+	// move a branch in the clone.
+	if err := runGit(ctx, "-C", repoDir, "worktree", "add", "--detach", worktree, c.Revision); err != nil {
+		return fmt.Errorf("context create: cannot check revision %s of repository %q out at %s: %w", c.Revision, c.Repository, worktree, err)
+	}
+	// Before indexing, never after: the graph is built from whatever is in the
+	// worktree, so a checkout that is not the pinned revision would produce a
+	// graph that answers about another version for the rest of the context's
+	// life.
+	if err := verifySource(ctx, worktree, c); err != nil {
+		return err
+	}
+	return indexGraph(ctx, worktree, c)
+}
+
+// discardSource deletes the graph and the checkout of one context.
+//
+// The graph goes first. It lives in codebase-memory-mcp's own store, outside
+// this data directory, and it is the one artifact that would otherwise survive
+// the record that names it; a worktree left behind is a directory in the data
+// directory, which the next removal attempt can still take.
+func discardSource(ctx context.Context, repoDir, worktree string, c store.Context) error {
+	if err := deleteGraph(ctx, c); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		return fmt.Errorf("context remove: cannot delete the worktree of %q at %s: %w", c.ID, worktree, err)
+	}
+	// Removing the directory leaves the clone still administering a worktree
+	// that is not there, and git refuses to add another one at that path until
+	// it is pruned — which is what a user re-creating a context under the same
+	// name would hit. A clone that is itself gone has nothing left to prune, and
+	// must not be what makes a context impossible to remove.
+	if _, err := os.Stat(repoDir); err != nil {
+		return nil
+	}
+	return runGit(ctx, "-C", repoDir, "worktree", "prune")
+}
+
+// verifySource checks that the checkout is the revision the context pins.
+//
+// It fails closed: a worktree that is on another commit is reported as
+// SOURCE_MISMATCH and nothing carries on with it, because a context whose
+// source is not what its record says is exactly the wrong-version answer this
+// server exists to prevent.
+func verifySource(ctx context.Context, worktree string, c store.Context) error {
+	head, err := gitOutput(ctx, "-C", worktree, "rev-parse", "HEAD")
+	if err != nil {
+		return fmt.Errorf("context %q: cannot read the HEAD of its worktree at %s: %w", c.ID, worktree, err)
+	}
+	if head != c.Revision {
+		return vacerr.NewSourceMismatch(c.Revision, head, map[string]any{"context": c.ID, "repository": c.Repository})
+	}
+	return nil
+}
+
+// verifyGraph checks that codebase-memory-mcp holds the graph the context
+// names. It asks CBM what it has rather than trusting that an index that once
+// succeeded is still there: a graph can be deleted out from under a context by
+// anything else driving the same CBM store.
+func verifyGraph(ctx context.Context, c store.Context) error {
+	cmd := exec.CommandContext(ctx, cbmCommand, "cli", "list_projects")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return graphUnavailable(c, fmt.Sprintf("cannot list the graphs it holds: %v: %s", err, lastLine(stderr.Bytes())))
+	}
+
+	var body struct {
+		Projects []struct {
+			Name string `json:"name"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(out, &body); err != nil {
+		return graphUnavailable(c, fmt.Sprintf("list_projects did not answer with the JSON it promises: %v", err))
+	}
+	for _, project := range body.Projects {
+		if project.Name == c.GraphRef {
+			return nil
+		}
+	}
+	return graphUnavailable(c, "it holds no graph of that name")
+}
+
+// indexGraph builds the context's graph out of its checkout.
+//
+// CBM reports what it did in a JSON payload on standard output, and the exit
+// status alone is not the whole answer: a run that indexed nothing would exit 0
+// too. The status field is therefore read, so a context only carries on with a
+// graph CBM said it indexed.
+func indexGraph(ctx context.Context, worktree string, c store.Context) error {
+	cmd := exec.CommandContext(ctx, cbmCommand, "cli", "index_repository", "--repo-path", worktree, "--name", c.GraphRef)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return graphUnavailable(c, fmt.Sprintf("cannot index %s: %v: %s", worktree, err, lastLine(stderr.Bytes())))
+	}
+
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &body); err != nil {
+		return graphUnavailable(c, fmt.Sprintf("index_repository did not answer with the JSON it promises: %v", err))
+	}
+	if body.Status != "indexed" {
+		return graphUnavailable(c, fmt.Sprintf("index_repository reported %q rather than an indexed graph", body.Status))
+	}
+	return nil
+}
+
+// deleteGraph removes the context's graph from CBM's store.
+//
+// A graph CBM does not have is a graph that is gone, so `not_found` is success:
+// a context whose indexing never finished, or whose graph was already deleted,
+// still has to be removable. A context that never got as far as a generated
+// name has no graph to delete at all.
+func deleteGraph(ctx context.Context, c store.Context) error {
+	if c.GraphRef == "" {
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, cbmCommand, "cli", "delete_project", "--project", c.GraphRef)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		reason := lastLine(stderr.Bytes())
+		if strings.Contains(reason, "not_found") {
+			return nil
+		}
+		return graphUnavailable(c, fmt.Sprintf("cannot delete the graph: %v: %s", err, reason))
+	}
+	return nil
+}
+
+// lastLine is the last thing CBM said. Its progress logging shares standard
+// error with the JSON payload it reports a failure in, and the payload is
+// written last.
+func lastLine(out []byte) string {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return "no output"
+	}
+	lines := strings.Split(trimmed, "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+func graphUnavailable(c store.Context, reason string) error {
+	return vacerr.New(
+		vacerr.GraphProviderUnavailable,
+		fmt.Sprintf("context %q: codebase-memory-mcp: %s", c.ID, reason),
+		map[string]any{"context": c.ID, "repository": c.Repository},
+	)
+}

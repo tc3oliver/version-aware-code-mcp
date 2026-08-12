@@ -36,9 +36,12 @@ func contextRun(t *testing.T, dataDir string, args ...string) (string, error) {
 // test can tell which ref a context actually resolved.
 func managed(t *testing.T) (data, mainSHA, branchSHA string) {
 	t.Helper()
-	// Creating a context indexes it, so these tests need the real indexer for
-	// the same reason the Zoekt and CBM tests need theirs.
+	// Creating a context indexes it into Zoekt and builds its CBM graph, so
+	// these tests need both real engines — and, for CBM, must not leave the
+	// graphs they build in its store, which outlives the temporary data
+	// directory below.
 	requireIndexer(t)
+	cbmOrSkip(t)
 
 	source := sourceRepo(t)
 	mainSHA = gitOut(t, "-C", source, "rev-parse", "HEAD")
@@ -55,6 +58,7 @@ func managed(t *testing.T) (data, mainSHA, branchSHA string) {
 	}
 
 	data = t.TempDir()
+	t.Cleanup(func() { discardGraphs(t, data) })
 	if _, err := repoRun(t, data, "add", "demo", "--url", source); err != nil {
 		t.Fatalf("repo add: %v", err)
 	}
