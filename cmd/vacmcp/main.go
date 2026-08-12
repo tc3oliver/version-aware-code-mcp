@@ -22,8 +22,17 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/tools"
 )
 
-// version is the build version of the vacmcp binary.
-const version = "0.0.0-dev"
+// version is the build version of the vacmcp binary, reported by `vacmcp
+// version` and by the MCP server in its implementation record.
+//
+// It is a var, not a const, so a release build can write the tag into it:
+//
+//	go build -ldflags "-X main.version=v0.1.0" ./cmd/vacmcp
+//
+// A build without that flag keeps the value below, which is how a developer
+// build says it is not a release. The tag is never written into the source:
+// .github/release-build.sh takes it from the git tag being built.
+var version = "0.0.0-dev"
 
 const usage = `vacmcp serves version-aware code intelligence over MCP.
 

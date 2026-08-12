@@ -133,8 +133,10 @@ codebase-memory-mcp cli trace_path --project vacmcp-demo-v2 \
 
 ## CI pipeline
 
-`.github/workflows/pr.yml` runs on every pull request. It builds the fixture
-first, then runs, in order:
+`.github/workflows/ci.yml` runs on every pull request, on every push to `main`,
+on demand from the Actions tab, and as the gate of a release. A merge is a
+commit nobody ran the chain against, which is why `main` is checked again after
+one. It builds the fixture first, then runs, in order:
 
 | Step | Command |
 | --- | --- |
@@ -176,6 +178,45 @@ that reaches the binary means updating that table in the same pull request.
 `mcp-conformance.sh` drives the built binary with the MCP Inspector CLI: it
 asserts the session negotiated protocol `2026-07-28` through `server/discover`,
 and invokes all four tools for real.
+
+## Releases
+
+A release is a tag. Pushing one that starts with `v` runs
+`.github/workflows/release.yml`, which does two things in order:
+
+1. `verify` calls `ci.yml` — the same chain a pull request runs, not a second
+   copy of it that can drift. One red step there and the workflow stops: no
+   archives, no GitHub release.
+2. `release` runs `.github/release-build.sh <tag> dist` and publishes what it
+   produced, titled with the tag.
+
+`release-build.sh` cross-compiles the five platforms, packs each with `LICENSE`,
+`THIRD_PARTY_NOTICES.md` and `README.md`, and writes `SHA256SUMS` over the
+archives:
+
+```text
+vacmcp_<tag>_linux_amd64.tar.gz    vacmcp_<tag>_darwin_amd64.tar.gz
+vacmcp_<tag>_linux_arm64.tar.gz    vacmcp_<tag>_darwin_arm64.tar.gz
+vacmcp_<tag>_windows_amd64.zip     SHA256SUMS
+```
+
+The version is linked in rather than written down: `cmd/vacmcp` holds
+`0.0.0-dev`, and a release build passes `-ldflags "-X main.version=<tag>"`. The
+script runs the one binary it built for its own platform and fails if that
+binary does not report the version it was asked for, so renaming the variable
+stops the release instead of shipping five archives that all call themselves
+development builds. `TestVersionComesFromTheBuild` asks the same question from
+the other end on every CI run.
+
+The version is an argument, so a release can be rehearsed without tagging
+anything:
+
+```bash
+.github/release-build.sh v0.1.0-test /tmp/dist
+```
+
+A tag carrying a pre-release part — `v0.1.0-rc.1` — is published as a GitHub
+pre-release, so it does not become the release a first-time visitor downloads.
 
 ## Pull requests
 

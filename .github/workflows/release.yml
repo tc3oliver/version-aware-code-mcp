@@ -1,0 +1,65 @@
+# Publishes a release when a v* tag is pushed.
+#
+# The gate is not written out again here. `verify` calls ci.yml, the same
+# workflow a pull request runs — fmt, vet, staticcheck, unit, race, the Zoekt
+# and CBM integration tests, the version-isolation release gate, MCP
+# conformance, govulncheck, the license check and the build. `release` needs it,
+# so a single red step in that chain means no archives and no GitHub release. A
+# second copy of the chain living in this file would drift from the first one,
+# and the day it did, a release would ship against a gate nobody was running.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Only this job writes, and only to create the release.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build the release archives
+        # The tag is the version. release-build.sh links it into the binary and
+        # fails if the binary does not report it back, so an archive that says
+        # 0.0.0-dev never reaches the release.
+        run: .github/release-build.sh "$GITHUB_REF_NAME" dist
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A tag with a pre-release part (v0.1.0-rc.1) is marked as one, so it
+          # does not become the "latest release" a first-time user downloads.
+          prerelease=
+          case "$GITHUB_REF_NAME" in
+          *-*) prerelease=--prerelease ;;
+          esac
+
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease \
+            dist/*

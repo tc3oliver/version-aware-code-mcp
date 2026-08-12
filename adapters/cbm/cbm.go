@@ -1,13 +1,15 @@
 // Package cbm answers structural questions about code by driving
 // codebase-memory-mcp (>=0.10.1) as an external graph engine.
 //
-// CBM is not forked and not linked: it is run as a one-shot subprocess,
-// `codebase-memory-mcp cli <tool> --format json`, which does the work of one
-// tool call and exits. That mode needs no MCP server, no JSON-RPC wire and no
-// daemon of our own, so os/exec and encoding/json are the whole dependency
-// list. On success CBM writes the tool's JSON to standard output; its progress
-// logging, its daemon hint and its error payloads all go to standard error,
-// with a non-zero exit status on failure.
+// CBM is not forked and not linked: it is run as an external process, either as
+// a long-lived MCP server the adapter keeps a session on or, when that cannot
+// be started, as the one-shot `codebase-memory-mcp cli <tool>` that does the
+// work of one tool call and exits. backend.go holds both and explains why there
+// are two.
+//
+// Either way CBM answers with the JSON its `--format json` describes, and
+// reports a failure as a payload naming the reason. Nothing above run() can
+// tell which mode answered.
 //
 // The project every query runs against is the context's GraphRef and nothing
 // else. A CBM project is one indexed graph, so two versions of a repository are
@@ -25,11 +27,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
@@ -46,11 +50,23 @@ import (
 const maxNodes = 1000
 
 // Provider is the CBM implementation of [provider.GraphProvider].
+//
+// One Provider is meant to be shared: it starts CBM once and holds the session,
+// so the startup cost is paid by the first trace rather than by every one.
+// TraceCalls is safe to call concurrently.
 type Provider struct {
 	command string
+
+	// The persistent session, and whether starting one has been given up on.
+	// Guarded by mu because tool calls arrive concurrently; the calls
+	// themselves are not serialised, only the session's own lifecycle is.
+	mu      sync.Mutex
+	session *mcp.ClientSession
+	cliOnly bool
 }
 
 // New returns a Provider running the codebase-memory-mcp binary named in cfg.
+// CBM is not started here: nothing is spawned until a trace actually needs it.
 func New(cfg *config.Config) *Provider {
 	return &Provider{command: cfg.Providers.CBM.Command}
 }
@@ -196,12 +212,12 @@ func ambiguous(codeCtx vacctx.CodeContext, symbol string, candidates []node) err
 // the number of hops it took. This is doc-1 §13 step 2, reached only after the
 // symbol resolved to exactly one node.
 func (p *Provider) trace(ctx context.Context, codeCtx vacctx.CodeContext, root node, direction string, depth int) (map[string]int, error) {
-	out, err := p.run(ctx, codeCtx, "trace_path",
-		"--function-name", root.QualifiedName,
-		"--direction", direction,
-		"--depth", strconv.Itoa(depth),
-		"--limit", strconv.Itoa(maxNodes),
-	)
+	out, err := p.run(ctx, codeCtx, "trace_path", map[string]any{
+		"function_name": root.QualifiedName,
+		"direction":     direction,
+		"depth":         depth,
+		"limit":         maxNodes,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -340,11 +356,11 @@ type rows struct {
 
 // search runs one search_graph query and flattens its rows into nodes.
 func (p *Provider) search(ctx context.Context, codeCtx vacctx.CodeContext, pattern string, connected bool) ([]node, error) {
-	args := []string{"--name-pattern", pattern, "--limit", strconv.Itoa(maxNodes)}
+	params := map[string]any{"name_pattern": pattern, "limit": maxNodes}
 	if connected {
-		args = append(args, "--include-connected", "true")
+		params["include_connected"] = true
 	}
-	out, err := p.run(ctx, codeCtx, "search_graph", args...)
+	out, err := p.run(ctx, codeCtx, "search_graph", params)
 	if err != nil {
 		return nil, err
 	}
@@ -379,33 +395,38 @@ func (p *Provider) search(ctx context.Context, codeCtx vacctx.CodeContext, patte
 	return found, nil
 }
 
-// run executes one CBM tool against the context's graph and returns its
-// standard output. The project is codeCtx.GraphRef on every call, which is the
-// only place it is set, so no query can reach another version's graph.
-func (p *Provider) run(ctx context.Context, codeCtx vacctx.CodeContext, tool string, args ...string) ([]byte, error) {
-	full := append([]string{"cli", tool, "--project", codeCtx.GraphRef, "--format", "json"}, args...)
-	out, err := exec.CommandContext(ctx, p.command, full...).Output()
+// run executes one CBM tool against the context's graph and returns the JSON it
+// answered with.
+//
+// The project is codeCtx.GraphRef on every call, and this is the only place it
+// is set, so no query can reach another version's graph — whichever mode
+// backend.go ends up using to ask.
+func (p *Provider) run(ctx context.Context, codeCtx vacctx.CodeContext, tool string, params map[string]any) ([]byte, error) {
+	// params belongs to the caller, which builds a fresh map per call.
+	params["project"] = codeCtx.GraphRef
+	// CBM's default response encoding is a text tree; this adapter reads the
+	// JSON one, and asks for it explicitly rather than relying on a default.
+	params["format"] = "json"
+
+	out, err := p.call(ctx, tool, params)
 	if err == nil {
 		return out, nil
 	}
 
-	// CBM reports a failure by exiting non-zero and writing a JSON payload to
-	// standard error, mixed in with its progress logging.
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		reason := failure(exit.Stderr)
+	var byCBM *reported
+	if errors.As(err, &byCBM) {
 		// A name that resolved to a node CBM will not trace as a function —
 		// a variable, a section of a document — is a symbol problem, not an
 		// unreachable engine, and saying so keeps the operator away from
 		// debugging a CBM that is working.
-		if strings.Contains(reason, "function not found") {
+		if strings.Contains(byCBM.reason, "function not found") {
 			return nil, vacerr.New(
 				vacerr.SymbolNotFound,
-				fmt.Sprintf("trace_calls: context %q: graph %q has no function to trace for this symbol: %s", codeCtx.ID, codeCtx.GraphRef, reason),
+				fmt.Sprintf("trace_calls: context %q: graph %q has no function to trace for this symbol: %s", codeCtx.ID, codeCtx.GraphRef, byCBM.reason),
 				map[string]any{"context": codeCtx.ID, "graph_ref": codeCtx.GraphRef},
 			)
 		}
-		return nil, unavailable(codeCtx, tool, fmt.Sprintf("%v: %s", err, reason))
+		return nil, unavailable(codeCtx, tool, byCBM.reason)
 	}
 	return nil, unavailable(codeCtx, tool, err.Error())
 }
