@@ -107,7 +107,17 @@ For the graph, download
 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp/releases)
 0.10.1 or newer for your platform and put the binary on your `PATH`.
 
-Build vacmcp:
+Install vacmcp. Every release publishes an archive per platform — linux, macOS
+and Windows, amd64 and arm64 — next to a `SHA256SUMS` file covering all of
+them, on the [releases page](https://github.com/tc3oliver/version-aware-code-mcp/releases):
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+tar -xzf vacmcp_v0.1.0_linux_amd64.tar.gz
+./vacmcp version          # v0.1.0, the release this binary was built from
+```
+
+Or build it from source, which reports `0.0.0-dev` because no release built it:
 
 ```bash
 git clone https://github.com/tc3oliver/version-aware-code-mcp
@@ -365,6 +375,15 @@ Search and graph degrade separately. `search_code` never touches
 codebase-memory-mcp, so an absent or unindexed graph engine leaves search
 working.
 
+codebase-memory-mcp is started once and kept as a child process: the server
+holds an MCP session on it instead of running the binary again for every query,
+which is the difference between about 8.6 seconds and about 50 milliseconds per
+`trace_calls`. The graph project still travels with every single query, so no
+scope is inherited from the connection. Where that process cannot be started —
+an older build, a sandbox that will not allow it — queries fall back to
+`codebase-memory-mcp cli`, one process per call: slower, and answering exactly
+the same.
+
 ## Version Correctness
 
 The test suite generates a demo repository whose `release/v1` `Process()` calls
@@ -378,9 +397,10 @@ runs four checks against it through the real engines:
 | `trace_calls` `Process` in v1 | reaches `LegacyHandler` |
 | `trace_calls` `Process` in v2 | reaches `NewHandler` |
 
-They run in CI on every pull request (`integration/release_gate_test.go`). Any
-cross-version contamination fails the build; this is a release blocker rather
-than a test that can be marked flaky.
+They run in CI on every pull request, on every push to `main`, and again before
+any release is published (`integration/release_gate_test.go`). Any cross-version
+contamination fails the build; this is a release blocker rather than a test that
+can be marked flaky.
 
 ## Provider Model
 
