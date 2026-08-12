@@ -41,6 +41,19 @@ func fixture(t *testing.T) *config.Config {
 	return cfg
 }
 
+// newProvider returns the adapter under test, shut down when the test ends.
+//
+// Each Provider holds a codebase-memory-mcp process of its own, started on
+// first use and kept for the life of the Provider. That is the point — it is
+// what a trace no longer has to pay for — but a test binary that leaves one
+// running per test is a test binary that competes with itself for memory.
+func newProvider(t *testing.T, cfg *config.Config) *cbmadapter.Provider {
+	t.Helper()
+	p := cbmadapter.New(cfg)
+	t.Cleanup(func() { _ = p.Close() })
+	return p
+}
+
 // contextNamed returns the prepared context with that ID.
 func contextNamed(t *testing.T, cfg *config.Config, id string) vacctx.CodeContext {
 	t.Helper()
@@ -79,7 +92,7 @@ func callees(graph *provider.CallGraph, symbol string) []string {
 // would show up here as the wrong handler.
 func TestTraceCallsUsesTheGraphOfItsOwnVersion(t *testing.T) {
 	cfg := fixture(t)
-	p := cbmadapter.New(cfg)
+	p := newProvider(t, cfg)
 
 	tests := map[string]struct{ context, want, absent string }{
 		"v1 calls LegacyHandler": {"demo-v1", "LegacyHandler", "NewHandler"},
@@ -128,7 +141,7 @@ func TestTraceCallsWalksBothDirections(t *testing.T) {
 	cfg := fixture(t)
 	codeCtx := contextNamed(t, cfg, "demo-v1")
 
-	graph, err := cbmadapter.New(cfg).TraceCalls(t.Context(), codeCtx, provider.TraceRequest{
+	graph, err := newProvider(t, cfg).TraceCalls(t.Context(), codeCtx, provider.TraceRequest{
 		Symbol:    "LegacyHandler",
 		Direction: provider.Callers,
 		Depth:     3,
@@ -160,7 +173,7 @@ func TestTraceCallsAmbiguousSymbol(t *testing.T) {
 		Revision:   "HEAD",
 		GraphRef:   graphRef,
 	}
-	graph, err := cbmadapter.New(cfg).TraceCalls(t.Context(), codeCtx, provider.TraceRequest{
+	graph, err := newProvider(t, cfg).TraceCalls(t.Context(), codeCtx, provider.TraceRequest{
 		Symbol:    "Duplicated",
 		Direction: provider.Callees,
 		Depth:     2,
@@ -199,7 +212,7 @@ func TestTraceCallsAmbiguousSymbol(t *testing.T) {
 // rather than reach across to the version that has it.
 func TestTraceCallsSymbolNotFound(t *testing.T) {
 	cfg := fixture(t)
-	p := cbmadapter.New(cfg)
+	p := newProvider(t, cfg)
 	req := provider.TraceRequest{Symbol: "NewHandler", Direction: provider.Callers, Depth: 2}
 
 	graph, err := p.TraceCalls(t.Context(), contextNamed(t, cfg, "demo-v1"), req)
@@ -230,7 +243,7 @@ func TestTraceCallsGraphProviderUnavailable(t *testing.T) {
 	req := provider.TraceRequest{Symbol: "Process", Direction: provider.Callees, Depth: 2}
 
 	t.Run("binary is not installed", func(t *testing.T) {
-		p := cbmadapter.New(&config.Config{
+		p := newProvider(t, &config.Config{
 			Providers: config.Providers{CBM: config.CBM{Command: filepath.Join(t.TempDir(), "codebase-memory-mcp")}},
 		})
 		codeCtx := vacctx.CodeContext{ID: "demo-v1", Repository: "r", Branch: "b", Revision: "c", GraphRef: "vacmcp-demo-v1"}
@@ -250,7 +263,7 @@ func TestTraceCallsGraphProviderUnavailable(t *testing.T) {
 		codeCtx := contextNamed(t, cfg, "demo-v1")
 		codeCtx.GraphRef = "vacmcp-never-indexed"
 
-		graph, err := cbmadapter.New(cfg).TraceCalls(t.Context(), codeCtx, req)
+		graph, err := newProvider(t, cfg).TraceCalls(t.Context(), codeCtx, req)
 		if err == nil {
 			t.Fatalf("TraceCalls() = %+v, want GRAPH_PROVIDER_UNAVAILABLE", graph)
 		}
@@ -269,7 +282,7 @@ func TestTraceCallsGraphProviderUnavailable(t *testing.T) {
 func TestTraceCallsRejectsIllegalRequests(t *testing.T) {
 	// The command is deliberately absent: nothing here may reach CBM, so a
 	// GRAPH_PROVIDER_UNAVAILABLE would mean validation let the request through.
-	p := cbmadapter.New(&config.Config{
+	p := newProvider(t, &config.Config{
 		Providers: config.Providers{CBM: config.CBM{Command: filepath.Join(t.TempDir(), "codebase-memory-mcp")}},
 	})
 	full := vacctx.CodeContext{ID: "demo-v1", Repository: "r", Branch: "b", Revision: "c", GraphRef: "vacmcp-demo-v1"}
