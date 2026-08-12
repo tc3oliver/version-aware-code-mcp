@@ -1,4 +1,4 @@
-# doc-1's verification chain, run on every pull request.
+# doc-1's verification chain.
 #
 # The steps are in doc-1's order and every one of them is a hard gate: no step
 # carries continue-on-error and none is guarded with `if: always()`, so the job
@@ -7,9 +7,22 @@
 # shell is `bash -e` without pipefail, which would make `go test ... | tee` exit
 # with tee's status and turn the test steps into decoration. Naming the shell
 # selects `bash --noprofile --norc -eo pipefail`.
-name: PR
+name: CI
 
-on: pull_request
+on:
+  # A pull request is checked before it merges, and main is checked again after
+  # it does: a merge is a commit nobody ran the chain against, and two branches
+  # that were each green apart can still be red together.
+  pull_request:
+  push:
+    branches:
+      - main
+  # For re-running the chain against an unchanged tree — a new govulncheck
+  # database, a dependency published since the last commit.
+  workflow_dispatch:
+  # release.yml calls this workflow, so a release runs exactly the gate a pull
+  # request runs rather than a second copy of it that can drift.
+  workflow_call:
 
 permissions:
   contents: read
