@@ -156,6 +156,17 @@ func contextCreate(args []string, out io.Writer) error {
 	if err := s.PutContext(record); err != nil {
 		return err
 	}
+	// The record goes down first because indexing is driven by the records: it
+	// creates the search ref of every context the repository has, this one now
+	// among them, and indexes them together.
+	//
+	// A failure here fails the command, and decision-4 is why: a context whose
+	// source is not in the index is not partially usable, it is a context the
+	// query plane would search and find nothing in. It stays in CREATING, which
+	// is not a state the query plane serves.
+	if err := indexRepository(context.Background(), s, record.Repository); err != nil {
+		return err
+	}
 	_, err = fmt.Fprintf(out, "%s\t%s\t%s\n", record.ID, record.State, record.Revision)
 	return err
 }
@@ -314,6 +325,10 @@ func contextRemove(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	repoDir, err := s.RepositoryDir(c.Repository)
+	if err != nil {
+		return err
+	}
 
 	// The worktree goes first: a failure there leaves the record in place, so
 	// the context is still managed and still removable. The other order would
@@ -321,7 +336,21 @@ func contextRemove(args []string, out io.Writer) error {
 	if err := os.RemoveAll(worktree); err != nil {
 		return fmt.Errorf("context remove: cannot delete the worktree of %q at %s: %w", c.ID, worktree, err)
 	}
+	// Then the ref, then the record, then the index, and that order is what
+	// keeps a half-finished removal safe: until the record is gone the context
+	// is still wholly there, and once it is gone the query plane has no context
+	// to search whatever the index still holds. A rebuild that fails after that
+	// is reported rather than swallowed, because what it leaves behind is the
+	// removed revision's source still in the shard.
+	if c.Branch != "" {
+		if err := dropSearchRef(context.Background(), repoDir, c); err != nil {
+			return err
+		}
+	}
 	if err := s.DeleteContext(c.ID); err != nil {
+		return err
+	}
+	if err := indexRepository(context.Background(), s, c.Repository); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(out, "%s\tREMOVED\n", c.ID)

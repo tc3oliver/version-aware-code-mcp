@@ -36,6 +36,10 @@ func contextRun(t *testing.T, dataDir string, args ...string) (string, error) {
 // test can tell which ref a context actually resolved.
 func managed(t *testing.T) (data, mainSHA, branchSHA string) {
 	t.Helper()
+	// Creating a context indexes it, so these tests need the real indexer for
+	// the same reason the Zoekt and CBM tests need theirs.
+	requireIndexer(t)
+
 	source := sourceRepo(t)
 	mainSHA = gitOut(t, "-C", source, "rev-parse", "HEAD")
 	mustGit(t, "-C", source, "tag", "v1")

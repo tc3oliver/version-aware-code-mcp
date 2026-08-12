@@ -50,6 +50,7 @@ const (
 // Provider is the Zoekt implementation of [provider.SearchProvider].
 type Provider struct {
 	url    string
+	list   string
 	client *http.Client
 }
 
@@ -57,10 +58,81 @@ type Provider struct {
 // providers.zoekt.url. That server must have its JSON API enabled
 // (zoekt-webserver -rpc).
 func New(cfg *config.Config) *Provider {
+	base := strings.TrimRight(cfg.Providers.Zoekt.URL, "/")
 	return &Provider{
-		url:    strings.TrimRight(cfg.Providers.Zoekt.URL, "/") + "/api/search",
+		url:    base + "/api/search",
+		list:   base + "/api/list",
 		client: &http.Client{Timeout: requestTimeout},
 	}
+}
+
+// IndexedBranches returns the branches Zoekt has in its index for repository,
+// which is how a caller finds out whether something is searchable at all rather
+// than what is in it.
+//
+// It is here rather than beside the code that builds the index because this is
+// where the client of the engine lives: the same timeout, and a failure that
+// comes back as [vacerr.SearchProviderUnavailable] like every other one this
+// engine produces. A repository the server does not have is no error — it is an
+// empty list, which is the answer.
+func (p *Provider) IndexedBranches(ctx context.Context, repository string) ([]string, error) {
+	// Anchored and quoted for the same reason the search filter is: repo: is a
+	// regexp, and a name is meant to select one repository rather than
+	// everything it is a substring of.
+	body, err := json.Marshal(struct{ Q string }{"repo:^" + regexp.QuoteMeta(repository) + "$"})
+	if err != nil {
+		return nil, p.listUnavailable(repository, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.list, bytes.NewReader(body))
+	if err != nil {
+		return nil, p.listUnavailable(repository, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, p.listUnavailable(repository, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, p.listUnavailable(repository, fmt.Errorf("http %s", resp.Status))
+	}
+
+	var reply struct {
+		List struct {
+			Repos []struct {
+				Repository struct {
+					Name     string
+					Branches []struct{ Name string }
+				}
+			}
+		}
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		return nil, p.listUnavailable(repository, err)
+	}
+
+	var branches []string
+	for _, repo := range reply.List.Repos {
+		// The filter is a regexp and the answer is checked against the name
+		// asked about anyway: what a caller wants to know is about this
+		// repository, not about one Zoekt matched loosely.
+		if repo.Repository.Name != repository {
+			continue
+		}
+		for _, branch := range repo.Repository.Branches {
+			branches = append(branches, branch.Name)
+		}
+	}
+	return branches, nil
+}
+
+func (p *Provider) listUnavailable(repository string, cause error) *vacerr.Error {
+	return vacerr.New(
+		vacerr.SearchProviderUnavailable,
+		fmt.Sprintf("repository %q: zoekt at %s is not available: %v", repository, p.list, cause),
+		map[string]any{"repository": repository, "url": p.list},
+	)
 }
 
 // Search returns the matches for query inside the repository and branch codeCtx
