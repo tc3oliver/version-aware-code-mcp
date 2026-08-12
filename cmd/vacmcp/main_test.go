@@ -22,6 +22,14 @@ import (
 // agent can reach are the ones the real CLI registered, over a real pipe.
 const serveConfigEnv = "VACMCP_TEST_SERVE_CONFIG"
 
+// The same for `vacmcp serve --managed`: the data directory to serve, and the
+// Zoekt web server the test brought up for it. managed_test.go is where they
+// are set.
+const (
+	serveManagedEnv      = "VACMCP_TEST_SERVE_MANAGED"
+	serveManagedZoektEnv = "VACMCP_TEST_SERVE_MANAGED_ZOEKT"
+)
+
 func TestMain(m *testing.M) {
 	if path, ok := os.LookupEnv(serveConfigEnv); ok {
 		args := []string{"serve", "--stdio"}
@@ -30,6 +38,17 @@ func TestMain(m *testing.M) {
 		}
 		// Nothing may go to stdout but the protocol stream, which is why the
 		// output writer here is stderr.
+		if err := run(args, os.Stderr); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if dataDir, ok := os.LookupEnv(serveManagedEnv); ok {
+		args := []string{"serve", "--stdio", "--managed", "--data-dir", dataDir}
+		if url := os.Getenv(serveManagedZoektEnv); url != "" {
+			args = append(args, "--zoekt-url", url)
+		}
 		if err := run(args, os.Stderr); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

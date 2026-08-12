@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
+	"github.com/tc3oliver/version-aware-code-mcp/store"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
@@ -89,17 +91,42 @@ func (c check) String() string {
 // missing row.
 //
 // --config is required, as it is for validate and contexts: which configuration
-// is being diagnosed is not something to guess at.
+// is being diagnosed is not something to guess at. --managed diagnoses a data
+// directory instead, on the configuration `serve --managed` would generate from
+// it, plus the two sections only a managed installation has: the repositories
+// and the contexts as their records leave them.
 func doctor(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vacmcp doctor", flag.ExitOnError)
 	path := fs.String("config", "", "path to the vacmcp configuration file")
+	managed := fs.Bool("managed", false, "diagnose a managed data directory instead of a configuration file")
+	dataDir := fs.String("data-dir", "", "vacmcp data directory in managed mode (default ~/.vacmcp)")
+	zoektURL := fs.String("zoekt-url", defaultZoektURL, "Zoekt web server to check in managed mode")
+	cbmCmd := fs.String("cbm-command", cbmCommand, "codebase-memory-mcp binary to check in managed mode")
 	_ = fs.Parse(args)
-	if *path == "" {
+	switch {
+	case *managed && *path != "":
+		return errors.New("doctor: give either --config or --managed, not both")
+	case !*managed && *path == "":
 		return errors.New("doctor: --config is required")
 	}
 
 	ctx := context.Background()
-	cfg, cfgErr := config.Load(*path)
+
+	// In managed mode the configuration is the generated one, so the row below
+	// names the file the server would serve and every check after it runs on
+	// exactly what the server would run on.
+	source := *path
+	var s *store.Store
+	var cfg *config.Config
+	var cfgErr error
+	if *managed {
+		if s, cfgErr = store.Open(*dataDir); cfgErr == nil {
+			source = filepath.Join(s.RuntimeDir(), generatedConfig)
+			cfg, cfgErr = managedConfig(s, *zoektURL, *cbmCmd)
+		}
+	} else {
+		cfg, cfgErr = config.Load(*path)
+	}
 	if cfgErr != nil {
 		cfg = &config.Config{}
 	}
@@ -107,8 +134,8 @@ func doctor(args []string, out io.Writer) error {
 	// The MCP check needs no configuration and the configuration check needs
 	// nothing else, so both are answered even when everything below them is
 	// unknown.
-	checks := []check{checkSDK(ctx, cfg), checkConfig(*path, cfg, cfgErr)}
-	var contexts []check
+	checks := []check{checkSDK(ctx, cfg), checkConfig(source, cfg, cfgErr)}
+	var repositories, contexts []check
 
 	if cfgErr != nil {
 		// Zoekt's URL, CBM's command and the repositories are all read out of
@@ -119,15 +146,28 @@ func doctor(args []string, out io.Writer) error {
 		for _, name := range []string{zoektCheck, cbmCheck, gitCheck} {
 			checks = append(checks, check{name, statusSkip, because})
 		}
+		if *managed {
+			repositories = []check{{"-", statusSkip, because}}
+		}
 		contexts = append(contexts, check{"-", statusSkip, because})
 	} else {
 		checks = append(checks, checkZoekt(ctx, cfg), checkCBM(ctx, cfg), checkGit(ctx, cfg))
-		contexts = checkContexts(ctx, cfg)
+		if *managed {
+			repositories, contexts = checkRepositories(s), checkManagedContexts(ctx, s, cfg)
+		} else {
+			contexts = checkContexts(ctx, cfg)
+		}
 	}
 
-	lines := make([]string, 0, len(checks)+len(contexts)+2)
+	lines := make([]string, 0, len(checks)+len(repositories)+len(contexts)+4)
 	for _, c := range checks {
 		lines = append(lines, c.String())
+	}
+	if *managed {
+		lines = append(lines, "", "Repositories")
+		for _, c := range repositories {
+			lines = append(lines, c.String())
+		}
 	}
 	lines = append(lines, "", "Contexts")
 	for _, c := range contexts {
@@ -138,15 +178,71 @@ func doctor(args []string, out io.Writer) error {
 	}
 
 	failed := 0
-	for _, c := range slices.Concat(checks, contexts) {
+	for _, c := range slices.Concat(checks, repositories, contexts) {
 		if c.status != statusOK {
 			failed++
 		}
 	}
 	if failed > 0 {
-		return fmt.Errorf("doctor: %d of %d checks did not pass", failed, len(checks)+len(contexts))
+		return fmt.Errorf("doctor: %d of %d checks did not pass", failed, len(checks)+len(repositories)+len(contexts))
 	}
 	return nil
+}
+
+// checkRepositories reports the repositories a data directory manages: the
+// state the last command left each of them in, and when its refs were last
+// fetched. It reads the records and runs no git, because a fetch is the
+// management plane's to run and doctor is a diagnosis.
+func checkRepositories(s *store.Store) []check {
+	records, err := s.Repositories()
+	if err != nil {
+		return []check{{"-", statusFail, err.Error()}}
+	}
+	rows := make([]check, 0, len(records))
+	for _, r := range records {
+		status := statusOK
+		if r.State != repoReady {
+			status = statusFail
+		}
+		rows = append(rows, check{r.Name, status, fmt.Sprintf("%s, %s", r.State, lastSync(r))})
+	}
+	return rows
+}
+
+// checkManagedContexts reports every context a data directory manages, whether
+// or not the query plane serves it.
+//
+// The READY ones are resolved exactly as a configured context is, which is the
+// check that the version they name is really on this machine. The rest are
+// reported with the state that is keeping them out of the served set: a context
+// still being built cannot be checked yet, and one that FAILED is a failure to
+// say so about. Neither is hidden — a context that is not served is the first
+// thing an operator comes to this command to find.
+func checkManagedContexts(ctx context.Context, s *store.Store, cfg *config.Config) []check {
+	records, err := s.Contexts()
+	if err != nil {
+		return []check{{"-", statusFail, err.Error()}}
+	}
+
+	contexts := resolver.New(cfg)
+	rows := make([]check, 0, len(records))
+	for _, record := range records {
+		if record.State != contextReady {
+			status := statusSkip
+			if record.State == contextFailed {
+				status = statusFail
+			}
+			rows = append(rows, check{record.ID, status, fmt.Sprintf("%s %s", record.State, record.Revision)})
+			continue
+		}
+		codeCtx, err := contexts.Resolve(ctx, record.ID)
+		if err != nil {
+			rows = append(rows, check{record.ID, statusFail, err.Error()})
+			continue
+		}
+		rows = append(rows, check{record.ID, statusOK, fmt.Sprintf("%s %s %s", record.State, codeCtx.Repository, codeCtx.Revision)})
+	}
+	return rows
 }
 
 // checkSDK exercises the MCP layer itself: the server is built, the tools are

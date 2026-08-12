@@ -19,6 +19,7 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
+	"github.com/tc3oliver/version-aware-code-mcp/store"
 	"github.com/tc3oliver/version-aware-code-mcp/tools"
 )
 
@@ -39,9 +40,11 @@ const usage = `vacmcp serves version-aware code intelligence over MCP.
 Usage:
   vacmcp serve [--stdio] [--address ADDR] [--config FILE]
                                             run the MCP server
+  vacmcp serve --managed [--data-dir DIR]   run the MCP server on the managed contexts
   vacmcp validate --config FILE             load and check a configuration file
   vacmcp contexts --config FILE             list the configured contexts
   vacmcp doctor --config FILE               check the dependencies and contexts
+  vacmcp doctor --managed [--data-dir DIR]  check the managed repositories and contexts
   vacmcp repo SUBCOMMAND                    manage the repositories in the data directory
   vacmcp context SUBCOMMAND                 manage the contexts in the data directory
   vacmcp version                            print the vacmcp version`
@@ -90,15 +93,38 @@ func run(args []string, out io.Writer) error {
 // contexts configured, and list_contexts reports that as an empty list rather
 // than an error. A configuration file that exists must still be a valid one,
 // so a load failure stops the server instead of silently serving nothing.
+//
+// --managed is the other way to be given a configuration: it is generated from
+// the READY contexts of a data directory the management CLI built. Which of the
+// two a server runs on has to be said, so the two flags together are refused
+// rather than one of them quietly winning.
 func serve(args []string) error {
 	fs := flag.NewFlagSet("vacmcp serve", flag.ExitOnError)
 	stdio := fs.Bool("stdio", false, "serve over STDIO instead of Streamable HTTP")
 	address := fs.String("address", server.DefaultAddress, "address to listen on in Streamable HTTP mode")
 	path := fs.String("config", "", "path to the vacmcp configuration file")
+	managed := fs.Bool("managed", false, "serve the READY contexts of a managed data directory")
+	dataDir := fs.String("data-dir", "", "vacmcp data directory in managed mode (default ~/.vacmcp)")
+	zoektURL := fs.String("zoekt-url", defaultZoektURL, "Zoekt web server to search through in managed mode")
+	cbmCmd := fs.String("cbm-command", cbmCommand, "codebase-memory-mcp binary to trace through in managed mode")
 	_ = fs.Parse(args)
 
+	if *managed && *path != "" {
+		return errors.New("serve: give either --config or --managed, not both")
+	}
+
 	cfg := &config.Config{}
-	if *path != "" {
+	if *managed {
+		s, err := store.Open(*dataDir)
+		if err != nil {
+			return err
+		}
+		loaded, err := managedConfig(s, *zoektURL, *cbmCmd)
+		if err != nil {
+			return err
+		}
+		cfg = loaded
+	} else if *path != "" {
 		loaded, err := config.Load(*path)
 		if err != nil {
 			return err
