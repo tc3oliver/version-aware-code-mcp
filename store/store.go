@@ -11,6 +11,7 @@
 //	contexts/      one JSON record per context
 //	zoekt/         the search index shards
 //	runtime/       generated files, such as the configuration a managed server serves
+//	locks/         one lock file per repository, whose content is never read
 //
 // The records here are the only place a context's pinned revision is written
 // down, so two properties are not negotiable:
@@ -52,7 +53,7 @@ import (
 
 // The layout's directory names. They are part of the on-disk contract: an
 // operator inspecting a data directory, and every later command reading one,
-// finds the same six.
+// finds the same seven.
 const (
 	reposDir        = "repos"
 	worktreesDir    = "worktrees"
@@ -60,11 +61,12 @@ const (
 	contextsDir     = "contexts"
 	zoektDir        = "zoekt"
 	runtimeDir      = "runtime"
+	locksDir        = "locks"
 )
 
 // layout is what Open creates, in one place so the directories cannot drift
 // apart from the accessors below.
-var layout = []string{reposDir, worktreesDir, repositoriesDir, contextsDir, zoektDir, runtimeDir}
+var layout = []string{reposDir, worktreesDir, repositoriesDir, contextsDir, zoektDir, runtimeDir, locksDir}
 
 // recordExt is the suffix a metadata file has, and the one a temporary file
 // deliberately does not: it is how a reader tells a record from the leftovers of
@@ -164,6 +166,20 @@ func (s *Store) WorktreeDir(repository, contextID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(s.root, worktreesDir, repository, contextID), nil
+}
+
+// LockFile is the file whose lock an operation on the named repository holds.
+//
+// It is a file of its own rather than one of the records, because a record is
+// replaced by a rename: a lock taken on it would be a lock on an inode that the
+// next write leaves nobody holding. Nothing ever reads the content, and nothing
+// deletes the file — a lock file removed while it is held is one that another
+// waiter can create and take again.
+func (s *Store) LockFile(repository string) (string, error) {
+	if err := validateName("repository", repository); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.root, locksDir, repository+".lock"), nil
 }
 
 // ZoektDir is where the search index shards live.

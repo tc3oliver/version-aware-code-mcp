@@ -63,7 +63,7 @@ func tree(t *testing.T, root string) []string {
 func TestOpenCreatesTheLayout(t *testing.T) {
 	s := open(t)
 
-	for _, dir := range []string{"repos", "worktrees", "repositories", "contexts", "zoekt", "runtime"} {
+	for _, dir := range []string{"repos", "worktrees", "repositories", "contexts", "zoekt", "runtime", "locks"} {
 		info, err := os.Stat(filepath.Join(s.Root(), dir))
 		if err != nil {
 			t.Errorf("Stat(%s): %v", dir, err)
@@ -129,6 +129,20 @@ func TestPaths(t *testing.T) {
 	}
 	if want := filepath.Join(s.Root(), "runtime"); s.RuntimeDir() != want {
 		t.Errorf("RuntimeDir() = %q, want %q", s.RuntimeDir(), want)
+	}
+
+	lock, err := s.LockFile("backend")
+	if err != nil {
+		t.Fatalf("LockFile() error = %v", err)
+	}
+	if want := filepath.Join(s.Root(), "locks", "backend.lock"); lock != want {
+		t.Errorf("LockFile() = %q, want %q", lock, want)
+	}
+	// A lock is a path a repository name becomes, so it is checked like every
+	// other one: a name that could address a file outside the data directory is
+	// refused rather than locked.
+	if _, err := s.LockFile("../escape"); err == nil {
+		t.Error("LockFile(\"../escape\") returned nil, want an error")
 	}
 }
 
