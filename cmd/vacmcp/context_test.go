@@ -36,6 +36,10 @@ func contextRun(t *testing.T, dataDir string, args ...string) (string, error) {
 // test can tell which ref a context actually resolved.
 func managed(t *testing.T) (data, mainSHA, branchSHA string) {
 	t.Helper()
+	// `context create` checks the revision out and indexes it, so these tests
+	// need the real graph engine — and must not leave the graphs they build in
+	// its store, which outlives the temporary data directory below.
+	cbmOrSkip(t)
 	source := sourceRepo(t)
 	mainSHA = gitOut(t, "-C", source, "rev-parse", "HEAD")
 	mustGit(t, "-C", source, "tag", "v1")
@@ -51,6 +55,7 @@ func managed(t *testing.T) (data, mainSHA, branchSHA string) {
 	}
 
 	data = t.TempDir()
+	t.Cleanup(func() { discardGraphs(t, data) })
 	if _, err := repoRun(t, data, "add", "demo", "--url", source); err != nil {
 		t.Fatalf("repo add: %v", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -45,7 +44,7 @@ const contextUsage = `Usage:
   vacmcp context list [--data-dir DIR]              list the managed contexts
   vacmcp context status NAME [--data-dir DIR]       report one context
   vacmcp context verify NAME [--data-dir DIR]       re-check a context without changing it
-  vacmcp context remove NAME [--data-dir DIR]       forget a context and delete its worktree`
+  vacmcp context remove NAME [--data-dir DIR]       forget a context, its worktree and its graph`
 
 // contextCommand dispatches `vacmcp context <subcommand>`.
 //
@@ -113,7 +112,8 @@ func contextCreate(args []string, out io.Writer) error {
 	// puts the store's check on them in front of everything below, so a name
 	// that is not a usable path element is refused before any git runs and
 	// leaves nothing behind.
-	if _, err := s.WorktreeDir(*repository, id); err != nil {
+	worktree, err := s.WorktreeDir(*repository, id)
+	if err != nil {
 		return err
 	}
 	// The store's allowlist has to admit a dot, and the generated search ref
@@ -154,6 +154,13 @@ func contextCreate(args []string, out io.Writer) error {
 		State:      contextCreating,
 	}
 	if err := s.PutContext(record); err != nil {
+		return err
+	}
+	// The record first, the artifacts after: a checkout or a graph that outlived
+	// a failed create would be an artifact no record names and no command can
+	// remove. This way a create that fails half way leaves a context that is
+	// still managed, still listed and still removable.
+	if err := prepareSource(context.Background(), repoDir, worktree, record); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(out, "%s\t%s\t%s\n", record.ID, record.State, record.Revision)
@@ -236,12 +243,14 @@ func contextStatus(args []string, out io.Writer) error {
 // reports a disagreement as SOURCE_MISMATCH and stops rather than adopting what
 // it found.
 //
-// This is deliberately a part of decision-4's verification, not all of it. The
-// rest of it — the worktree's HEAD, the search ref in the index, the graph — is
-// about artifacts that the lifecycle steps creating them are what can check,
-// and none of those artifacts exists for a context in CREATING. Reporting on
-// what is there is the honest half; reporting a context as verified because the
-// checks nobody can run yet did not fail would not be.
+// Then the artifacts `context create` built: the worktree is on the pinned
+// commit, and CBM still holds the graph the record names. Both are asked of the
+// thing itself rather than assumed from a create that once succeeded — a
+// worktree can be checked out elsewhere by hand and a graph can be deleted by
+// anything else driving the same CBM store.
+//
+// This is deliberately a part of decision-4's verification, not all of it: the
+// search ref in the index belongs to the step that creates it.
 func contextVerify(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vacmcp context verify", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "vacmcp data directory (default ~/.vacmcp)")
@@ -277,20 +286,33 @@ func contextVerify(args []string, out io.Writer) error {
 	if found != c.Revision {
 		return vacerr.NewSourceMismatch(c.Revision, found, map[string]any{"context": c.ID, "repository": c.Repository})
 	}
+
+	worktree, err := s.WorktreeDir(c.Repository, c.ID)
+	if err != nil {
+		return err
+	}
+	if err := verifySource(context.Background(), worktree, c); err != nil {
+		return err
+	}
+	if err := verifyGraph(context.Background(), c); err != nil {
+		return err
+	}
 	_, err = fmt.Fprintf(out, "%s\tOK\t%s\n", c.ID, c.Revision)
 	return err
 }
 
-// contextRemove forgets a context and deletes the worktree it owns.
+// contextRemove forgets a context and deletes the worktree and the graph it
+// owns.
 //
-// Nothing but this context's own record and its own directory is touched: a
-// worktree lives at worktrees/<repository>/<context>, so what is deleted is one
-// subtree that no other context of the same repository is inside, and no other
-// record is read or written.
+// Nothing but this context's own record, its own directory and its own graph is
+// touched: a worktree lives at worktrees/<repository>/<context>, so what is
+// deleted is one subtree that no other context of the same repository is
+// inside, the graph is the one its record names, and no other record is read or
+// written.
 //
-// The directory is removed if it is there and skipped if it is not, which is
-// what os.RemoveAll does on its own — a context whose worktree was never
-// created, or was already cleaned up, still has to be removable.
+// An artifact that is not there is skipped rather than missed — a context whose
+// worktree was never created, or whose indexing never finished, still has to be
+// removable.
 func contextRemove(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vacmcp context remove", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "vacmcp data directory (default ~/.vacmcp)")
@@ -314,12 +336,16 @@ func contextRemove(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	repoDir, err := s.RepositoryDir(c.Repository)
+	if err != nil {
+		return err
+	}
 
-	// The worktree goes first: a failure there leaves the record in place, so
-	// the context is still managed and still removable. The other order would
-	// leave a checkout nothing knows about.
-	if err := os.RemoveAll(worktree); err != nil {
-		return fmt.Errorf("context remove: cannot delete the worktree of %q at %s: %w", c.ID, worktree, err)
+	// The artifacts go first: a failure there leaves the record in place, so the
+	// context is still managed and still removable. The other order would leave
+	// a checkout and a graph nothing knows about.
+	if err := discardSource(context.Background(), repoDir, worktree, c); err != nil {
+		return err
 	}
 	if err := s.DeleteContext(c.ID); err != nil {
 		return err
