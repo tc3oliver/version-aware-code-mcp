@@ -215,6 +215,71 @@ curl -sS http://127.0.0.1:8080 \
        "arguments":{"context":"backend-v2","query":"NewHandler"}}}'
 ```
 
+### Managed Mode
+
+Everything above is the static mode: you index, you check out, you write the
+configuration, and `vacmcp serve --config FILE` serves what you wrote. Managed
+mode does that part for you. `vacmcp repo add` clones a repository into a data
+directory, `vacmcp context create` pins a ref to a commit and builds that
+commit's index and graph, and `vacmcp serve --managed` serves the contexts that
+came out ready. Same engines, same four tools, same isolation — no configuration
+file and no `zoekt-git-index`, `git worktree` or `index_repository` by hand.
+
+```bash
+vacmcp repo add backend --url git@git.example.com:team/backend.git
+vacmcp context create backend-v1 --repo backend --ref release/1.x
+vacmcp context create backend-v2 --repo backend --ref release/2.x
+```
+
+`context create` resolves the ref once and pins the full commit SHA it found.
+That pin never moves: `vacmcp repo sync` fetches new commits, and the contexts
+you already have keep answering out of the revisions they were created with. To
+serve a newer commit, create another context — a context is immutable, so a
+second version is a second name, never an edit of the first.
+
+Everything lives under `~/.vacmcp` unless `--data-dir` says otherwise, including
+the search index. Start Zoekt over it, check the installation, and serve:
+
+```bash
+zoekt-webserver -index ~/.vacmcp/zoekt -listen 127.0.0.1:6070 -rpc &
+vacmcp doctor --managed
+vacmcp serve --managed
+```
+
+```text
+$ vacmcp context list
+backend-v1    backend    8af31e2c8d0a4f1b6e5d3c2a90b7f4e1d6c8a3b5    READY
+backend-v2    backend    94cb821f7a6e5d4c3b2a1908f7e6d5c4b3a29187    READY
+```
+
+The commands, in full:
+
+| Command | What it does |
+| --- | --- |
+| `vacmcp repo add NAME --url URL` | clone a repository into the data directory |
+| `vacmcp repo list` / `status NAME` | report the managed repositories |
+| `vacmcp repo sync NAME` / `--all` | fetch remote refs, moving no pinned revision |
+| `vacmcp repo remove NAME` | forget a repository and delete its clone |
+| `vacmcp context create NAME --repo REPO --ref REF` | pin a ref to a commit and build its index and graph |
+| `vacmcp context list` / `status NAME` | report the managed contexts and their state |
+| `vacmcp context verify NAME` | re-run the readiness checks, changing nothing |
+| `vacmcp context retry NAME` | rebuild a context that did not reach `READY` |
+| `vacmcp context remove NAME` | forget a context, its worktree and its graph |
+| `vacmcp serve --managed [--data-dir DIR] [--zoekt-url URL] [--cbm-command CMD]` | serve the ready contexts |
+| `vacmcp doctor --managed [--data-dir DIR]` | check the managed repositories and contexts |
+
+Only these commands reach a network, and only from your shell: creating,
+syncing and removing repositories and contexts is not exposed as an MCP tool, so
+an agent connected to the server cannot make it clone or delete anything.
+vacmcp holds no credential either — `git` authenticates the clone the way it
+always does, through your SSH agent, `~/.ssh/config` or a credential helper, and
+a URL with a secret embedded in it is refused rather than stored.
+
+**Already using `vacmcp serve --config FILE`? Nothing changes for you.** Managed
+mode is additive and entirely optional: static configuration files are still
+supported exactly as before, there is no migration to do, and the two modes are
+chosen per server with `--config` or `--managed`.
+
 ## MCP Configuration
 
 vacmcp speaks MCP `2026-07-28` through the official Go SDK. Streamable HTTP runs
@@ -453,14 +518,18 @@ Vulnerability reports go to the address in [SECURITY.md](SECURITY.md).
 ## Roadmap
 
 v0.1.0 is the four tools above, one context per call, with the version isolation
-and evidence they are built around. Ahead of it:
+and evidence they are built around. v0.2.0 is the managed lifecycle that puts a
+repository behind them without anyone assembling one by hand. Ahead of those:
 
 | Version | Direction |
 | --- | --- |
-| v0.2.0 | `compare_code` and `compare_calls` across two contexts; automatic context verification |
-| v0.3.0 | multi-repo contexts |
-| v0.4.0 | operations and telemetry |
-| v1.0.0 | stable tool API and provider plugin contract, production deployment |
+| v0.1.0 | version-aware query plane: the four tools, context isolation, evidence — done |
+| v0.2.0 | managed repository and context lifecycle: `repo` and `context` commands, automatic Zoekt and graph provisioning, readiness verification — this release |
+| v0.3.0 | embeddable core / extension API: a stable Go API to embed this core in your own gateway |
+| v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff |
+| v0.5.0 | multi-repo contexts, cross-repo search and graph |
+| v0.6.0 | operations: metrics, OpenTelemetry, garbage collection, scheduled sync primitives |
+| v1.0.0 | stable public API and compatibility contract |
 
 Deliberately out of scope, at every version: chat UI, RAG, vector databases,
 embeddings, issue trackers, documentation search, forge-specific APIs, agent

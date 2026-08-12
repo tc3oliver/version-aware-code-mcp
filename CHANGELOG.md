@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Managed Repository & Context Lifecycle: onboarding a repository no longer means
+cloning, indexing, checking out and writing a configuration file by hand.
+
+### Added
+
+- Repository lifecycle: `vacmcp repo add/list/status/sync/remove` clones a
+  repository into a data directory and keeps its refs fetched. It is
+  forge-neutral — plain `git`, no host API — and holds no credential of its own:
+  authentication is system git's, and a URL with a secret embedded in it is
+  refused rather than stored. `repo sync` only fetches, and never moves a
+  revision an existing context is pinned to.
+- Context lifecycle: `vacmcp context create/list/status/verify/retry/remove`
+  resolves a ref once and pins the full commit SHA. A context is immutable —
+  another revision is another context — and reaches `READY` only by passing
+  every stage of `CREATING` → `RESOLVING` → `PREPARING_SOURCE` →
+  `INDEXING_SEARCH` → `INDEXING_GRAPH` → `VERIFYING`, with `context retry`
+  rebuilding one that stopped anywhere along it.
+- Automatic search and graph provisioning: creating a context builds its Zoekt
+  index and its codebase-memory-mcp graph, and removing one takes them away.
+  `zoekt-git-index`, `git worktree` and `index_repository` are no longer
+  commands anyone runs by hand.
+- `vacmcp serve --managed [--data-dir DIR]` serves the contexts a data directory
+  has ready, and `vacmcp doctor --managed` reports on its repositories and
+  contexts. Serving stays local-only: it reaches no remote, and the repository
+  and context commands are not exposed as MCP tools, so a connected agent cannot
+  make the server clone or delete anything. A context that is not `READY` is
+  absent from the query plane, answering the existing `CONTEXT_NOT_FOUND`.
+- Per-repository locking, so operations on different repositories run in
+  parallel while a sync, a create and a remove on one repository serialise.
+- `integration/managed_release_gate_test.go`: doc-1 §15's four
+  version-correctness checks re-run against contexts the management plane built,
+  plus the lifecycle gate — a remote branch that moves after a context was
+  created must not change what that context answers.
+
+### Changed
+
+- `vacmcp serve --config FILE` is unchanged and needs no migration. Managed mode
+  is additive; a server runs on one mode or the other, and giving both flags is
+  refused.
+
 ## [0.1.0] - 2026-08-12
 
 ### Added
