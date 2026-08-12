@@ -9,8 +9,10 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
@@ -777,6 +779,223 @@ func brokenCBM(t *testing.T) string {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	return dir
+}
+
+// failedContext creates a context whose graph could not be built, and returns
+// the data directory, the record it left in FAILED and the revision it pinned.
+//
+// The graph engine is broken only while the create runs: every stage before it
+// is the real one, so what comes back is a context with real partial artifacts —
+// a checkout and a search ref — and no graph, which is what a retry has to
+// recognise and finish.
+func failedContext(t *testing.T, id string) (data string, failed store.Context, mainSHA string) {
+	t.Helper()
+	data, mainSHA, _ = managed(t)
+
+	working := os.Getenv("PATH")
+	t.Setenv("PATH", brokenCBM(t)+string(os.PathListSeparator)+working)
+	if _, err := contextRun(t, data, "create", id, "--repo", "demo", "--ref", "main"); err == nil {
+		t.Fatal("context create with a failing graph engine returned nil, want an error")
+	}
+	t.Setenv("PATH", working)
+
+	failed = contextRecord(t, data, id)
+	if failed.State != contextFailed {
+		t.Fatalf("state = %q, want %s", failed.State, contextFailed)
+	}
+	return data, failed, mainSHA
+}
+
+// TestContextRetryRebuildsAFailedContext is AC #1: a context the graph engine
+// left FAILED is driven to READY by `context retry` alone, with nothing deleted
+// by hand first, and it comes back pinned to the same revision it always was.
+func TestContextRetryRebuildsAFailedContext(t *testing.T) {
+	data, failed, mainSHA := failedContext(t, "app")
+
+	out, err := contextRun(t, data, "retry", "app")
+	if err != nil {
+		t.Fatalf("context retry: %v", err)
+	}
+	if want := "app\t" + contextReady + "\t" + mainSHA + "\n"; out != want {
+		t.Errorf("context retry printed %q, want %q", out, want)
+	}
+
+	// The retry rebuilt this revision's artifacts. It did not repin the
+	// context: the revision and both generated names are the ones the failed
+	// create wrote.
+	c := contextRecord(t, data, "app")
+	if c.Revision != failed.Revision || c.Branch != failed.Branch || c.GraphRef != failed.GraphRef {
+		t.Errorf("the retry changed what the context pins:\n before %+v\n  after %+v", failed, c)
+	}
+	if c.State != contextReady {
+		t.Errorf("state after a retry = %q, want %s", c.State, contextReady)
+	}
+
+	// READY here means the same thing it means after a create: every artifact
+	// asked of itself, not a state that was written down.
+	if _, err := contextRun(t, data, "verify", "app"); err != nil {
+		t.Errorf("context verify after a retry: %v", err)
+	}
+	if _, err := readyContext(openStore(t, data), "app"); err != nil {
+		t.Errorf("readyContext after a retry: %v", err)
+	}
+	if head := gitOut(t, "-C", filepath.Join(data, "worktrees", "demo", "app"), "rev-parse", "HEAD"); head != mainSHA {
+		t.Errorf("worktree HEAD after a retry = %q, want the pinned %q", head, mainSHA)
+	}
+	if err := verifyGraph(t.Context(), c); err != nil {
+		t.Errorf("the graph a retry built: %v", err)
+	}
+}
+
+// TestContextRetryRecoversAContextKilledMidLifecycle is AC #4: a record left
+// behind in an intermediate state by a process that died is not READY to
+// anything, cannot be created over, is reported as needing a retry, and is
+// recovered by one.
+//
+// The state is written directly rather than by killing a process, because it is
+// the same thing: advance persists each state before the stage it names runs, so
+// INDEXING_GRAPH on disk with a worktree and a search ref present and no graph
+// is exactly what a create killed during the graph stage leaves.
+func TestContextRetryRecoversAContextKilledMidLifecycle(t *testing.T) {
+	data, failed, mainSHA := failedContext(t, "app")
+
+	s := openStore(t, data)
+	killed := failed
+	killed.State = contextIndexingGraph
+	if err := s.PutContext(killed); err != nil {
+		t.Fatalf("PutContext: %v", err)
+	}
+
+	// Not READY, and not readable as one. A context caught mid-lifecycle is
+	// indistinguishable from one that was never managed, exactly as a FAILED one
+	// is.
+	if _, err := readyContext(s, "app"); codeFor(t, err) != vacerr.ContextNotFound {
+		t.Errorf("readyContext of a context killed mid-lifecycle = %v, want %q", err, vacerr.ContextNotFound)
+	}
+	if out, err := contextRun(t, data, "list"); err != nil || !strings.Contains(out, contextIndexingGraph) {
+		t.Errorf("context list = %q (err %v), want it to report the stage the context is stuck in", out, err)
+	}
+
+	// The management plane says what to do about it rather than leaving an
+	// operator to guess whether to wait.
+	out, err := contextRun(t, data, "status", "app")
+	if err != nil {
+		t.Fatalf("context status: %v", err)
+	}
+	if !strings.Contains(out, "vacmcp context retry app") {
+		t.Errorf("context status printed\n%s\nwant it to report that a retry is needed", out)
+	}
+
+	// And a second create is not the way back: a context is immutable, so
+	// recovering a stuck one is the retry's job specifically.
+	before := contextRecord(t, data, "app")
+	if _, err := contextRun(t, data, "create", "app", "--repo", "demo", "--ref", "release/2.x"); codeFor(t, err) != vacerr.InvalidArgument {
+		t.Errorf("context create over a stuck context = %v, want %q", err, vacerr.InvalidArgument)
+	}
+	if after := contextRecord(t, data, "app"); after != before {
+		t.Errorf("a refused create changed the stuck record:\n before %+v\n  after %+v", before, after)
+	}
+
+	if _, err := contextRun(t, data, "retry", "app"); err != nil {
+		t.Fatalf("context retry of a context killed mid-lifecycle: %v", err)
+	}
+	c := contextRecord(t, data, "app")
+	if c.State != contextReady || c.Revision != mainSHA {
+		t.Errorf("record after a retry = %+v, want %s pinned to %s", c, contextReady, mainSHA)
+	}
+	if _, err := contextRun(t, data, "verify", "app"); err != nil {
+		t.Errorf("context verify after recovering a stuck context: %v", err)
+	}
+	if out, err := contextRun(t, data, "status", "app"); err != nil || !strings.Contains(out, "not needed") {
+		t.Errorf("context status = %q (err %v), want it to report that no retry is needed", out, err)
+	}
+}
+
+// TestContextRetryRefusesWhatItMustNotRebuild keeps a retry from being a way to
+// take a served context's source away underneath it, and from inventing a
+// context that is not managed.
+func TestContextRetryRefusesWhatItMustNotRebuild(t *testing.T) {
+	data, _, _ := managed(t)
+	if _, err := contextRun(t, data, "create", "app", "--repo", "demo", "--ref", "main"); err != nil {
+		t.Fatalf("context create: %v", err)
+	}
+	before := contextRecord(t, data, "app")
+
+	if _, err := contextRun(t, data, "retry", "app"); codeFor(t, err) != vacerr.InvalidArgument {
+		t.Errorf("context retry of a READY context = %v, want %q", err, vacerr.InvalidArgument)
+	}
+	if after := contextRecord(t, data, "app"); after != before {
+		t.Errorf("a refused retry changed the record:\n before %+v\n  after %+v", before, after)
+	}
+
+	if _, err := contextRun(t, data, "retry", "absent"); codeFor(t, err) != vacerr.ContextNotFound {
+		t.Errorf("context retry of an unmanaged context, want %q", vacerr.ContextNotFound)
+	}
+	if _, err := contextRun(t, data, "retry"); err == nil {
+		t.Error("context retry without NAME returned nil, want an error")
+	}
+}
+
+// TestConcurrentLifecycleOnOneRepositoryStaysConsistent is AC #2 through the
+// commands themselves: two creates and a sync of one repository launched
+// together leave every one of the four things that have to agree — the clone,
+// the records, the search index and the graphs — agreeing.
+//
+// The index is what this is really about. Every create rebuilds the
+// repository's one shared shard out of whatever context records it reads, so
+// two of them running at once could have the one that read the older records
+// finish last, leaving a shard with no ref for a context the registry calls
+// READY. That is a context the query plane would serve out of nothing, and the
+// last assertion below is the one that would catch it.
+func TestConcurrentLifecycleOnOneRepositoryStaysConsistent(t *testing.T) {
+	data, mainSHA, branchSHA := managed(t)
+
+	var wg sync.WaitGroup
+	for id, ref := range map[string]string{"alpha": "main", "beta": "release/2.x"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := contextRun(t, data, "create", id, "--repo", "demo", "--ref", ref); err != nil {
+				t.Errorf("context create %s: %v", id, err)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := repoRun(t, data, "sync", "demo"); err != nil {
+			t.Errorf("repo sync: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	alpha, beta := contextRecord(t, data, "alpha"), contextRecord(t, data, "beta")
+	if alpha.State != contextReady || beta.State != contextReady {
+		t.Fatalf("states after concurrent creates = %q and %q, want both %s", alpha.State, beta.State, contextReady)
+	}
+	// The sync ran beside them and moved neither: each context pins the
+	// revision of the ref it asked for.
+	if alpha.Revision != mainSHA || beta.Revision != branchSHA {
+		t.Errorf("revisions = %q and %q, want %q and %q", alpha.Revision, beta.Revision, mainSHA, branchSHA)
+	}
+	for _, c := range []store.Context{alpha, beta} {
+		if _, err := contextRun(t, data, "verify", c.ID); err != nil {
+			t.Errorf("context verify %s after a concurrent create: %v", c.ID, err)
+		}
+	}
+
+	// And the shard really carries both refs, asked of Zoekt rather than of the
+	// records that claim it should.
+	url := demorepo.StartZoekt(t, filepath.Join(data, "zoekt"))
+	for _, c := range []store.Context{alpha, beta} {
+		indexed, err := searchRefIndexed(t.Context(), url, c)
+		if err != nil {
+			t.Fatalf("searchRefIndexed(%s): %v", c.ID, err)
+		}
+		if !indexed {
+			t.Errorf("%s is READY but its search ref %q is not in the index a concurrent create rebuilt", c.ID, c.Branch)
+		}
+	}
 }
 
 func TestContextRejectsUnknownSubcommands(t *testing.T) {

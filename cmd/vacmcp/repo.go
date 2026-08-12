@@ -248,14 +248,23 @@ func repoSync(args []string, out io.Writer) error {
 			return err
 		}
 
-		r.State = repoReady
-		fetchErr := runGit(context.Background(), "-C", path, "fetch", "--prune", "--tags")
-		if fetchErr != nil {
-			r.State = repoFailed
-		} else {
-			r.LastSyncAt = time.Now().UTC()
-		}
-		if err := s.PutRepository(r); err != nil {
+		// One repository's lock at a time, taken and released inside the loop:
+		// --all syncs every repository without ever holding two of them, which
+		// is what keeps a slow fetch from blocking work on the rest. A fetch
+		// rewrites the refs a create resolves against, so it is not something to
+		// run beside one on the same clone.
+		var fetchErr error
+		err = withRepositoryLock(s, r.Name, func() error {
+			r.State = repoReady
+			fetchErr = runGit(context.Background(), "-C", path, "fetch", "--prune", "--tags")
+			if fetchErr != nil {
+				r.State = repoFailed
+			} else {
+				r.LastSyncAt = time.Now().UTC()
+			}
+			return s.PutRepository(r)
+		})
+		if err != nil {
 			return err
 		}
 
@@ -295,36 +304,42 @@ func repoRemove(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.Repository(name); err != nil {
-		return err
-	}
-	dependents, err := contextsOf(s, name)
-	if err != nil {
-		return err
-	}
-	if len(dependents) > 0 {
-		return vacerr.New(
-			vacerr.InvalidArgument,
-			fmt.Sprintf("repo remove: repository %q still has %d context(s): %s; remove them first", name, len(dependents), strings.Join(dependents, ", ")),
-			map[string]any{"repository": name, "contexts": dependents},
-		)
-	}
-
 	path, err := s.RepositoryDir(name)
 	if err != nil {
 		return err
 	}
-	// The clone goes first: a failure there leaves the record in place, so the
-	// repository is still managed and still removable. The other order would
-	// leave an unreferenced clone nothing knows about.
-	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("repo remove: cannot delete the clone of %q at %s: %w", name, path, err)
-	}
-	if err := s.DeleteRepository(name); err != nil {
+
+	// The check that no context depends on this repository and the deletion it
+	// permits are one operation: without the lock a `context create` could land
+	// between them and leave a context pinned to a clone that is being deleted.
+	return withRepositoryLock(s, name, func() error {
+		if _, err := s.Repository(name); err != nil {
+			return err
+		}
+		dependents, err := contextsOf(s, name)
+		if err != nil {
+			return err
+		}
+		if len(dependents) > 0 {
+			return vacerr.New(
+				vacerr.InvalidArgument,
+				fmt.Sprintf("repo remove: repository %q still has %d context(s): %s; remove them first", name, len(dependents), strings.Join(dependents, ", ")),
+				map[string]any{"repository": name, "contexts": dependents},
+			)
+		}
+
+		// The clone goes first: a failure there leaves the record in place, so
+		// the repository is still managed and still removable. The other order
+		// would leave an unreferenced clone nothing knows about.
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("repo remove: cannot delete the clone of %q at %s: %w", name, path, err)
+		}
+		if err := s.DeleteRepository(name); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(out, "%s\tREMOVED\n", name)
 		return err
-	}
-	_, err = fmt.Fprintf(out, "%s\tREMOVED\n", name)
-	return err
+	})
 }
 
 // contextsOf returns the IDs of the contexts backed by the named repository, in

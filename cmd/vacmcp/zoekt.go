@@ -66,10 +66,13 @@ func dropSearchRef(ctx context.Context, repoDir string, c store.Context) error {
 // context: the revision written into it comes from the record, which is
 // immutable, and git refuses a commit the clone does not have.
 //
-// ponytail: nothing serialises two of these on one repository, so a concurrent
-// pair can have the one that read the older records finish last and index a
-// stale set of branches. TASK-35 is where the per-repository lock decision-4
-// calls for goes.
+// Reading the records and indexing what they say is not atomic on its own: two
+// of these running on one repository could have the one that read the older
+// records finish last and leave a shard missing a context the registry calls
+// READY. What keeps them apart is that every command reaching this holds the
+// repository's lock (see withRepositoryLock), so this is never entered twice for
+// one repository at a time. It does not take that lock itself: its callers hold
+// it already, and taking it again is the one way that lock deadlocks.
 func indexRepository(ctx context.Context, s *store.Store, repository string) error {
 	contexts, err := s.Contexts()
 	if err != nil {
