@@ -82,6 +82,13 @@ func repoAdd(args []string, out io.Writer) error {
 	if strings.TrimSpace(*url) == "" {
 		return errors.New("repo add: --url is required")
 	}
+	if embedsCredential(*url) {
+		return vacerr.New(
+			vacerr.InvalidArgument,
+			"repo add: --url must not embed a credential; leave it out of the URL and let system git authenticate through an SSH agent, ~/.ssh/config or a git credential helper",
+			map[string]any{"repository": name},
+		)
+	}
 
 	s, err := store.Open(*dataDir)
 	if err != nil {
@@ -367,6 +374,42 @@ func lastSync(r store.Repository) string {
 	return r.LastSyncAt.Format(time.RFC3339)
 }
 
+// embedsCredential reports whether a git remote URL carries a secret in its
+// userinfo component.
+//
+// Such a URL is refused rather than masked, because masking cannot hold: git
+// writes the URL it was given into remote.origin.url of the clone, so a
+// credential vacmcp redacted in its own record and output would still be sitting
+// in plain text in .git/config inside the data directory. The only place the
+// leak can be stopped is before git is ever handed the URL.
+//
+// A password is a secret under any transport, so a userinfo with a colon in it
+// is refused whatever the scheme. Over HTTP the whole userinfo is the
+// credential — basic auth, and a forge token is routinely put in the username
+// field, where nothing can tell it from a login name — so any userinfo at all is
+// refused there. `ssh://git@host` and `git@host:path` are left alone: that
+// userinfo is an SSH login name, the secret behind it lives in the agent or the
+// key file, and it is the form decision-4 expects people to use.
+func embedsCredential(remote string) bool {
+	// The authority is what precedes the first slash, with any scheme taken off
+	// first: that holds for scp-like syntax too, whose [user@]host:path has no
+	// slash before the path.
+	scheme, rest, hasScheme := strings.Cut(remote, "://")
+	if !hasScheme {
+		rest = remote
+	}
+	authority, _, _ := strings.Cut(rest, "/")
+
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return false
+	}
+	if strings.Contains(authority[:at], ":") {
+		return true
+	}
+	return hasScheme && (strings.EqualFold(scheme, "http") || strings.EqualFold(scheme, "https"))
+}
+
 // runGit runs one git command, with every argument passed as its own element of
 // argv. No part of it is ever a shell string: the repository URL and the paths
 // derived from a repository name come from the command line, and handing those
@@ -376,11 +419,26 @@ func lastSync(r store.Repository) string {
 // that begins with a dash is a URL git fails to clone rather than an option git
 // obeys.
 //
+// Avoiding the shell is not enough on its own: git's remote helpers are a shell
+// of their own. `ext::sh -c ...` runs a command by design, and a user who has
+// enabled it in their own git configuration would be running it from a URL
+// vacmcp passed on. GIT_PROTOCOL_FROM_USER=0 is git's own way to say this URL
+// did not come from someone typing a git command, which turns every transport
+// enabled only at the "user" level back off. That includes the local file
+// transport, which vacmcp does support as a remote, so it is re-enabled
+// explicitly and only it.
+//
+// The environment is otherwise inherited whole, because that is where
+// authentication lives: SSH_AUTH_SOCK, GIT_SSH_COMMAND, HOME and everything git
+// reads a credential helper out of. vacmcp holds no credential of its own.
+//
 // git's messages are localised, so its output is passed through verbatim and
 // never parsed: the reason a fetch failed is for the user to read, not for this
 // command to branch on.
 func runGit(ctx context.Context, args ...string) error {
-	out, err := exec.CommandContext(ctx, "git", args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "protocol.file.allow=always"}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_PROTOCOL_FROM_USER=0")
+	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}
