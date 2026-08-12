@@ -43,6 +43,7 @@ Usage:
   vacmcp contexts --config FILE             list the configured contexts
   vacmcp doctor --config FILE               check the dependencies and contexts
   vacmcp repo SUBCOMMAND                    manage the repositories in the data directory
+  vacmcp context SUBCOMMAND                 manage the contexts in the data directory
   vacmcp version                            print the vacmcp version`
 
 func main() {
@@ -71,6 +72,8 @@ func run(args []string, out io.Writer) error {
 		return doctor(args[1:], out)
 	case "repo":
 		return repoCommand(args[1:], out)
+	case "context":
+		return contextCommand(args[1:], out)
 	case "version":
 		_, err := fmt.Fprintln(out, version)
 		return err
