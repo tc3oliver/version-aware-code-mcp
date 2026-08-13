@@ -8,17 +8,34 @@
 # waiting for.
 #
 # workflow_dispatch is deliberate — this tier must be runnable on demand from
-# the Actions tab without pushing a tag. TASK-46 adds the nightly `schedule`
-# trigger alongside it.
+# the Actions tab without pushing a tag.
 #
-# Every step is a hard gate, and `defaults.run.shell: bash` selects
+# Every step but the last is a hard gate, and `defaults.run.shell: bash` selects
 # `bash --noprofile --norc -eo pipefail` so a `go test ... | tee` reports the
-# test's status rather than tee's.
+# test's status rather than tee's. The last step reports rather than gates,
+# which is why it is the only one carrying `if: always()`.
 name: Full Stress Gate
 
 on:
   workflow_call:
   workflow_dispatch:
+  # Nightly, because this tier answers questions that change without the tree
+  # changing: govulncheck's answer moves when its database does, and the crash
+  # and concurrency combinations below are worth running again on a tree nobody
+  # touched.
+  #
+  # Nothing here is billed — a public repository runs on GitHub's free hosted
+  # runners — so the time is picked to be out of the way rather than cheap.
+  # 21:17 UTC is 05:17 in UTC+8, the zone every commit in this repository is
+  # authored in, and it falls in the gap between the two windows that history
+  # clusters in: the run is finished and on the Actions tab before the day
+  # starts, rather than landing in the middle of one. The minute is not 0
+  # because GitHub delays scheduled runs most at the top of the hour.
+  #
+  # A failed nightly is a red run on the Actions tab and nothing more. This
+  # repository has no notification wiring for a workflow to reach for.
+  schedule:
+    - cron: "17 21 * * *"
 
 permissions:
   contents: read
@@ -47,15 +64,85 @@ jobs:
           go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
 
       - uses: ./.github/actions/prepare-engines
+        id: engines
 
       # Everything, tagged and raced, /integration included. -timeout is a
       # watchdog rather than a budget (the Makefile explains why these need one
       # at all), and it is larger here than in the other tiers because the
       # detector makes the same real-engine work legitimately slower.
+      #
+      # The start time is written to a file rather than to $GITHUB_ENV because
+      # the step that reads it back is the one that runs when this step failed.
       - name: Race test against the real engines
         run: |
+          date +%s >"$RUNNER_TEMP/full.start"
           go test -tags=integration -race -timeout 60m -v ./... 2>&1 | tee "$RUNNER_TEMP/full.log"
           .github/assert-no-skips.sh "$RUNNER_TEMP/full.log"
 
       - name: govulncheck
         run: govulncheck ./...
+
+      # What the run cost and what it was run against, on the run's own page.
+      # It parses the log the test step already wrote — the same one
+      # assert-no-skips.sh reads — so it needs no test-reporting tool and adds
+      # no second execution of anything.
+      #
+      # `if: always()` because a failed run is the one worth reading a summary
+      # of. It reports and never gates: nothing below can turn a red run green,
+      # and every command in it exits 0 by construction so it cannot turn a
+      # green run red either. That last part is why the tables are built with
+      # awk rather than `grep | head`: grep exits 1 on no match and head
+      # SIGPIPEs its writer, and both are failures under `-eo pipefail`.
+      - name: Run summary
+        if: always()
+        env:
+          ZOEKT_VERSION: ${{ steps.engines.outputs.zoekt-version }}
+          CBM_VERSION: ${{ steps.engines.outputs.cbm-version }}
+        run: |
+          log="$RUNNER_TEMP/full.log"
+          if [ ! -f "$log" ]; then
+            echo "The run did not get as far as testing anything, so there is no log to summarise." >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # tee's last write to the log is when the test run stopped, so this
+          # is the tests' own wall clock rather than everything since them —
+          # and it is still right when the test step is what failed.
+          elapsed=$(( $(stat -c %Y "$log") - $(cat "$RUNNER_TEMP/full.start") ))
+
+          {
+            echo "## Full stress gate"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Test run | $((elapsed / 60))m $((elapsed % 60))s |"
+            echo "| Zoekt | \`${ZOEKT_VERSION:-not installed}\` |"
+            echo "| codebase-memory-mcp | \`${CBM_VERSION:-not installed}\` |"
+
+            echo
+            echo "### Release gates"
+            echo
+            echo "| Gate | Result |"
+            echo "| --- | --- |"
+            for gate in \
+              TestVersionCorrectnessReleaseGate \
+              TestManagedLifecycleReleaseGate \
+              TestManagedContextSurvivesTheRemoteMoving \
+              TestManagedSnapshotIsFixedForTheLifeOfTheServer \
+              TestRepoSyncRunsBesideARunningManagedServer; do
+              # $3 is the whole test name, so one of the gate's own subtests
+              # never answers for the gate itself.
+              result=$(awk -v gate="$gate" '$1 == "---" && $3 == gate { print substr($2, 1, length($2) - 1); exit }' "$log")
+              echo "| \`$gate\` | ${result:-NOT RUN} |"
+            done
+
+            echo
+            echo "### Slowest 10 tests"
+            echo
+            echo "| Test | Result | Seconds |"
+            echo "| --- | --- | --- |"
+            # Only the lines in column 0: a subtest is indented under its
+            # parent and its seconds are already counted in the parent's.
+            awk '/^--- (PASS|FAIL): / { gsub(/[()s]/, "", $4); print $4, $3, substr($2, 1, length($2) - 1) }' "$log" |
+              sort -rn |
+              awk 'NR <= 10 { printf "| `%s` | %s | %s |\n", $2, $3, $1 }'
+          } >>"$GITHUB_STEP_SUMMARY"
