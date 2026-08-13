@@ -11,12 +11,19 @@
 // is deliberately no repository, branch or revision field on any of them: the
 // scope comes from the configuration the context ID names, so a caller cannot
 // widen or redirect the version it is answered in.
+//
+// Every result type answers the same way round: it has no exported fields, so
+// the only ones that exist outside this package came out of a method here, and
+// each of those carries the version it was answered in and the evidence backing
+// it. doc-1's Tool Contract — never a bare answer — is therefore a property of
+// the types rather than a rule each method has to remember.
 package engine
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/tc3oliver/version-aware-code-mcp/evidence"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
@@ -45,6 +52,30 @@ func New(contexts *resolver.Resolver, search provider.SearchProvider, graph prov
 	return &Engine{contexts: contexts, search: search, graph: graph, source: source}
 }
 
+// answer is the half of a successful result that doc-1's Tool Contract fixes:
+// the version the query ran in, and the citations that make the answer
+// checkable at its source. It is embedded in all three result types so that
+// half is written once and cannot be forgotten by one of them.
+//
+// Its fields are unexported and so is the type, which is what makes the
+// contract structural: no code outside this package can name the field to fill
+// it in, so the only results carrying a context are the ones a method here
+// built.
+type answer struct {
+	codeCtx   vacctx.CodeContext
+	citations []evidence.Evidence
+}
+
+// Context reports the version the query was answered in — the same context the
+// provider was handed, except that [Engine.GetCode] reports the revision the
+// bytes actually came from.
+func (a answer) Context() vacctx.CodeContext { return a.codeCtx }
+
+// Evidence reports where the answer can be checked. On a successful result it
+// is non-nil and empty only when there was nothing to cite; nil is the zero
+// value, which is to say a result that no method returned.
+func (a answer) Evidence() []evidence.Evidence { return a.citations }
+
 // SearchCodeRequest is a search inside one version context. Where to search is
 // the context's to say, which is why there is no repository or branch here.
 type SearchCodeRequest struct {
@@ -52,11 +83,17 @@ type SearchCodeRequest struct {
 	Query   string
 }
 
-// SearchCodeResult is the matches with the version they were found in.
+// SearchCodeResult is the matches with the version they were found in and one
+// citation per match. The matches and the evidence carry the same facts on
+// purpose: for a search the match is its own citation.
 type SearchCodeResult struct {
-	Context vacctx.CodeContext
-	Matches []provider.SearchResult
+	answer
+	matches []provider.SearchResult
 }
+
+// Matches reports the matches in the provider's ranked order. It is empty, not
+// an error, when nothing in this version matched.
+func (r SearchCodeResult) Matches() []provider.SearchResult { return r.matches }
 
 // TraceCallsRequest is a walk of the call graph around one symbol, inside one
 // version context.
@@ -67,13 +104,16 @@ type TraceCallsRequest struct {
 	Depth     int
 }
 
-// TraceCallsResult is the traversal with the version it was traced in. Graph's
-// Symbol is what the provider resolved the request to, which is not always the
-// string that was asked for.
+// TraceCallsResult is the traversal with the version it was traced in, cited at
+// the call sites it walked.
 type TraceCallsResult struct {
-	Context vacctx.CodeContext
-	Graph   provider.CallGraph
+	answer
+	graph provider.CallGraph
 }
+
+// Graph reports the traversal. Its Symbol is what the provider resolved the
+// request to, which is not always the string that was asked for.
+func (r TraceCallsResult) Graph() provider.CallGraph { return r.graph }
 
 // GetCodeRequest is a read of one line range, at the revision a context
 // declares.
@@ -84,13 +124,16 @@ type GetCodeRequest struct {
 	EndLine   int
 }
 
-// GetCodeResult is the content with the version it was read at. Context's
-// Revision is the revision the bytes actually came from, not the spelling the
-// configuration used.
+// GetCodeResult is the content with the version it was read at, cited at the
+// line range it came from. Its Context's Revision is the revision the bytes
+// actually came from, not the spelling the configuration used.
 type GetCodeResult struct {
-	Context vacctx.CodeContext
-	Source  provider.SourceContent
+	answer
+	source provider.SourceContent
 }
+
+// Source reports the content read, with the path and line range it covers.
+func (r GetCodeResult) Source() provider.SourceContent { return r.source }
 
 // ListContexts returns every configured version context, sorted by ID.
 //
@@ -122,7 +165,15 @@ func (e *Engine) SearchCode(ctx context.Context, req SearchCodeRequest) (SearchC
 	if err != nil {
 		return SearchCodeResult{}, err
 	}
-	return SearchCodeResult{Context: codeCtx, Matches: matches}, nil
+
+	// Built empty rather than nil so a result that cited nothing is still a
+	// result that carries evidence: "this version has no such code" is an answer
+	// with an empty citation list, not an answer with no citation list.
+	citations := make([]evidence.Evidence, 0, len(matches))
+	for _, match := range matches {
+		citations = append(citations, evidence.At(match.Path, match.Line, match.Line, match.Snippet))
+	}
+	return SearchCodeResult{answer{codeCtx, citations}, matches}, nil
 }
 
 // TraceCalls walks the call graph around req.Symbol in the graph the context
@@ -156,7 +207,19 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 	if err != nil {
 		return TraceCallsResult{}, err
 	}
-	return TraceCallsResult{Context: codeCtx, Graph: *graph}, nil
+
+	citations := make([]evidence.Evidence, 0, len(graph.Edges))
+	seen := map[evidence.Evidence]bool{}
+	for _, edge := range graph.Edges {
+		// Several calls written in one function cite one location, so the same
+		// citation is listed once.
+		at := evidence.At(edge.Path, edge.Line, edge.Line, "")
+		if !seen[at] {
+			seen[at] = true
+			citations = append(citations, at)
+		}
+	}
+	return TraceCallsResult{answer{codeCtx, citations}, *graph}, nil
 }
 
 // GetCode reads lines [req.StartLine, req.EndLine] of req.Path as they are at
@@ -184,5 +247,10 @@ func (e *Engine) GetCode(ctx context.Context, req GetCodeRequest) (GetCodeResult
 		return GetCodeResult{}, err
 	}
 	codeCtx.Revision = src.Revision
-	return GetCodeResult{Context: codeCtx, Source: *src}, nil
+
+	// The one citation is the range that was read, at the revision it was read
+	// at. No snippet: the content is the result, and repeating it as evidence
+	// would cite the answer with itself.
+	citations := []evidence.Evidence{evidence.At(src.Path, src.StartLine, src.EndLine, "")}
+	return GetCodeResult{answer{codeCtx, citations}, *src}, nil
 }
