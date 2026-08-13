@@ -18,6 +18,13 @@ type Fixture struct {
 	ZoektIndex string
 }
 
+// AmbiguousGraph is the CBM project the script builds beside the two versions:
+// one function name declared in two packages. It is no version of the demo
+// repository — the repository duplicates no name — so it is named here rather
+// than configured as a context, and a test asking about an ambiguous symbol
+// points at it instead of indexing a project of its own.
+const AmbiguousGraph = "vacmcp-demo-ambiguous"
+
 // Prepared returns the fixture, skipping the test when it has not been built on
 // this machine. Building it needs Zoekt and CBM, which a plain `make test` does
 // not require, so an integration test asks for the fixture and gets skipped

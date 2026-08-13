@@ -51,14 +51,21 @@ func cbmOrSkip(t *testing.T) {
 // again.
 func discardGraphs(t *testing.T, dataDir string) {
 	t.Helper()
+	discardGraphsIn(dataDir, t.Logf)
+}
+
+// discardGraphsIn is discardGraphs for a caller that has no *testing.T to
+// report to, which the shared installation's teardown does not: it runs from
+// TestMain, after the last test.
+func discardGraphsIn(dataDir string, logf func(string, ...any)) {
 	s, err := store.Open(dataDir)
 	if err != nil {
-		t.Logf("cleanup: store.Open(%s): %v", dataDir, err)
+		logf("cleanup: store.Open(%s): %v", dataDir, err)
 		return
 	}
 	contexts, err := s.Contexts()
 	if err != nil {
-		t.Logf("cleanup: Contexts(): %v", err)
+		logf("cleanup: Contexts(): %v", err)
 		return
 	}
 
@@ -73,7 +80,7 @@ func discardGraphs(t *testing.T, dataDir string) {
 		go func() {
 			defer wg.Done()
 			if out, err := exec.Command(cbmCommand, "cli", "delete_project", "--project", c.GraphRef).CombinedOutput(); err != nil {
-				t.Logf("cleanup: delete_project %s: %v\n%s", c.GraphRef, err, out)
+				logf("cleanup: delete_project %s: %v\n%s", c.GraphRef, err, out)
 			}
 		}()
 	}
@@ -157,7 +164,8 @@ func tracedCallees(t *testing.T, p *cbmadapter.Provider, c store.Context) []stri
 // its own revision, a graph that answers about that revision, and no clone of
 // its own.
 func TestContextCreateBuildsAWorktreeAndAGraphPerContext(t *testing.T) {
-	data, first, second := managedVersions(t, "app-v1", "app-v2")
+	prepared := preparedManaged(t)
+	data, first, second := prepared.data, prepared.legacy, prepared.modern
 	clone := filepath.Join(data, "repos", "demo")
 
 	// AC #1. The checkout is the pinned commit, and it really is that version's

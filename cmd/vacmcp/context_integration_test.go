@@ -171,6 +171,9 @@ func TestContextCreateRequiresARepositoryAndARef(t *testing.T) {
 // over a managed context is refused rather than repinning it, which is what
 // makes "another revision is another context" true of the code and not just of
 // the documentation.
+// It builds its own installation, as every test of a command that writes does:
+// what it holds is that a refused create writes nothing, and the shared
+// installation is only for tests that ask nothing of it but answers.
 func TestContextCreateRefusesToReplaceAManagedContext(t *testing.T) {
 	data, mainSHA, branchSHA := managed(t)
 
@@ -239,35 +242,33 @@ func TestContextRecordIsNeverRewritten(t *testing.T) {
 // repository and a ref, and the search ref, the graph project and the worktree
 // path all come out of that.
 func TestContextCreateGeneratesTheInternalNames(t *testing.T) {
-	data, mainSHA, _ := managed(t)
-	for _, id := range []string{"app-v1", "app-v2"} {
-		if _, err := contextRun(t, data, "create", id, "--repo", "demo", "--ref", "main"); err != nil {
-			t.Fatalf("context create %s: %v", id, err)
-		}
-	}
+	prepared := preparedManaged(t)
+	data, revision := prepared.data, prepared.modern
 
-	first, second := contextRecord(t, data, "app-v1"), contextRecord(t, data, "app-v2")
-	if first.Branch != "vacmcp/app-v1-"+mainSHA[:shortSHA] {
+	// The two contexts of the shared installation that pin one revision, so
+	// nothing but the name they were given differs between the records below.
+	first, second := contextRecord(t, data, preparedModern), contextRecord(t, data, preparedTwin)
+	if first.Branch != "vacmcp/"+preparedModern+"-"+revision[:shortSHA] {
 		t.Errorf("search ref = %q, want it derived from the context name and the short SHA", first.Branch)
 	}
-	if first.GraphRef != "vacmcp-demo-app-v1-"+mainSHA[:shortSHA] {
+	if first.GraphRef != "vacmcp-demo-"+preparedModern+"-"+revision[:shortSHA] {
 		t.Errorf("graph ref = %q, want it derived from the repository, the context name and the short SHA", first.GraphRef)
 	}
 	// Two contexts of one repository at one revision still get names of their
 	// own, or removing either would take the other's artifacts with it.
 	if first.Branch == second.Branch || first.GraphRef == second.GraphRef {
-		t.Errorf("app-v1 %+v and app-v2 %+v share a generated name", first, second)
+		t.Errorf("%s %+v and %s %+v share a generated name", preparedModern, first, preparedTwin, second)
 	}
 	// The generated search ref is one git will accept, since the search index
 	// lifecycle has to be able to create it.
 	mustGit(t, "check-ref-format", "refs/heads/"+first.Branch)
 
-	out, err := contextRun(t, data, "status", "app-v1")
+	out, err := contextRun(t, data, "status", preparedModern)
 	if err != nil {
 		t.Fatalf("context status: %v", err)
 	}
-	worktree := filepath.Join(data, "worktrees", "demo", "app-v1")
-	for _, want := range []string{"app-v1", "demo", mainSHA, contextReady, first.Branch, first.GraphRef, worktree} {
+	worktree := filepath.Join(data, "worktrees", "demo", preparedModern)
+	for _, want := range []string{preparedModern, "demo", revision, contextReady, first.Branch, first.GraphRef, worktree} {
 		if !strings.Contains(out, want) {
 			t.Errorf("context status printed\n%s\nwant it to report %q", out, want)
 		}

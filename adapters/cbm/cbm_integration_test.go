@@ -3,7 +3,6 @@
 package cbm_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -124,20 +123,19 @@ func TestTraceCallsWalksBothDirections(t *testing.T) {
 }
 
 // TestTraceCallsAmbiguousSymbol is AC #3. The demo repository has no duplicated
-// name, so the ambiguity is built as its own real CBM project: two packages,
-// one function name. The adapter must report both candidates, because returning
-// the call graph of whichever one CBM listed first is a wrong answer that looks
-// exactly like a right one.
+// name, so the ambiguity is its own real CBM project, built with the rest of
+// the prepared baseline: two packages, one function name. The adapter must
+// report both candidates, because returning the call graph of whichever one CBM
+// listed first is a wrong answer that looks exactly like a right one.
 func TestTraceCallsAmbiguousSymbol(t *testing.T) {
 	cfg := fixture(t)
-	graphRef := indexAmbiguousProject(t, cfg.Providers.CBM.Command)
 
 	codeCtx := vacctx.CodeContext{
 		ID:         "ambiguous",
 		Repository: "versioned-demo-repo",
 		Branch:     demorepo.V1,
 		Revision:   "HEAD",
-		GraphRef:   graphRef,
+		GraphRef:   demorepo.AmbiguousGraph,
 	}
 	graph, err := newProvider(t, cfg).TraceCalls(t.Context(), codeCtx, provider.TraceRequest{
 		Symbol:    "Duplicated",
@@ -238,41 +236,6 @@ func TestTraceCallsGraphProviderUnavailable(t *testing.T) {
 		}
 		t.Logf("unindexed graph_ref -> %v", err)
 	})
-}
-
-// indexAmbiguousProject builds a real CBM project holding one function name in
-// two packages, and returns its graph_ref. The project is deleted afterwards so
-// a test run leaves nothing behind in CBM's store.
-func indexAmbiguousProject(t *testing.T, command string) string {
-	t.Helper()
-	const graphRef = "vacmcp-cbm-adapter-ambiguous"
-
-	dir := t.TempDir()
-	files := map[string]string{
-		"go.mod":       "module ambiguous\n\ngo 1.26\n",
-		"alpha/dup.go": "package alpha\n\nfunc Duplicated() {}\n",
-		"beta/dup.go":  "package beta\n\nfunc Duplicated() {}\n",
-		"only/once.go": "package only\n\nfunc Unique() {}\n",
-	}
-	for name, body := range files {
-		path := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatalf("MkdirAll(%s): %v", filepath.Dir(path), err)
-		}
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatalf("WriteFile(%s): %v", path, err)
-		}
-	}
-
-	if out, err := exec.Command(command, "cli", "index_repository", "--repo-path", dir, "--name", graphRef).CombinedOutput(); err != nil {
-		t.Fatalf("cbm index_repository: %v\n%s", err, out)
-	}
-	t.Cleanup(func() {
-		if out, err := exec.Command(command, "cli", "delete_project", "--project", graphRef).CombinedOutput(); err != nil {
-			t.Logf("cbm delete_project %s: %v\n%s", graphRef, err, out)
-		}
-	})
-	return graphRef
 }
 
 func contains(names []string, want string) bool {

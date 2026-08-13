@@ -50,6 +50,19 @@ graph() {
 graph release/v1 vacmcp-demo-v1
 graph release/v2 vacmcp-demo-v2
 
+# One more graph, and not a version of the demo repository: two packages
+# declaring one function name, which is the ambiguity trace_calls has to report
+# both candidates for rather than answer from whichever CBM listed first. The
+# demo repository duplicates no name, so it is built here — once, with the rest
+# of the baseline — instead of by each test that asks about it.
+ambiguous="$fixture/ambiguous"
+mkdir -p "$ambiguous/alpha" "$ambiguous/beta" "$ambiguous/only"
+printf 'module ambiguous\n\ngo 1.26\n' >"$ambiguous/go.mod"
+printf 'package alpha\n\nfunc Duplicated() {}\n' >"$ambiguous/alpha/dup.go"
+printf 'package beta\n\nfunc Duplicated() {}\n' >"$ambiguous/beta/dup.go"
+printf 'package only\n\nfunc Unique() {}\n' >"$ambiguous/only/once.go"
+"$cbm" cli index_repository --repo-path "$ambiguous" --name vacmcp-demo-ambiguous
+
 # The revisions are resolved here rather than written down: regenerating the
 # fixture may move them, and a config naming a stale revision is exactly the
 # SOURCE_MISMATCH the server is supposed to catch.

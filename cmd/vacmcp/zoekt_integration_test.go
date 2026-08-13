@@ -112,7 +112,11 @@ func searchable(t *testing.T, url string, c store.Context, token string) bool {
 // contexts' search refs exist in the repository's Zoekt index, and the two of
 // them share the one shard rather than each building an index of their own.
 func TestContextCreateIndexesEverySearchRefIntoOneShard(t *testing.T) {
-	data, alpha, beta := indexedRepository(t)
+	// The shared installation: its main defines alphaToken and its release/v2
+	// defines betaToken, which is what tells an index holding both refs from one
+	// answering out of the wrong version.
+	data := preparedManaged(t).data
+	alpha, beta := contextRecord(t, data, preparedLegacy), contextRecord(t, data, preparedModern)
 	clone := filepath.Join(data, "repos", "demo")
 
 	// AC #1, in git: the ref the record names is in the clone and points at the
