@@ -144,6 +144,34 @@ func TestPaths(t *testing.T) {
 	if _, err := s.LockFile("../escape"); err == nil {
 		t.Error("LockFile(\"../escape\") returned nil, want an error")
 	}
+
+	if want := filepath.Join(s.Root(), "locks", ".server.lock"); s.ServerLockFile() != want {
+		t.Errorf("ServerLockFile() = %q, want %q", s.ServerLockFile(), want)
+	}
+}
+
+// TestServerLockFileIsNoRepositorysLock is what lets the data directory's own
+// lock share the locks directory with the per-repository ones: a repository
+// whose lock file collided with it would be a repository whose operations shut
+// a managed server out, or the other way round.
+//
+// The names are taken from the same allowlist the store accepts, plus the two
+// that would collide if the leading character were not the thing keeping them
+// apart.
+func TestServerLockFileIsNoRepositorysLock(t *testing.T) {
+	s := open(t)
+
+	for _, name := range []string{"server", ".server", "_server", "-server", "backend", "a.b-c_d"} {
+		lock, err := s.LockFile(name)
+		if err != nil {
+			// A name the store refuses outright never becomes a lock file at
+			// all, which is the same guarantee by another route.
+			continue
+		}
+		if lock == s.ServerLockFile() {
+			t.Errorf("repository %q locks %s, which is the server lock", name, lock)
+		}
+	}
 }
 
 func TestRepositoryRoundTrip(t *testing.T) {

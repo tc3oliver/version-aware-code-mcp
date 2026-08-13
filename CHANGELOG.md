@@ -38,8 +38,16 @@ cloning, indexing, checking out and writing a configuration file by hand.
   and context commands are not exposed as MCP tools, so a connected agent cannot
   make the server clone or delete anything. A context that is not `READY` is
   absent from the query plane, answering the existing `CONTEXT_NOT_FOUND`.
+- A managed server serves the contexts it read when it started, for as long as
+  it runs. `context create`, `context retry`, `context remove` and `repo remove`
+  are refused while one is running rather than changing what it is serving
+  underneath it: stop the server, run the command, start it again. `repo sync`
+  needs no restart — a fetch moves no pinned revision — and reading a data
+  directory is never refused, so `context list/status/verify`, `repo
+  list/status` and `doctor --managed` still work while a server is up.
 - Per-repository locking, so operations on different repositories run in
-  parallel while a sync, a create and a remove on one repository serialise.
+  parallel while a sync, a create and a remove on one repository serialise, and
+  a data-directory lock a managed server holds for its whole run.
 - `integration/managed_release_gate_test.go`: doc-1 §15's four
   version-correctness checks re-run against contexts the management plane built,
   plus the lifecycle gate — a remote branch that moves after a context was

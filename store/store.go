@@ -11,7 +11,8 @@
 //	contexts/      one JSON record per context
 //	zoekt/         the search index shards
 //	runtime/       generated files, such as the configuration a managed server serves
-//	locks/         one lock file per repository, whose content is never read
+//	locks/         one lock file per repository and one for the data directory
+//	               itself, whose content is never read
 //
 // The records here are the only place a context's pinned revision is written
 // down, so two properties are not negotiable:
@@ -72,6 +73,14 @@ var layout = []string{reposDir, worktreesDir, repositoriesDir, contextsDir, zoek
 // deliberately does not: it is how a reader tells a record from the leftovers of
 // a write that was killed.
 const recordExt = ".json"
+
+// serverLockName is the lock file that stands for the whole data directory
+// rather than for one repository in it.
+//
+// It shares the locks directory with the per-repository files and can never be
+// one of them: a repository name has to begin with a letter or a digit, so
+// nothing that passes validateName produces a file starting with a dot.
+const serverLockName = ".server.lock"
 
 // Repository is the record of one repository managed in this data directory.
 //
@@ -180,6 +189,18 @@ func (s *Store) LockFile(repository string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(s.root, locksDir, repository+".lock"), nil
+}
+
+// ServerLockFile is the file whose lock says a managed server is running on
+// this data directory.
+//
+// It takes no name and validates none: this lock is the data directory itself,
+// not anything a user typed, which is also why it is one file rather than one
+// per repository. A managed server serves the contexts of the whole directory,
+// so what it has to be held against is every command that would take one of
+// them apart.
+func (s *Store) ServerLockFile() string {
+	return filepath.Join(s.root, locksDir, serverLockName)
 }
 
 // ZoektDir is where the search index shards live.

@@ -275,12 +275,33 @@ vacmcp holds no credential either — `git` authenticates the clone the way it
 always does, through your SSH agent, `~/.ssh/config` or a credential helper, and
 a URL with a secret embedded in it is refused rather than stored.
 
-On Unix-like systems, repository lifecycle operations are protected
-across processes.
+A running `vacmcp serve --managed` serves the contexts it read when it started,
+and nothing changes them underneath it. `context create`, `context retry`,
+`context remove` and `repo remove` are refused while one is running rather than
+done behind its back — a server left answering out of a worktree, an index or a
+graph that has been deleted is exactly what this project must never do. To put a
+change into service, stop the server, run the command, and start it again:
 
-On Windows, Managed Mode currently provides in-process locking only.
-Do not run concurrent vacmcp management commands against the same
-repository from separate processes.
+```bash
+# stop the running `vacmcp serve --managed`
+vacmcp context create backend-v3 --repo backend --ref release/3.x
+vacmcp serve --managed
+```
+
+`vacmcp repo sync` is not refused and needs no restart: it fetches, and a fetch
+moves no pinned revision, so a running server keeps answering exactly as it did.
+The commits it brings in reach a server through the next `context create` and the
+restart that follows. Reading is never refused either — `context list`, `status`,
+`verify`, `repo list`, `status` and `doctor --managed` all run while a server
+does, so nothing stops you diagnosing one.
+
+On Unix-like systems both of these hold across processes: repository lifecycle
+operations take turns, and a management command really is refused while a
+managed server runs.
+
+On Windows, Managed Mode currently provides in-process locking only. Do not run
+vacmcp management commands against a data directory that another vacmcp
+management command, or a running `vacmcp serve --managed`, is using.
 
 Static Mode is unaffected.
 
