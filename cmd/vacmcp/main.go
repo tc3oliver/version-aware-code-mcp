@@ -17,6 +17,7 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/git"
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
 	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
@@ -194,12 +195,19 @@ func listenAddress(flagValue string, explicit bool, cfg *config.Config) string {
 //
 // doctor registers them too, on a server of its own, which is how it can report
 // on the MCP layer without going near a port.
-func addTools(srv *mcp.Server, cfg *config.Config) {
+//
+// The four tools share one engine, and the engine is what they are: the tools
+// decode a call and encode a result, everything about which version answers it
+// is the engine's. It is returned so a caller that owns the server's lifetime
+// can shut it down.
+func addTools(srv *mcp.Server, cfg *config.Config) *engine.Engine {
 	contexts := resolver.New(cfg)
-	tools.AddListContexts(srv, cfg.Contexts)
-	tools.AddSearchCode(srv, contexts, zoekt.New(cfg))
-	tools.AddTraceCalls(srv, contexts, cbm.New(cfg))
-	tools.AddGetCode(srv, contexts, git.New(cfg))
+	eng := engine.New(contexts, zoekt.New(cfg), cbm.New(cfg), git.New(cfg))
+	tools.AddListContexts(srv, eng)
+	tools.AddSearchCode(srv, eng)
+	tools.AddTraceCalls(srv, eng)
+	tools.AddGetCode(srv, eng)
+	return eng
 }
 
 // validate reports whether a configuration file loads and passes validation.

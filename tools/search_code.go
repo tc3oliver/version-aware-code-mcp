@@ -2,16 +2,12 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
-	"github.com/tc3oliver/version-aware-code-mcp/provider"
-	"github.com/tc3oliver/version-aware-code-mcp/resolver"
-	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
 // searchCodeInput is what the caller asks for. There is no repository or branch
@@ -48,20 +44,21 @@ type searchCodeOutput struct {
 	Matches  []searchMatch       `json:"matches" jsonschema:"the matches in the engine's ranked order, empty when the query matches nothing in this context"`
 }
 
-// AddSearchCode registers the search_code tool on srv, resolving its context
-// argument with contexts and searching with search.
+// AddSearchCode registers the search_code tool on srv, answered by eng.
 //
-// It takes a graph provider nowhere, and that is doc-1 §23's eighth success
-// criterion held in the type system: search runs on the search provider alone,
-// so CBM being absent, broken or unindexed cannot stop a search from answering.
+// The tool decodes the call, hands it to [engine.Engine.SearchCode] and encodes
+// what comes back: resolving the context, searching it and citing the matches
+// are the engine's, so this holds no version logic of its own to keep correct.
+// doc-1 §23's eighth success criterion — search answers whether or not CBM is
+// present — is [engine.Engine.SearchCode]'s, which reaches no graph provider.
 //
 // Every failure is reported as the error model's wire shape,
 // {"error": {"code": ..., "message": ..., "details": {}}}, on a result marked
-// as an error. An unconfigured context is [vacerr.ContextNotFound] and nothing
+// as an error. An unconfigured context is CONTEXT_NOT_FOUND and nothing
 // else: the tool does not fall back to another context and does not answer an
 // unanswerable question with an empty result, which would read as "this version
 // has no such code".
-func AddSearchCode(srv *mcp.Server, contexts *resolver.Resolver, search provider.SearchProvider) {
+func AddSearchCode(srv *mcp.Server, eng *engine.Engine) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:  "search_code",
 		Title: "Search code in a version context",
@@ -71,56 +68,27 @@ func AddSearchCode(srv *mcp.Server, contexts *resolver.Resolver, search provider
 		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		OutputSchema: searchCodeSchema(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchCodeInput) (*mcp.CallToolResult, any, error) {
-		// The context is resolved before anything else: an ID that names no
-		// configured version has no search to run, and guessing one would answer
-		// from a version the caller never asked for.
-		codeCtx, err := contexts.Resolve(ctx, in.Context)
+		result, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: in.Context, Query: in.Query})
 		if err != nil {
 			return failed(err)
 		}
 
-		results, err := search.Search(ctx, codeCtx, provider.SearchQuery{Query: in.Query})
-		if err != nil {
-			return failed(err)
-		}
-
-		// Not nil slices: null and [] are different answers to an agent, and a
+		// Not a nil slice: null and [] are different answers to an agent, and a
 		// query that matches nothing on this branch is an answer.
-		matches := make([]searchMatch, 0, len(results))
-		citations := make([]evidence.Evidence, 0, len(results))
-		for _, result := range results {
-			matches = append(matches, searchMatch{Path: result.Path, Line: result.Line, Snippet: result.Snippet})
-			citations = append(citations, evidence.At(result.Path, result.Line, result.Line, result.Snippet))
+		matches := make([]searchMatch, 0, len(result.Matches()))
+		for _, match := range result.Matches() {
+			matches = append(matches, searchMatch{Path: match.Path, Line: match.Line, Snippet: match.Snippet})
 		}
 
-		out, err := evidence.New(codeCtx, citations...)
+		out, err := evidence.New(result.Context(), result.Evidence()...)
 		if err != nil {
-			// A resolved context always has all four fields, so this is a bug
+			// The engine only returns a result it could scope, so this is a bug
 			// rather than a caller's mistake. It is still reported instead of
 			// ignored: an output that cannot be scoped must not be sent.
 			return failed(err)
 		}
 		return nil, out.WithResult(searchCodeOutput{Matches: matches}), nil
 	})
-}
-
-// failed turns an error into an error result carrying the vacerr wire shape, so
-// a client reads a code it can branch on rather than a sentence. An error that
-// is not a *[vacerr.Error] has no code to report and is handed to the SDK,
-// which reports it as the tool failing.
-func failed(err error) (*mcp.CallToolResult, any, error) {
-	var vErr *vacerr.Error
-	if !errors.As(err, &vErr) {
-		return nil, nil, err
-	}
-	body, marshalErr := json.Marshal(vErr)
-	if marshalErr != nil {
-		return nil, nil, err
-	}
-	return &mcp.CallToolResult{
-		IsError: true,
-		Content: []mcp.Content{&mcp.TextContent{Text: string(body)}},
-	}, nil, nil
 }
 
 // searchCodeSchema is the schema inferred from [searchCodeOutput], with the two

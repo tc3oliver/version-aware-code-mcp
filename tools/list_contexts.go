@@ -10,12 +10,11 @@ package tools
 
 import (
 	"context"
-	"maps"
-	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
@@ -39,8 +38,8 @@ type listContextsOutput struct {
 	Contexts []listedContext `json:"contexts" jsonschema:"the configured version contexts, empty when none are configured"`
 }
 
-// AddListContexts registers the list_contexts tool on srv, serving the given
-// contexts. It takes no arguments and lists every configured context's id,
+// AddListContexts registers the list_contexts tool on srv, serving the contexts
+// eng knows. It takes no arguments and lists every configured context's id,
 // repository, branch and revision, sorted by ID.
 //
 // This is the tool an agent calls before it knows which versions exist, so an
@@ -56,7 +55,7 @@ type listContextsOutput struct {
 // contract's context block carries. There is no single context to scope it to
 // and no source line to cite, so an envelope here would be an empty ritual
 // rather than the guarantee the contract is asking for.
-func AddListContexts(srv *mcp.Server, contexts map[string]vacctx.CodeContext) {
+func AddListContexts(srv *mcp.Server, eng *engine.Engine) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:  "list_contexts",
 		Title: "List version contexts",
@@ -65,8 +64,8 @@ func AddListContexts(srv *mcp.Server, contexts map[string]vacctx.CodeContext) {
 			"Returns an empty list when no context is configured.",
 		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		OutputSchema: outputSchema(),
-	}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, listContextsOutput, error) {
-		return nil, listContextsOutput{Contexts: list(contexts)}, nil
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listContextsOutput, error) {
+		return nil, listContextsOutput{Contexts: list(eng.ListContexts(ctx))}, nil
 	})
 }
 
@@ -91,18 +90,15 @@ func outputSchema() *jsonschema.Schema {
 	return schema
 }
 
-// list projects contexts onto the wire shape, sorted by ID so repeated calls
-// answer identically.
-func list(contexts map[string]vacctx.CodeContext) []listedContext {
+// list projects the engine's contexts onto the wire shape, keeping the order it
+// answered in, which is sorted by ID so repeated calls answer identically.
+func list(contexts []vacctx.CodeContext) []listedContext {
 	// Not a nil slice: a nil one marshals to null, and null is not the same
 	// answer as "there are none" to the agent reading it.
 	listed := make([]listedContext, 0, len(contexts))
-	for _, id := range slices.Sorted(maps.Keys(contexts)) {
-		codeCtx := contexts[id]
+	for _, codeCtx := range contexts {
 		listed = append(listed, listedContext{
-			// config.Load fills ID in from the key it is filed under; a
-			// hand-built map may not have, so the key is the source of truth.
-			ID:         id,
+			ID:         codeCtx.ID,
 			Repository: codeCtx.Repository,
 			Branch:     codeCtx.Branch,
 			Revision:   codeCtx.Revision,
