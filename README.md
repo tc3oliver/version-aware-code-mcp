@@ -497,12 +497,96 @@ any release is published (`integration/release_gate_test.go`). Any cross-version
 contamination fails the build; this is a release blocker rather than a test that
 can be marked flaky.
 
-## Provider Model
+## Embedding Guide
 
-Tools are written against three interfaces in `provider/`, so no tool knows what
-a Zoekt query or a graph project is:
+The four tools are a thin MCP layer over a Go package you can call directly.
+`engine.Engine` answers all four queries with no server, no transport and no
+wire schema in the way, so a gateway of your own holds the same version
+isolation this server does — and can be tested without a server in front of it.
 
 ```go
+cfg, err := config.Load("vacmcp.yaml")
+if err != nil {
+    return err
+}
+
+eng := engine.New(resolver.New(cfg), zoekt.New(cfg), cbm.New(cfg), git.New(cfg))
+
+result, err := eng.SearchCode(ctx, engine.SearchCodeRequest{
+    Context: "backend-v2",
+    Query:   "NewHandler",
+})
+if err != nil {
+    return errors.Join(err, eng.Close())
+}
+
+result.Context()   // the version it was answered in
+result.Evidence()  // where the answer can be checked
+result.Matches()   // the payload
+```
+
+`engine.New(contexts, search, graph, source)` starts nothing, so it cannot fail.
+Any of the three providers may be nil: the query needing an absent one fails
+with a provider-unavailable error and the others are unaffected, so an engine
+built with a search provider and no graph still searches.
+
+A request names its scope with a context id and nothing else — no request type
+has a repository, branch or revision field — and every successful result carries
+the version it was answered in together with its evidence, because the result
+types have no exported fields and only a method on the engine builds one. The
+version guarantee is inherited by embedding rather than re-implemented.
+
+**Lifecycle.** `Close` releases the dependencies that can be released: one
+implementing `io.Closer` is closed, one that does not is left untouched, and
+every dependency gets its turn whether or not an earlier one failed. That
+feature detection *is* the ownership contract — handing over a provider that can
+be closed is what says "close this one for me". A provider you keep owning — one
+CBM session shared between two engines, say — is handed over without a `Close`
+method, or wrapped in a type that does not promote one:
+
+```go
+type keepOpen struct{ provider.GraphProvider }
+```
+
+Before `New` returns, cleanup is the caller's: a program that starts a CBM
+subprocess and then fails while building the next provider must close what it
+already started, because there is no Engine yet to do it. From then until
+`Close`, it is the Engine's. `engine.Engine.Close`'s doc comment is the
+authority on both.
+
+`examples/embed` is a complete program doing all of the above. It runs with no
+Zoekt, no codebase-memory-mcp and no checkout — its providers are stand-ins — so
+`go run ./examples/embed` prints two versions' answers straight away.
+
+**Supported embedding API.** `engine`, `provider`, `vacctx`, `vacerr`,
+`evidence`, `config`, `resolver`, `adapters/*` and `managed` are supported for
+embedding: documented, tested, and meant to be called from outside this
+repository. Supported is not a permanent backward-compatibility guarantee — that
+is v1.0.0's, in the [Roadmap](#roadmap) below. Until then a breaking change to
+these packages is possible and arrives with a release note, not silently.
+Anything under `internal/` is not part of this and may change in any release.
+
+## Custom Provider Guide
+
+Four interfaces are the whole extension surface. Implement them and the engine
+answers out of your backend — an SCIP index, another graph service, something
+in-house — with no fork of anything here. Every method takes the version scope
+(`vacctx.CodeContext`) as well as a cancellation `context.Context`: an
+implementation that ignores the first answers from the wrong version, which is
+the one thing this project is for.
+
+| Interface | Package | Responsible for |
+| --- | --- | --- |
+| `ContextSource` | `engine` | which versions exist, and resolving an id to one |
+| `SearchProvider` | `provider` | matches confined to that context's repository and branch |
+| `GraphProvider` | `provider` | a traversal of the graph the context's `graph_ref` names, and no other |
+| `SourceProvider` | `provider` | the lines of a file as they are at that context's revision |
+
+```go
+type ContextSource interface {
+    Contexts() []vacctx.CodeContext
+    Resolve(ctx context.Context, id string) (vacctx.CodeContext, error)
+}
 type SearchProvider interface {
     Search(ctx context.Context, codeCtx vacctx.CodeContext, query SearchQuery) ([]SearchResult, error)
 }
@@ -514,11 +598,22 @@ type SourceProvider interface {
 }
 ```
 
-v0.1.0 implements them in `adapters/` with Zoekt, codebase-memory-mcp and git.
-Every method takes the version context as well as a cancellation context: an
-implementation that ignores it answers from the wrong version, which is the one
-thing this project is for. Another engine — SCIP, another graph service,
-something in-house — is a fourth adapter, not a fork.
+Two rules are yours to hold rather than the engine's to enforce. A
+`SourceProvider` must fail closed: content that is not the revision the context
+declares is a `vacerr` `SOURCE_MISMATCH` and never a warning or a best effort.
+And a `ContextSource` refuses an id it does not hold with `CONTEXT_NOT_FOUND` —
+the engine re-checks that a resolved context has all four of its fields, but it
+cannot check that the version you returned is the version that was asked for.
+
+`engine/extension_test.go`'s
+`TestEngineRunsOnImplementationsOfNothingButItsInterfaces` is a tested
+implementation of all four from scratch: a map, and three types returning canned
+answers, reaching all four queries with no Zoekt, no codebase-memory-mcp and no
+git anywhere in it.
+
+v0.1.0's own implementations are these same interfaces — `adapters/` for Zoekt,
+codebase-memory-mcp and git, `resolver/` for the configuration file — so another
+engine is a fourth adapter, not a fork.
 
 ## Security
 
