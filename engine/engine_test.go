@@ -6,11 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/engine"
+	"github.com/tc3oliver/version-aware-code-mcp/evidence"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
@@ -173,11 +176,36 @@ func TestSearchCodeAnswersInTheResolvedContext(t *testing.T) {
 	if search.query.Query != "demo" {
 		t.Fatalf("provider got query %q, want %q", search.query.Query, "demo")
 	}
-	if out.Context != configured {
-		t.Fatalf("result context is %+v, want %+v", out.Context, configured)
+	if out.Context() != configured {
+		t.Fatalf("result context is %+v, want %+v", out.Context(), configured)
 	}
-	if len(out.Matches) != 1 || out.Matches[0].Path != "process.go" {
-		t.Fatalf("matches are %+v, want the provider's one match", out.Matches)
+	if len(out.Matches()) != 1 || out.Matches()[0].Path != "process.go" {
+		t.Fatalf("matches are %+v, want the provider's one match", out.Matches())
+	}
+	// The match is its own citation: a caller can check the answer at the line
+	// it was found on without asking a second question.
+	want := []evidence.Evidence{evidence.At("process.go", 1, 1, "package demo")}
+	if !slices.Equal(out.Evidence(), want) {
+		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), want)
+	}
+}
+
+// A query that matches nothing still answers with a context and a citation
+// list. Empty evidence says "checked, found none"; nil evidence would be
+// indistinguishable from a result nobody backed.
+func TestSearchCodeCitesNothingRatherThanNil(t *testing.T) {
+	eng, search, _, _, configured := newEngine(t)
+	search.results = nil
+
+	out, err := eng.SearchCode(context.Background(), engine.SearchCodeRequest{Context: configured.ID, Query: "absent"})
+	if err != nil {
+		t.Fatalf("SearchCode: %v", err)
+	}
+	if out.Evidence() == nil {
+		t.Fatal("a match-free search returned nil evidence, want an empty list")
+	}
+	if len(out.Evidence()) != 0 {
+		t.Fatalf("a match-free search cited %+v", out.Evidence())
 	}
 }
 
@@ -220,12 +248,47 @@ func TestTraceCallsAnswersInTheResolvedContext(t *testing.T) {
 	if graph.req != (provider.TraceRequest{Symbol: "Process", Direction: provider.Callers, Depth: 2}) {
 		t.Fatalf("provider got request %+v", graph.req)
 	}
-	if out.Context != configured {
-		t.Fatalf("result context is %+v, want %+v", out.Context, configured)
+	if out.Context() != configured {
+		t.Fatalf("result context is %+v, want %+v", out.Context(), configured)
 	}
 	// What the graph resolved the request to, not what was asked for.
-	if out.Graph.Symbol != "demo.Process" || len(out.Graph.Edges) != 1 {
-		t.Fatalf("graph is %+v, want the provider's", out.Graph)
+	if out.Graph().Symbol != "demo.Process" || len(out.Graph().Edges) != 1 {
+		t.Fatalf("graph is %+v, want the provider's", out.Graph())
+	}
+	want := []evidence.Evidence{evidence.At("process.go", 1, 1, "")}
+	if !slices.Equal(out.Evidence(), want) {
+		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), want)
+	}
+}
+
+// Several calls written on one line are one place to look, so the citation is
+// listed once however many edges point at it.
+func TestTraceCallsCitesEachLocationOnce(t *testing.T) {
+	eng, _, graph, _, configured := newEngine(t)
+	graph.graph = provider.CallGraph{
+		Symbol: "demo.Process",
+		Edges: []provider.CallEdge{
+			{Caller: "demo.Main", Callee: "demo.Process", Path: "process.go", Line: 7},
+			{Caller: "demo.Main", Callee: "demo.Cleanup", Path: "process.go", Line: 7},
+			{Caller: "demo.Serve", Callee: "demo.Process", Path: "serve.go", Line: 3},
+		},
+	}
+
+	out, err := eng.TraceCalls(context.Background(), engine.TraceCallsRequest{
+		Context: configured.ID, Symbol: "Process", Direction: provider.Callers, Depth: 2,
+	})
+	if err != nil {
+		t.Fatalf("TraceCalls: %v", err)
+	}
+	want := []evidence.Evidence{
+		evidence.At("process.go", 7, 7, ""),
+		evidence.At("serve.go", 3, 3, ""),
+	}
+	if !slices.Equal(out.Evidence(), want) {
+		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), want)
+	}
+	if len(out.Graph().Edges) != 3 {
+		t.Fatalf("deduplicating citations dropped an edge: %+v", out.Graph().Edges)
 	}
 }
 
@@ -247,27 +310,114 @@ func TestGetCodeReportsTheRevisionActuallyRead(t *testing.T) {
 	if source.codeCtx != configured || source.path != "process.go" || source.start != 1 || source.end != 1 {
 		t.Fatalf("provider got %+v %q %d-%d", source.codeCtx, source.path, source.start, source.end)
 	}
-	if out.Context.Revision != readAt {
-		t.Fatalf("result revision is %q, want the revision read %q", out.Context.Revision, readAt)
+	if out.Context().Revision != readAt {
+		t.Fatalf("result revision is %q, want the revision read %q", out.Context().Revision, readAt)
 	}
-	if out.Source.Content != "package demo\n" {
-		t.Fatalf("content is %q, want the provider's", out.Source.Content)
+	if out.Source().Content != "package demo\n" {
+		t.Fatalf("content is %q, want the provider's", out.Source().Content)
+	}
+	// The citation is the range read, and it is scoped by the revision it was
+	// read at rather than the one the configuration spelled.
+	want := []evidence.Evidence{evidence.At("process.go", 1, 1, "")}
+	if !slices.Equal(out.Evidence(), want) {
+		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), want)
 	}
 }
 
 // A failing provider fails the query with its own error, with no result beside
 // it: half an answer from an unknown version is the failure this server exists
-// to prevent.
+// to prevent. The code is the provider's own — the engine classifies nothing —
+// and the zero result it returns carries neither a context nor evidence, so a
+// caller that ignored the error still cannot mistake it for an answer.
 func TestProviderFailuresAreReturnedUnchanged(t *testing.T) {
-	eng, _, _, source, configured := newEngine(t)
-	source.err = vacerr.NewSourceMismatch("aaa", "bbb", nil)
+	// One case per provider, each with the code that provider is the source of.
+	for _, tc := range []struct {
+		name string
+		code vacerr.Code
+		call func(*engine.Engine, *fakeSearch, *fakeGraph, *fakeSource, vacctx.CodeContext, error) (contextual, error)
+	}{
+		{
+			name: "search provider unavailable",
+			code: vacerr.SearchProviderUnavailable,
+			call: func(eng *engine.Engine, search *fakeSearch, _ *fakeGraph, _ *fakeSource, cfg vacctx.CodeContext, err error) (contextual, error) {
+				search.err = err
+				return eng.SearchCode(context.Background(), engine.SearchCodeRequest{Context: cfg.ID, Query: "demo"})
+			},
+		},
+		{
+			name: "symbol ambiguous",
+			code: vacerr.SymbolAmbiguous,
+			call: func(eng *engine.Engine, _ *fakeSearch, graph *fakeGraph, _ *fakeSource, cfg vacctx.CodeContext, err error) (contextual, error) {
+				graph.err = err
+				return eng.TraceCalls(context.Background(), engine.TraceCallsRequest{
+					Context: cfg.ID, Symbol: "Process", Direction: provider.Callers, Depth: 2,
+				})
+			},
+		},
+		{
+			name: "source mismatch",
+			code: vacerr.SourceMismatch,
+			call: func(eng *engine.Engine, _ *fakeSearch, _ *fakeGraph, source *fakeSource, cfg vacctx.CodeContext, err error) (contextual, error) {
+				source.err = err
+				return eng.GetCode(context.Background(), engine.GetCodeRequest{
+					Context: cfg.ID, Path: "process.go", StartLine: 1, EndLine: 1,
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, search, graph, source, configured := newEngine(t)
+			failure := vacerr.New(tc.code, "the provider said no", map[string]any{"context": configured.ID})
 
-	out, err := eng.GetCode(context.Background(), engine.GetCodeRequest{
-		Context: configured.ID, Path: "process.go", StartLine: 1, EndLine: 1,
-	})
-	assertCode(t, err, vacerr.SourceMismatch)
-	if out.Source.Content != "" || out.Context.ID != "" {
-		t.Fatalf("a failed read returned %+v", out)
+			out, err := tc.call(eng, search, graph, source, configured, failure)
+			assertCode(t, err, tc.code)
+			if !errors.Is(err, failure) {
+				t.Fatalf("error is %v, want the provider's own error", err)
+			}
+			assertNotAnAnswer(t, out)
+		})
+	}
+}
+
+// contextual is every result type: they answer Context and Evidence and
+// nothing else in common, which is the whole of what a failed call must not
+// return.
+type contextual interface {
+	Context() vacctx.CodeContext
+	Evidence() []evidence.Evidence
+}
+
+var (
+	_ contextual = engine.SearchCodeResult{}
+	_ contextual = engine.TraceCallsResult{}
+	_ contextual = engine.GetCodeResult{}
+)
+
+func assertNotAnAnswer(t *testing.T, out contextual) {
+	t.Helper()
+	if out.Context() != (vacctx.CodeContext{}) {
+		t.Errorf("a failed call returned context %+v, want the zero context", out.Context())
+	}
+	if out.Evidence() != nil {
+		t.Errorf("a failed call returned evidence %+v, want none", out.Evidence())
+	}
+}
+
+// The contract is structural, not a convention each method remembers: every
+// field of every result type is unexported, so no composite literal outside
+// this package can fill one in. The only value a caller can write for itself is
+// the zero one, and that carries no context and no evidence — which is exactly
+// how a failed call is already told apart from an answer.
+func TestASuccessfulResultCannotBeBuiltOutsideTheEngine(t *testing.T) {
+	for _, out := range []contextual{engine.SearchCodeResult{}, engine.TraceCallsResult{}, engine.GetCodeResult{}} {
+		typ := reflect.TypeOf(out)
+		for i := range typ.NumField() {
+			if field := typ.Field(i); field.IsExported() {
+				t.Errorf("%s.%s is exported: a caller can build a result claiming success with no evidence behind it",
+					typ.Name(), field.Name)
+			}
+		}
+		assertNotAnAnswer(t, out)
 	}
 }
 
