@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -522,5 +523,162 @@ func TestListContexts(t *testing.T) {
 	empty := engine.New(resolver.New(&config.Config{}), &fakeSearch{}, &fakeGraph{}, &fakeSource{})
 	if got := empty.ListContexts(context.Background()); got == nil || len(got) != 0 {
 		t.Fatalf("an empty configuration listed %v, want an empty non-nil list", got)
+	}
+}
+
+// usable is the complete context the nil-provider tests are answered in. They
+// need no repository on disk: what is under test is which provider a query
+// reaches, and resolving through fakeContexts gets there without a git
+// checkout having a say in it.
+var usable = vacctx.CodeContext{
+	ID: "demo@main", Repository: "demo", Branch: "main",
+	Revision: "0123456789abcdef0123456789abcdef01234567", GraphRef: "demo-main",
+}
+
+// queryAll asks all three queries and reports how each one answered, so a test
+// can state both halves of "only its own query": the one that failed, and the
+// ones that carried on.
+func queryAll(t *testing.T, eng *engine.Engine) (searchErr, traceErr, getErr error) {
+	t.Helper()
+	ctx := context.Background()
+	_, searchErr = eng.SearchCode(ctx, engine.SearchCodeRequest{Context: usable.ID, Query: "demo"})
+	_, traceErr = eng.TraceCalls(ctx, engine.TraceCallsRequest{
+		Context: usable.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
+	})
+	_, getErr = eng.GetCode(ctx, engine.GetCodeRequest{
+		Context: usable.ID, Path: "process.go", StartLine: 1, EndLine: 1,
+	})
+	return searchErr, traceErr, getErr
+}
+
+// A provider a caller does not have is a provider it may leave out. The query
+// needing the absent one fails with a *vacerr.Error naming what is missing —
+// not a nil dereference, and not an empty result, which would read as "this
+// version has no such code" — and every other query answers as usual.
+func TestAMissingProviderFailsOnlyItsOwnQuery(t *testing.T) {
+	contexts := fakeContexts{codeCtx: usable}
+
+	t.Run("no search provider", func(t *testing.T) {
+		eng := engine.New(contexts, nil, &fakeGraph{}, &fakeSource{})
+
+		searchErr, traceErr, getErr := queryAll(t, eng)
+		assertCode(t, searchErr, vacerr.SearchProviderUnavailable)
+		if traceErr != nil || getErr != nil {
+			t.Fatalf("an absent search provider broke another query: trace=%v get=%v", traceErr, getErr)
+		}
+		if listed := eng.ListContexts(context.Background()); len(listed) != 1 {
+			t.Fatalf("an absent search provider left ListContexts answering %v", listed)
+		}
+	})
+
+	t.Run("no graph provider", func(t *testing.T) {
+		eng := engine.New(contexts, &fakeSearch{}, nil, &fakeSource{})
+
+		searchErr, traceErr, getErr := queryAll(t, eng)
+		assertCode(t, traceErr, vacerr.GraphProviderUnavailable)
+		// doc-1 §23's eighth success criterion, in the case it was written for:
+		// search keeps answering with no CBM behind the server at all.
+		if searchErr != nil || getErr != nil {
+			t.Fatalf("an absent graph provider broke another query: search=%v get=%v", searchErr, getErr)
+		}
+		if listed := eng.ListContexts(context.Background()); len(listed) != 1 {
+			t.Fatalf("an absent graph provider left ListContexts answering %v", listed)
+		}
+	})
+
+	t.Run("no source provider", func(t *testing.T) {
+		eng := engine.New(contexts, &fakeSearch{}, &fakeGraph{}, nil)
+
+		searchErr, traceErr, getErr := queryAll(t, eng)
+		assertCode(t, getErr, vacerr.RepositoryNotFound)
+		if searchErr != nil || traceErr != nil {
+			t.Fatalf("an absent source provider broke another query: search=%v trace=%v", searchErr, traceErr)
+		}
+		if listed := eng.ListContexts(context.Background()); len(listed) != 1 {
+			t.Fatalf("an absent source provider left ListContexts answering %v", listed)
+		}
+	})
+}
+
+// An Engine is a Closer, so a caller can defer its shutdown the way it defers
+// any other.
+var _ io.Closer = (*engine.Engine)(nil)
+
+// closeableGraph and closeableSource are providers whose lifetime the caller
+// handed over, which is to say they have a Close method for [engine.Engine] to
+// find.
+type closeableGraph struct {
+	fakeGraph
+	closed int
+	err    error
+}
+
+func (c *closeableGraph) Close() error {
+	c.closed++
+	return c.err
+}
+
+type closeableSource struct {
+	fakeSource
+	closed int
+}
+
+func (c *closeableSource) Close() error {
+	c.closed++
+	return nil
+}
+
+// ownedElsewhere is a provider its caller keeps: closing it is someone else's
+// business, and it says so by failing the test if an Engine closes it.
+type ownedElsewhere struct {
+	fakeSearch
+	t *testing.T
+}
+
+func (o *ownedElsewhere) Close() error {
+	o.t.Error("Engine.Close closed a provider whose lifetime the caller kept")
+	return nil
+}
+
+// keepOpen is the documented way to keep that ownership: an embedded interface
+// promotes that interface's methods and no others, so this is a SearchProvider
+// that is not an io.Closer however closeable the value inside it is.
+type keepOpen struct{ provider.SearchProvider }
+
+// Close closes what the caller handed over to be closed, and nothing else. The
+// wrapped provider is closeable and is still not closed, which is the half
+// that matters for an embedding caller: a provider it manages itself is not
+// shut down under it by an Engine that happens to hold a reference.
+//
+// It also proves a failing Close does not swallow the rest: the graph provider
+// refuses, and the source provider after it is still closed and the refusal is
+// still reported.
+func TestCloseClosesOnlyWhatWasHandedOver(t *testing.T) {
+	kept := &ownedElsewhere{t: t}
+	refuses := errors.New("the session would not shut down")
+	graph := &closeableGraph{err: refuses}
+	source := &closeableSource{}
+
+	eng := engine.New(fakeContexts{codeCtx: usable}, keepOpen{kept}, graph, source)
+
+	err := eng.Close()
+	if !errors.Is(err, refuses) {
+		t.Fatalf("Close reported %v, want the graph provider's refusal", err)
+	}
+	if graph.closed != 1 {
+		t.Fatalf("the graph provider was closed %d times, want once", graph.closed)
+	}
+	if source.closed != 1 {
+		t.Fatalf("the source provider was closed %d times, want once: a failing Close skipped the providers after it", source.closed)
+	}
+}
+
+// Nothing to close is not a failure. A provider that cannot be closed is left
+// alone, and an absent one is not dereferenced.
+func TestCloseWithNothingToClose(t *testing.T) {
+	eng := engine.New(fakeContexts{codeCtx: usable}, &fakeSearch{}, nil, nil)
+
+	if err := eng.Close(); err != nil {
+		t.Fatalf("closing an Engine with nothing to close reported %v", err)
 	}
 }

@@ -163,6 +163,12 @@ func serve(args []string) error {
 	listen := listenAddress(*address, explicit, cfg)
 
 	srv := server.New(version)
+	// TODO(merge): capture the *engine.Engine addTools returns and `defer
+	// eng.Close()` here, once TASK-50's addTools signature change lands — see
+	// TASK-51. That is what shuts the CBM session down gracefully instead of
+	// leaving it to the process exit. addTools is also where the
+	// partial-startup rule of engine.New applies: it builds three providers in
+	// sequence, so a failure part way through has to close what it started.
 	addTools(srv, cfg)
 
 	// Nothing may write to stdout in STDIO mode: it carries the protocol
