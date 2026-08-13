@@ -55,13 +55,29 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
+        id: setup-go
         with:
           go-version-file: go.mod
 
-      - name: Install the pinned Go tooling
+      # The cache below skips the install step on a hit, so PATH is set here
+      # instead of inside that step.
+      - name: Put the Go tool directory on PATH
+        id: tools
         run: |
-          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
-          go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
+          gobin="$(go env GOPATH)/bin"
+          echo "gobin=$gobin" >>"$GITHUB_OUTPUT"
+          echo "$gobin" >>"$GITHUB_PATH"
+
+      - name: Cache govulncheck
+        id: govulncheck-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.tools.outputs.gobin }}/govulncheck
+          key: ${{ runner.os }}-govulncheck-${{ steps.setup-go.outputs.go-version }}-${{ env.GOVULNCHECK_VERSION }}
+
+      - name: Install govulncheck
+        if: steps.govulncheck-cache.outputs.cache-hit != 'true'
+        run: go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
 
       - uses: ./.github/actions/prepare-engines
         id: engines
