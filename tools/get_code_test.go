@@ -15,6 +15,7 @@ import (
 
 	gitadapter "github.com/tc3oliver/version-aware-code-mcp/adapters/git"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
@@ -307,13 +308,15 @@ func getCodeConfig(t *testing.T) *config.Config {
 
 // getCodeSession serves get_code over stateless Streamable HTTP and connects a
 // client to it, so every assertion is made on what came back over a real wire
-// rather than on a Go value. The tool is wired to the real resolver and the real
-// git source adapter: nothing between the client and the repository is a stub.
+// rather than on a Go value. The engine behind the tool is wired to the real
+// resolver and the real git source adapter: nothing between the client and the
+// repository is a stub. get_code reaches neither of the other two providers, so
+// the engine is built without them and one that tried would fail the test.
 func getCodeSession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
 
 	srv := server.New(testVersion)
-	AddGetCode(srv, resolver.New(cfg), gitadapter.New(cfg))
+	AddGetCode(srv, engine.New(resolver.New(cfg), nil, nil, gitadapter.New(cfg)))
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },

@@ -2,15 +2,11 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
-	"github.com/tc3oliver/version-aware-code-mcp/provider"
-	"github.com/tc3oliver/version-aware-code-mcp/resolver"
-	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
 // getCodeInput is what a caller asks for. Every field is required: none of them
@@ -37,24 +33,23 @@ type getCodeResult struct {
 	Content   string `json:"content"`
 }
 
-// AddGetCode registers the get_code tool on srv, resolving context IDs with
-// contexts and reading source through source.
+// AddGetCode registers the get_code tool on srv, answered by eng.
 //
 // It answers inside one version context, so doc-1's Tool Contract applies in
 // full: the result is an [evidence.Output], carrying the context the lines were
 // read in and citing where they came from. A bare answer is not representable
 // here, and the context's GraphRef never reaches the wire.
 //
-// The tool holds no version logic of its own, on purpose. Resolving an ID is
-// [resolver.Resolver.Resolve], reading a revision is the source provider, and
-// the fail-closed [vacerr.SourceMismatch] check is [resolver.VerifyWorktree],
-// which the git adapter reaches on the one path where the object database
-// cannot serve the declared revision's bytes. A second implementation of that
-// check here would be a second thing to keep correct. What this tool must
-// guarantee is the other half of failing closed: every error from either
-// dependency is returned as an error result with no content beside it, with its
-// code intact and never downgraded to a warning.
-func AddGetCode(srv *mcp.Server, contexts *resolver.Resolver, source provider.SourceProvider) {
+// The tool holds no version logic of its own, on purpose: resolving the ID,
+// reading at the revision and reporting the revision the bytes came from are
+// [engine.Engine.GetCode]'s, and the fail-closed SOURCE_MISMATCH check is the
+// resolver's, which the git adapter reaches on the one path where the object
+// database cannot serve the declared revision's bytes. A second implementation
+// of any of them here would be a second thing to keep correct. What this tool
+// must guarantee is the other half of failing closed: every error is returned
+// as an error result with no content beside it, with its code intact and never
+// downgraded to a warning.
+func AddGetCode(srv *mcp.Server, eng *engine.Engine) {
 	// Out is any and no output schema is declared: the shape on the wire is
 	// [evidence.Output]'s to define, and a hand-written mirror of it here would
 	// not only drift, it would be enforced — the SDK validates output against a
@@ -69,28 +64,27 @@ func AddGetCode(srv *mcp.Server, contexts *resolver.Resolver, source provider.So
 			"and source that is not the declared revision is SOURCE_MISMATCH.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in getCodeInput) (*mcp.CallToolResult, any, error) {
-		codeCtx, err := contexts.Resolve(ctx, in.Context)
+		result, err := eng.GetCode(ctx, engine.GetCodeRequest{
+			Context:   in.Context,
+			Path:      in.Path,
+			StartLine: in.StartLine,
+			EndLine:   in.EndLine,
+		})
 		if err != nil {
-			return getCodeFailure(err)
+			return failed(err)
 		}
 
-		src, err := source.Read(ctx, codeCtx, in.Path, in.StartLine, in.EndLine)
-		if err != nil {
-			return getCodeFailure(err)
-		}
-		// The revision reported is the one the bytes actually came from, not the
-		// spelling the configuration used. A context may declare a branch name or
-		// a short SHA; reporting the full commit the provider read at is what
-		// lets a caller check the claim instead of trusting it.
-		codeCtx.Revision = src.Revision
-
-		out, err := evidence.New(codeCtx, evidence.At(src.Path, src.StartLine, src.EndLine, ""))
+		// The context carries the revision the bytes actually came from, not the
+		// spelling the configuration used, which is what lets a caller check the
+		// claim instead of trusting it.
+		out, err := evidence.New(result.Context(), result.Evidence()...)
 		if err != nil {
 			// The context is missing a field the contract requires, so there is no
 			// way to answer without dropping part of it. Failing is the contract
 			// working, not a bug to route around.
 			return nil, nil, err
 		}
+		src := result.Source()
 		return nil, out.WithResult(getCodeResult{
 			Path:      src.Path,
 			StartLine: src.StartLine,
@@ -98,29 +92,4 @@ func AddGetCode(srv *mcp.Server, contexts *resolver.Resolver, source provider.So
 			Content:   src.Content,
 		}), nil
 	})
-}
-
-// getCodeFailure returns err as a tool error result in the [vacerr] wire shape,
-// with no content beside it.
-//
-// The SDK's own error handling would put err.Error() on the wire as plain text,
-// which drops the code and the details — for a [vacerr.SourceMismatch] that
-// means dropping the two revisions that show which side is stale. So the
-// envelope is emitted as the result's content instead. The error's own code is
-// passed through untouched: this function classifies nothing.
-func getCodeFailure(err error) (*mcp.CallToolResult, any, error) {
-	var vErr *vacerr.Error
-	if !errors.As(err, &vErr) {
-		// Not a modelled error, so there is no code to preserve. The SDK reports
-		// it as a tool error with its message: still a failure, still no content.
-		return nil, nil, err
-	}
-	body, marshalErr := json.Marshal(vErr)
-	if marshalErr != nil {
-		return nil, nil, err
-	}
-	return &mcp.CallToolResult{
-		IsError: true,
-		Content: []mcp.Content{&mcp.TextContent{Text: string(body)}},
-	}, nil, nil
 }
