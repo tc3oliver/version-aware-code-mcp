@@ -74,8 +74,10 @@ func run(args []string, out io.Writer) error {
 	case "doctor":
 		return doctor(args[1:], out)
 	case "repo":
+		warnOnWindows(os.Stderr, "repo")
 		return repoCommand(args[1:], out)
 	case "context":
+		warnOnWindows(os.Stderr, "context")
 		return contextCommand(args[1:], out)
 	case "version":
 		_, err := fmt.Fprintln(out, version)
