@@ -67,6 +67,24 @@ func (f *fakeSource) Read(_ context.Context, codeCtx vacctx.CodeContext, path st
 	return &f.content, nil
 }
 
+// *resolver.Resolver is what an Engine is built with outside tests. The engine
+// names only the method set it needs, so this is the one place the two have to
+// be kept agreeing.
+var _ engine.ContextSource = (*resolver.Resolver)(nil)
+
+// fakeContexts resolves every ID to one context, whether or not that context is
+// usable. A *resolver.Resolver cannot answer with an incomplete one; the point
+// of the check under test is that the engine does not rely on that.
+type fakeContexts struct {
+	codeCtx vacctx.CodeContext
+}
+
+func (f fakeContexts) Contexts() []vacctx.CodeContext { return []vacctx.CodeContext{f.codeCtx} }
+
+func (f fakeContexts) Resolve(context.Context, string) (vacctx.CodeContext, error) {
+	return f.codeCtx, nil
+}
+
 // newRepo builds a real one-commit git repository and returns its path and the
 // SHA of that commit. The resolver runs git, so a context can only resolve
 // against a repository that exists.
@@ -154,6 +172,64 @@ func TestUnknownContextIsContextNotFound(t *testing.T) {
 
 	if search.called || graph.called || source.called {
 		t.Fatalf("a provider was reached for an unconfigured context: search=%v graph=%v source=%v", search.called, graph.called, source.called)
+	}
+}
+
+// A ContextSource is not trusted to have validated what it hands back. A
+// context missing any of the four fields names no version to answer in, and is
+// refused before a provider sees it: a provider given an empty revision reads
+// whatever the checkout happens to be on, which is an answer from a version
+// nobody asked for.
+func TestIncompleteResolvedContextIsRefusedBeforeAnyProvider(t *testing.T) {
+	complete := vacctx.CodeContext{
+		ID: "demo@main", Repository: "demo", Branch: "main",
+		Revision: "0123456789abcdef0123456789abcdef01234567", GraphRef: "demo-main",
+	}
+
+	for _, tc := range []struct {
+		field string
+		blank func(*vacctx.CodeContext)
+	}{
+		{"repository", func(c *vacctx.CodeContext) { c.Repository = "" }},
+		{"branch", func(c *vacctx.CodeContext) { c.Branch = "" }},
+		// Whitespace, not empty: a revision of " " is as unusable as none, and
+		// would otherwise pass a bare != "" check.
+		{"revision", func(c *vacctx.CodeContext) { c.Revision = "  " }},
+		{"graph_ref", func(c *vacctx.CodeContext) { c.GraphRef = "" }},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			incomplete := complete
+			tc.blank(&incomplete)
+			search, graph, source := &fakeSearch{}, &fakeGraph{}, &fakeSource{}
+			eng := engine.New(fakeContexts{codeCtx: incomplete}, search, graph, source)
+			ctx := context.Background()
+
+			if _, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: incomplete.ID, Query: "demo"}); err != nil {
+				assertCode(t, err, vacerr.InvalidArgument)
+			} else {
+				t.Fatal("SearchCode answered in an incomplete context")
+			}
+
+			if _, err := eng.TraceCalls(ctx, engine.TraceCallsRequest{
+				Context: incomplete.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
+			}); err != nil {
+				assertCode(t, err, vacerr.InvalidArgument)
+			} else {
+				t.Fatal("TraceCalls answered in an incomplete context")
+			}
+
+			if _, err := eng.GetCode(ctx, engine.GetCodeRequest{
+				Context: incomplete.ID, Path: "process.go", StartLine: 1, EndLine: 1,
+			}); err != nil {
+				assertCode(t, err, vacerr.InvalidArgument)
+			} else {
+				t.Fatal("GetCode answered in an incomplete context")
+			}
+
+			if search.called || graph.called || source.called {
+				t.Fatalf("a provider was reached with an incomplete context: search=%v graph=%v source=%v", search.called, graph.called, source.called)
+			}
+		})
 	}
 }
 
