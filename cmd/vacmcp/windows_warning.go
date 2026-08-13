@@ -29,5 +29,7 @@ func warnOnWindows(w io.Writer, command string) {
 	if goos != "windows" {
 		return
 	}
-	fmt.Fprintf(w, "vacmcp: warning: on Windows, `vacmcp %s` locks only within this process; do not run concurrent vacmcp management commands against the same repository from separate processes (see README.md, Managed Mode)\n", command)
+	// Best effort: a warning that failed to print is not a reason to stop the
+	// command it is warning about.
+	_, _ = fmt.Fprintf(w, "vacmcp: warning: on Windows, `vacmcp %s` locks only within this process; do not run concurrent vacmcp management commands against the same repository from separate processes (see README.md, Managed Mode)\n", command)
 }
