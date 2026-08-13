@@ -1,0 +1,77 @@
+# Installs the real Zoekt and CBM and builds the fixture they are asked about.
+#
+# It lives here rather than in a workflow because two tiers need it — the real
+# engine gate and the full stress gate — and the alternative is the same
+# SHA-256 pin written down twice, where one copy gets bumped and the other
+# keeps authenticating an archive nobody ships any more.
+#
+# Assumes Go is already set up: the Zoekt binaries are installed with `go
+# install`, and the fixture is built by a script that shells out to git.
+name: Prepare the real engines
+description: Installs pinned Zoekt and codebase-memory-mcp, then builds the demo fixture, index and graphs.
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Zoekt binaries
+      shell: bash
+      env:
+        # decision-3: the engines are pinned, never `latest`, so a green run
+        # names the versions it was green against. Zoekt publishes no tagged
+        # release, so the pin is the module pseudo-version and the Go checksum
+        # database authenticates it.
+        ZOEKT_VERSION: v0.0.0-20260807124253-c4d8f3537f7a
+      run: |
+        echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+        go install "github.com/sourcegraph/zoekt/cmd/zoekt-git-index@$ZOEKT_VERSION"
+        go install "github.com/sourcegraph/zoekt/cmd/zoekt-webserver@$ZOEKT_VERSION"
+
+    - name: Install codebase-memory-mcp
+      shell: bash
+      env:
+        # CBM ships release archives, so the pin is the tag plus the SHA-256
+        # recorded from that release's checksums.txt. Linux gets the
+        # `-portable` build: the plain linux archive dynamically links glibc.
+        CBM_VERSION: v0.10.1
+        CBM_ARCHIVE: codebase-memory-mcp-linux-amd64-portable.tar.gz
+        CBM_SHA256: 97c6580a13d772d040e936584f3c5234586ab03f31a77354af8a763851a39a7f
+      run: |
+        # Downloaded and verified here rather than through the project's
+        # install.sh: that script resolves `latest` and picks its own asset,
+        # which is the unpinned dependency decision-3 rules out.
+        url="https://github.com/DeusData/codebase-memory-mcp/releases/download/$CBM_VERSION"
+        curl -fsSL -o "$RUNNER_TEMP/$CBM_ARCHIVE" "$url/$CBM_ARCHIVE"
+        curl -fsSL -o "$RUNNER_TEMP/checksums.txt" "$url/checksums.txt"
+
+        # Two checks, because they answer different questions: the archive
+        # hashes to the pin recorded above, and that pin is the one the
+        # release itself publishes. Verifying only against the downloaded
+        # checksums.txt would trust whatever the release currently says.
+        echo "$CBM_SHA256  $RUNNER_TEMP/$CBM_ARCHIVE" | sha256sum -c -
+        grep -Fxq "$CBM_SHA256  $CBM_ARCHIVE" "$RUNNER_TEMP/checksums.txt"
+
+        mkdir -p "$RUNNER_TEMP/cbm"
+        tar -xzf "$RUNNER_TEMP/$CBM_ARCHIVE" -C "$RUNNER_TEMP/cbm"
+        echo "$RUNNER_TEMP/cbm" >>"$GITHUB_PATH"
+
+    - name: Prepare the versioned demo fixture
+      shell: bash
+      run: |
+        # doc-1 §9: CBM must be 0.10.1 or newer. The pin should already
+        # guarantee it; asserting costs nothing and catches a mis-pin. Read
+        # into a variable rather than piped into grep, because under pipefail
+        # a grep that exits on its first match can SIGPIPE the writer.
+        cbm_version=$(codebase-memory-mcp --version)
+        echo "$cbm_version"
+        grep -q '0\.10\.1' <<<"$cbm_version"
+
+        # Every CBM `cli` call otherwise cold-starts a throwaway daemon.
+        # Measured on the adapters/cbm package alone: 147s without a daemon,
+        # 52s with one already running.
+        codebase-memory-mcp daemon start
+
+        # Builds the demo repository (it runs gen-versioned-demo-repo.sh
+        # itself), the Zoekt index and the two CBM graphs. Without it the
+        # integration tests skip instead of running, which is what the test
+        # steps refuse to accept.
+        testdata/prepare-fixture.sh

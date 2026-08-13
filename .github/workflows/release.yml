@@ -1,12 +1,15 @@
 # Publishes a release when a v* tag is pushed.
 #
 # The gate is not written out again here. `verify` calls ci.yml, the same
-# workflow a pull request runs — fmt, vet, staticcheck, unit, race, the Zoekt
-# and CBM integration tests, the version-isolation release gate, MCP
-# conformance, govulncheck, the license check and the build. `release` needs it,
-# so a single red step in that chain means no archives and no GitHub release. A
-# second copy of the chain living in this file would drift from the first one,
-# and the day it did, a release would ship against a gate nobody was running.
+# workflow a pull request runs — Fast CI (fmt, vet, staticcheck, the tag-free
+# tests, `-race` over them, the license check, the build) and the Real Engine
+# Gate (the Zoekt and CBM tests, the version-isolation release gate, MCP
+# conformance). `full` adds decision-7's third tier, the one a pull request does
+# not wait for: every test raced against the real engines, and govulncheck.
+# `release` needs both, so a single red step anywhere means no archives and no
+# GitHub release. A second copy of the chain living in this file would drift
+# from the first one, and the day it did, a release would ship against a gate
+# nobody was running.
 name: Release
 
 on:
@@ -25,8 +28,11 @@ jobs:
   verify:
     uses: ./.github/workflows/ci.yml
 
+  full:
+    uses: ./.github/workflows/full-gate.yml
+
   release:
-    needs: verify
+    needs: [verify, full]
     runs-on: ubuntu-latest
 
     permissions:

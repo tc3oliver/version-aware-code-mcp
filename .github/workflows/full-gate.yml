@@ -1,0 +1,61 @@
+# decision-7's Tier 3: the run nothing else covers — every test in the module,
+# tagged build and `-race` together, against real engines. That is where the
+# crash-injection combinations, CBM's parallel indexing and the release gates
+# are checked under the detector; Tier 1 runs `-race` without the engines and
+# Tier 2 runs the engines without `-race`, so only this tier runs both at once.
+# `govulncheck` is here too: its answer changes when its database does, not when
+# the tree does, so a release and the nightly schedule are what it is worth
+# waiting for.
+#
+# workflow_dispatch is deliberate — this tier must be runnable on demand from
+# the Actions tab without pushing a tag. TASK-46 adds the nightly `schedule`
+# trigger alongside it.
+#
+# Every step is a hard gate, and `defaults.run.shell: bash` selects
+# `bash --noprofile --norc -eo pipefail` so a `go test ... | tee` reports the
+# test's status rather than tee's.
+name: Full Stress Gate
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  full:
+    runs-on: ubuntu-latest
+
+    env:
+      GOVULNCHECK_VERSION: v1.6.0
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install the pinned Go tooling
+        run: |
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+          go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
+
+      - uses: ./.github/actions/prepare-engines
+
+      # Everything, tagged and raced, /integration included. -timeout is a
+      # watchdog rather than a budget (the Makefile explains why these need one
+      # at all), and it is larger here than in the other tiers because the
+      # detector makes the same real-engine work legitimately slower.
+      - name: Race test against the real engines
+        run: |
+          go test -tags=integration -race -timeout 60m -v ./... 2>&1 | tee "$RUNNER_TEMP/full.log"
+          .github/assert-no-skips.sh "$RUNNER_TEMP/full.log"
+
+      - name: govulncheck
+        run: govulncheck ./...
