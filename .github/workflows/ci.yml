@@ -123,17 +123,20 @@ jobs:
         # golangci-lint runs staticcheck; .golangci.yml enables it explicitly.
         run: make lint
 
+      # -timeout everywhere below for the reason the Makefile gives: go's
+      # 10-minute default is a watchdog for hanging tests, and these spend
+      # longer than that legitimately, driving real git, Zoekt and CBM.
       - name: Unit test
         run: |
-          go test -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/unit.log"
+          go test -timeout 30m -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/unit.log"
           .github/assert-no-skips.sh "$RUNNER_TEMP/unit.log"
 
       - name: Race test
-        run: go test -race $(go list ./... | grep -v '/integration$')
+        run: go test -timeout 30m -race $(go list ./... | grep -v '/integration$')
 
       - name: Integration test (Zoekt + CBM)
         run: |
-          go test -v ./integration/... 2>&1 | tee "$RUNNER_TEMP/integration.log"
+          go test -timeout 30m -v ./integration/... 2>&1 | tee "$RUNNER_TEMP/integration.log"
           .github/assert-no-skips.sh "$RUNNER_TEMP/integration.log"
 
       - name: MCP Inspector conformance

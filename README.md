@@ -275,6 +275,15 @@ vacmcp holds no credential either — `git` authenticates the clone the way it
 always does, through your SSH agent, `~/.ssh/config` or a credential helper, and
 a URL with a secret embedded in it is refused rather than stored.
 
+On Unix-like systems, repository lifecycle operations are protected
+across processes.
+
+On Windows, Managed Mode currently provides in-process locking only.
+Do not run concurrent vacmcp management commands against the same
+repository from separate processes.
+
+Static Mode is unaffected.
+
 **Already using `vacmcp serve --config FILE`? Nothing changes for you.** Managed
 mode is additive and entirely optional: static configuration files are still
 supported exactly as before, there is no migration to do, and the two modes are

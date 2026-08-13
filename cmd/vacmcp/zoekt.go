@@ -94,7 +94,14 @@ func indexRepository(ctx context.Context, s *store.Store, repository string) err
 	for _, c := range contexts {
 		// A record that has not been given a search ref yet names nothing to
 		// index, and naming a ref that does not exist fails the whole run.
-		if c.Repository != repository || c.Branch == "" {
+		//
+		// A record being removed is skipped for the opposite reason: its ref is
+		// one this rebuild would re-create out of the record, which is the whole
+		// point everywhere else and here would put back the source a removal
+		// has just taken out — the removal's own rebuild, and any create of the
+		// same repository that lands between an interrupted removal and the run
+		// that finishes it.
+		if c.Repository != repository || c.Branch == "" || c.State == contextRemoving {
 			continue
 		}
 		if err := putSearchRef(ctx, repoDir, c); err != nil {

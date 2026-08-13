@@ -23,7 +23,11 @@ cloning, indexing, checking out and writing a configuration file by hand.
   another revision is another context — and reaches `READY` only by passing
   every stage of `CREATING` → `RESOLVING` → `PREPARING_SOURCE` →
   `INDEXING_SEARCH` → `INDEXING_GRAPH` → `VERIFYING`, with `context retry`
-  rebuilding one that stopped anywhere along it.
+  rebuilding one that stopped anywhere along it. `context remove` records
+  `REMOVING` before it takes anything apart, so a removal that is interrupted
+  leaves a context the query plane has already stopped serving rather than one
+  still claiming `READY` over artifacts that are gone, and running the same
+  command again finishes it.
 - Automatic search and graph provisioning: creating a context builds its Zoekt
   index and its codebase-memory-mcp graph, and removing one takes them away.
   `zoekt-git-index`, `git worktree` and `index_repository` are no longer

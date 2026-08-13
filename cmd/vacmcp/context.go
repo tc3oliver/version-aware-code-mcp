@@ -22,7 +22,9 @@ import (
 // create is running — or left behind by one that was killed — says which stage
 // it is in. READY is the only state the query plane serves and the only one a
 // context reaches with all of its artifacts built and checked; FAILED is where
-// a context that failed any stage stops.
+// a context that failed any stage stops, and REMOVING is the one state that is
+// not part of building a context at all: it says this record's artifacts are
+// being taken apart.
 const (
 	contextCreating        = "CREATING"
 	contextResolving       = "RESOLVING"
@@ -32,11 +34,13 @@ const (
 	contextVerifying       = "VERIFYING"
 	contextReady           = "READY"
 	contextFailed          = "FAILED"
+	contextRemoving        = "REMOVING"
 )
 
 // contextLifecycle is the order a context goes through: every state's only
-// successor is the next element. READY is last, and FAILED is deliberately not
-// in it at all — the two terminal states, which nothing follows.
+// successor is the next element. READY is last, and FAILED and REMOVING are
+// deliberately not in it at all — it is the path a context is built along, and
+// neither of those is a stage of building one.
 var contextLifecycle = []string{
 	contextCreating,
 	contextResolving,
@@ -54,7 +58,19 @@ var contextLifecycle = []string{
 // walked back into a state where its artifacts are being rebuilt under it, and
 // re-running a failed create is `context retry` creating the lifecycle again
 // rather than a record quietly reverting.
+//
+// REMOVING is the exception, and it is one in both directions. Every state
+// leads to it, including the terminal ones and itself: a record exists and
+// somebody asked for it to be taken away, and what state it stopped in does not
+// change that — READY is the ordinary case, a FAILED or half-built context has
+// always been removable too, and REMOVING reaching itself is what lets a
+// removal that was interrupted be run again rather than refused. Nothing leads
+// out of it, which falls out of it not being in contextLifecycle: the next step
+// after REMOVING is the record being deleted, not another state.
 func advances(from, to string) bool {
+	if to == contextRemoving {
+		return true
+	}
 	at := slices.Index(contextLifecycle, from)
 	if at < 0 || from == contextReady {
 		return false
@@ -379,6 +395,17 @@ func contextRetry(args []string, out io.Writer) error {
 				map[string]any{"context": id},
 			)
 		}
+		// A context that is being removed is the other thing a retry must not
+		// rebuild: REMOVING only ever ends in the record being deleted, and
+		// building the artifacts back up would be a retry undoing a removal
+		// somebody asked for. `context remove` run again is what finishes it.
+		if c.State == contextRemoving {
+			return vacerr.New(
+				vacerr.InvalidArgument,
+				fmt.Sprintf("context retry: context %q is %s; run `vacmcp context remove %s` again to finish taking it away", id, contextRemoving, id),
+				map[string]any{"context": id},
+			)
+		}
 		worktree, err := s.WorktreeDir(c.Repository, c.ID)
 		if err != nil {
 			return err
@@ -576,18 +603,24 @@ func contextStatus(args []string, out io.Writer) error {
 
 // retryHint says what to do about the state a context is in.
 //
-// A context is READY or it is one that needs rebuilding, and the states in
-// between do not divide any finer than that: a record left in INDEXING_GRAPH by
-// a process that was killed and one being written by a create that is running
-// right now look the same on disk, and nothing an operator can read tells them
-// apart. This says the one thing that is true of both, and `context retry` is
-// what resolves the difference — it waits for the running create, if there is
-// one, and then finds the READY it produced.
+// A context is READY, being removed, or one that needs rebuilding, and the
+// building states do not divide any finer than that: a record left in
+// INDEXING_GRAPH by a process that was killed and one being written by a create
+// that is running right now look the same on disk, and nothing an operator can
+// read tells them apart. This says the one thing that is true of both, and
+// `context retry` is what resolves the difference — it waits for the running
+// create, if there is one, and then finds the READY it produced.
 func retryHint(c store.Context) string {
-	if c.State == contextReady {
+	switch c.State {
+	case contextReady:
 		return "not needed"
+	case contextRemoving:
+		// A retry refuses this one, so pointing at it would be a dead end. What
+		// an interrupted removal needs is the removal again.
+		return "not needed: vacmcp context remove " + c.ID
+	default:
+		return "needed: vacmcp context retry " + c.ID
 	}
-	return "needed: vacmcp context retry " + c.ID
 }
 
 // contextVerify re-runs the checks that made a context READY and writes
@@ -636,7 +669,9 @@ func contextVerify(args []string, out io.Writer) error {
 //
 // An artifact that is not there is skipped rather than missed — a context whose
 // worktree was never created, or whose indexing never finished, still has to be
-// removable.
+// removable. That is also what makes this command resumable: every step below
+// tolerates having already been taken, so a removal killed part way through is
+// finished by running the same command again.
 func contextRemove(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vacmcp context remove", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "vacmcp data directory (default ~/.vacmcp)")
@@ -674,27 +709,39 @@ func contextRemove(args []string, out io.Writer) error {
 			return err
 		}
 
+		// The state before any of it, and written down before any of it: from
+		// here the record says its artifacts are being taken apart, which is
+		// what makes a removal that is interrupted recognisable afterwards
+		// instead of leaving a record still claiming READY over a graph and a
+		// worktree that are already gone. REMOVING is not READY, so the query
+		// plane stops resolving this context at exactly this line — through the
+		// same [readyContext] filter every other non-READY state goes through,
+		// as the same CONTEXT_NOT_FOUND.
+		if err := advance(s, &c, contextRemoving); err != nil {
+			return err
+		}
+
 		// The artifacts go first: a failure there leaves the record in place, so
 		// the context is still managed and still removable. The other order
 		// would leave a checkout and a graph nothing knows about.
 		if err := discardSource(context.Background(), repoDir, worktree, c); err != nil {
 			return err
 		}
-		// Then the ref, then the record, then the index, and that order is what
-		// keeps a half-finished removal safe: until the record is gone the
-		// context is still wholly there, and once it is gone the query plane has
-		// no context to search whatever the index still holds. A rebuild that
-		// fails after that is reported rather than swallowed, because what it
-		// leaves behind is the removed revision's source still in the shard.
+		// Then the ref, then the index, and the record last of all. The record
+		// is what a second run of this command finds the context by, so it is
+		// what has to outlive every step that can fail: deleting it before the
+		// shard was rebuilt would leave the removed revision's source in the
+		// served index with nothing left to name it, and no way to finish the
+		// removal but by hand.
 		if c.Branch != "" {
 			if err := dropSearchRef(context.Background(), repoDir, c); err != nil {
 				return err
 			}
 		}
-		if err := s.DeleteContext(c.ID); err != nil {
+		if err := indexRepository(context.Background(), s, c.Repository); err != nil {
 			return err
 		}
-		if err := indexRepository(context.Background(), s, c.Repository); err != nil {
+		if err := s.DeleteContext(c.ID); err != nil {
 			return err
 		}
 		_, err = fmt.Fprintf(out, "%s\tREMOVED\n", c.ID)
