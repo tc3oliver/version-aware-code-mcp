@@ -1,12 +1,15 @@
-# doc-1's verification chain.
+# doc-1's verification chain, as decision-7 splits it: this workflow no longer
+# runs any step itself, it calls the tiers.
 #
-# The steps are in doc-1's order and every one of them is a hard gate: no step
-# carries continue-on-error and none is guarded with `if: always()`, so the job
-# stops at the first failure and a later green step cannot bury an earlier red
-# one. `defaults.run.shell: bash` is part of that guarantee — GitHub's implicit
-# shell is `bash -e` without pipefail, which would make `go test ... | tee` exit
-# with tee's status and turn the test steps into decoration. Naming the shell
-# selects `bash --noprofile --norc -eo pipefail`.
+# Fast CI answers in a minute or two without an engine; the Real Engine Gate
+# pays for the index and the graph once and runs everything that needs them.
+# They are called side by side rather than chained, because the point of the
+# split is how soon each answer arrives, and a public repository's runners are
+# free — making the engine gate wait for the fast one would delay the slow
+# answer to save minutes nobody is billed for.
+#
+# The Full Stress Gate is not here. It belongs to a release tag and to the
+# nightly schedule (TASK-46), and release.yml calls it alongside this workflow.
 name: CI
 
 on:
@@ -17,8 +20,8 @@ on:
   push:
     branches:
       - main
-  # For re-running the chain against an unchanged tree — a new govulncheck
-  # database, a dependency published since the last commit.
+  # For re-running the chain against an unchanged tree — a dependency published
+  # since the last commit.
   workflow_dispatch:
   # release.yml calls this workflow, so a release runs exactly the gate a pull
   # request runs rather than a second copy of it that can drift.
@@ -35,148 +38,18 @@ permissions:
 # to finish rather than be cancelled by whatever else lands on the same ref
 # afterwards, and every commit has its own SHA where main and a release tag do
 # not have their own ref.
+#
+# It stays in this file and out of the tiers: a called workflow evaluates its
+# concurrency group in the caller's context, so a group declared down there
+# would be shared by every caller of that tier and a release tag would cancel
+# the run of the commit it points at.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true # verified live in PR #4
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
-  verify:
-    runs-on: ubuntu-latest
+  fast:
+    uses: ./.github/workflows/ci-fast.yml
 
-    env:
-      # decision-3: the engines are pinned, never `latest`, so a green run names
-      # the versions it was green against. Zoekt publishes no tagged release, so
-      # the pin is the module pseudo-version and the Go checksum database
-      # authenticates it. CBM ships release archives, so the pin is the tag plus
-      # the SHA-256 recorded from that release's checksums.txt. Linux gets the
-      # `-portable` build: the plain linux archive dynamically links glibc.
-      ZOEKT_VERSION: v0.0.0-20260807124253-c4d8f3537f7a
-      CBM_VERSION: v0.10.1
-      CBM_ARCHIVE: codebase-memory-mcp-linux-amd64-portable.tar.gz
-      CBM_SHA256: 97c6580a13d772d040e936584f3c5234586ab03f31a77354af8a763851a39a7f
-      GOLANGCI_LINT_VERSION: v2.12.2
-      GOVULNCHECK_VERSION: v1.6.0
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-
-      - name: Install the pinned Go tooling
-        run: |
-          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
-          go install "github.com/sourcegraph/zoekt/cmd/zoekt-git-index@$ZOEKT_VERSION"
-          go install "github.com/sourcegraph/zoekt/cmd/zoekt-webserver@$ZOEKT_VERSION"
-          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
-          go install "golang.org/x/vuln/cmd/govulncheck@$GOVULNCHECK_VERSION"
-
-      - name: Install codebase-memory-mcp
-        run: |
-          # Downloaded and verified here rather than through the project's
-          # install.sh: that script resolves `latest` and picks its own asset,
-          # which is the unpinned dependency decision-3 rules out.
-          url="https://github.com/DeusData/codebase-memory-mcp/releases/download/$CBM_VERSION"
-          curl -fsSL -o "$RUNNER_TEMP/$CBM_ARCHIVE" "$url/$CBM_ARCHIVE"
-          curl -fsSL -o "$RUNNER_TEMP/checksums.txt" "$url/checksums.txt"
-
-          # Two checks, because they answer different questions: the archive
-          # hashes to the pin recorded above, and that pin is the one the
-          # release itself publishes. Verifying only against the downloaded
-          # checksums.txt would trust whatever the release currently says.
-          echo "$CBM_SHA256  $RUNNER_TEMP/$CBM_ARCHIVE" | sha256sum -c -
-          grep -Fxq "$CBM_SHA256  $CBM_ARCHIVE" "$RUNNER_TEMP/checksums.txt"
-
-          mkdir -p "$RUNNER_TEMP/cbm"
-          tar -xzf "$RUNNER_TEMP/$CBM_ARCHIVE" -C "$RUNNER_TEMP/cbm"
-          echo "$RUNNER_TEMP/cbm" >>"$GITHUB_PATH"
-
-      - name: Prepare the versioned demo fixture
-        run: |
-          # doc-1 §9: CBM must be 0.10.1 or newer. The pin should already
-          # guarantee it; asserting costs nothing and catches a mis-pin. Read
-          # into a variable rather than piped into grep, because under pipefail
-          # a grep that exits on its first match can SIGPIPE the writer.
-          cbm_version=$(codebase-memory-mcp --version)
-          echo "$cbm_version"
-          grep -q '0\.10\.1' <<<"$cbm_version"
-
-          # Every CBM `cli` call otherwise cold-starts a throwaway daemon.
-          # Measured on the adapters/cbm package alone: 147s without a daemon,
-          # 52s with one already running.
-          codebase-memory-mcp daemon start
-
-          # Builds the demo repository (it runs gen-versioned-demo-repo.sh
-          # itself), the Zoekt index and the two CBM graphs. Without it the
-          # integration tests skip instead of running, which is what the test
-          # steps below refuse to accept.
-          testdata/prepare-fixture.sh
-
-      # doc-1 §17's chain starts here, in its order.
-
-      - name: go fmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "::error::not gofmt-ed, run make fmt:" >&2
-            echo "$unformatted" >&2
-            exit 1
-          fi
-
-      - name: go vet
-        run: make vet
-
-      - name: staticcheck
-        # golangci-lint runs staticcheck; .golangci.yml enables it explicitly.
-        run: make lint
-
-      # -timeout everywhere below for the reason the Makefile gives: go's
-      # 10-minute default is a watchdog for hanging tests, and these spend
-      # longer than that legitimately, driving real git, Zoekt and CBM.
-      #
-      # decision-7 splits the tests in two. A test that needs a real Zoekt or a
-      # real CBM to say anything is behind `//go:build integration`, so the two
-      # steps below compile without it and the one after them compiles with it.
-      # That is what stops the same real-engine test from being paid for twice:
-      # before this, every `context create` that built an index and a graph ran
-      # once under Unit test and again under Race test.
-      - name: Unit test
-        run: |
-          go test -timeout 30m -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/unit.log"
-          .github/assert-no-skips.sh "$RUNNER_TEMP/unit.log"
-
-      # No tag, so -race is spent on the tests whose invariants are this
-      # module's own — locks, state transitions, atomic writes. The real-engine
-      # tests under -race move to the nightly gate (TASK-46).
-      - name: Race test
-        run: go test -timeout 30m -race $(go list ./... | grep -v '/integration$')
-
-      # The other half: the same packages, built with the tag, so the tests that
-      # drive a real Zoekt and a real CBM run here and only here. /integration
-      # is excluded because it is its own package and its own step below.
-      - name: Real engine test (Zoekt + CBM)
-        run: |
-          go test -tags=integration -timeout 30m -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/engine.log"
-          .github/assert-no-skips.sh "$RUNNER_TEMP/engine.log"
-
-      - name: Integration test (Zoekt + CBM)
-        run: |
-          go test -timeout 30m -v ./integration/... 2>&1 | tee "$RUNNER_TEMP/integration.log"
-          .github/assert-no-skips.sh "$RUNNER_TEMP/integration.log"
-
-      - name: MCP Inspector conformance
-        run: .github/mcp-conformance.sh
-
-      - name: govulncheck
-        run: govulncheck ./...
-
-      - name: License check
-        run: .github/license-check.sh
-
-      - name: Build
-        run: make build
+  engine:
+    uses: ./.github/workflows/engine-gate.yml

@@ -1,0 +1,95 @@
+# decision-7's Tier 1: everything that can answer without a real Zoekt and a
+# real CBM — the static checks, the tag-free tests, `-race` over those same
+# packages, the license check and the build.
+#
+# No engine is installed here, and that is the tier's whole point: this job is
+# the 1-2 minute answer a pull request gets, so it must not pay for an index or
+# a graph. A test that needs one is behind `//go:build integration` and belongs
+# to engine-gate.yml.
+#
+# Every step is a hard gate: none carries continue-on-error and none is guarded
+# with `if: always()`, so the job stops at the first failure and a later green
+# step cannot bury an earlier red one. `defaults.run.shell: bash` is part of
+# that guarantee — GitHub's implicit shell is `bash -e` without pipefail, which
+# would make `go test ... | tee` exit with tee's status and turn the test steps
+# into decoration. Naming the shell selects `bash --noprofile --norc -eo
+# pipefail`. It is repeated in each tier because a called workflow does not
+# inherit the caller's defaults.
+name: Fast CI
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+
+    env:
+      GOLANGCI_LINT_VERSION: v2.12.2
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install the pinned Go tooling
+        run: |
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
+
+      # doc-1 §17's chain starts here, in its order.
+
+      - name: go fmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-ed, run make fmt:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: make vet
+
+      - name: staticcheck
+        # golangci-lint runs staticcheck; .golangci.yml enables it explicitly.
+        run: make lint
+
+      # -timeout for the reason the Makefile gives: go's 10-minute default is a
+      # watchdog for hanging tests, and these drive real git.
+      #
+      # decision-7 splits the tests in two. A test that needs a real Zoekt or a
+      # real CBM to say anything is behind `//go:build integration`, so the two
+      # steps below compile without it and engine-gate.yml compiles with it.
+      # That is what stops the same real-engine test from being paid for twice:
+      # before this, every `context create` that built an index and a graph ran
+      # once under Unit test and again under Race test.
+      #
+      # /integration is excluded because it is not tagged — it is the release
+      # gate, and it skips itself without the fixture, which assert-no-skips.sh
+      # would rightly call a test that verified nothing.
+      - name: Unit test
+        run: |
+          go test -timeout 30m -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/unit.log"
+          .github/assert-no-skips.sh "$RUNNER_TEMP/unit.log"
+
+      # No tag, so -race is spent on the tests whose invariants are this
+      # module's own — locks, state transitions, atomic writes. The real-engine
+      # tests under -race are Tier 3's, in full-gate.yml.
+      - name: Race test
+        run: go test -timeout 30m -race $(go list ./... | grep -v '/integration$')
+
+      - name: License check
+        run: .github/license-check.sh
+
+      - name: Build
+        run: make build

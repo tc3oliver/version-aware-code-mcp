@@ -163,10 +163,23 @@ codebase-memory-mcp cli trace_path --project vacmcp-demo-v2 \
 
 ## CI pipeline
 
-`.github/workflows/ci.yml` runs on every pull request, on every push to `main`,
-on demand from the Actions tab, and as the gate of a release. A merge is a
-commit nobody ran the chain against, which is why `main` is checked again after
-one. It builds the fixture first, then runs, in order:
+CI is three tiers, each a reusable workflow of its own, so a pull request waits
+for the checks that can fail it and not for the ones whose answer changes on a
+different clock:
+
+| Tier | Workflow | Runs on |
+| --- | --- | --- |
+| Fast CI | `.github/workflows/ci-fast.yml` | every pull request, every push to `main`, on demand, and every release |
+| Real Engine Gate | `.github/workflows/engine-gate.yml` | the same four |
+| Full Stress Gate | `.github/workflows/full-gate.yml` | every release, and on demand from the Actions tab |
+
+`.github/workflows/ci.yml` is what the first two are called from — it runs no
+step itself — and `.github/workflows/release.yml` calls `ci.yml` plus the full
+gate. A merge is a commit nobody ran the chain against, which is why `main` is
+checked again after one.
+
+Fast CI installs no engine, which is the point of it: nothing it runs needs an
+index or a graph, so it answers in a minute or two.
 
 | Step | Command |
 | --- | --- |
@@ -175,25 +188,42 @@ one. It builds the fixture first, then runs, in order:
 | staticcheck | `make lint` (golangci-lint, staticcheck enabled) |
 | unit test | `go test -v` on everything but `integration/` |
 | race test | `go test -race` on the same packages |
-| real engine test | `go test -tags=integration -v` on the same packages |
-| integration test | `go test -v ./integration/...` |
-| MCP conformance | `.github/mcp-conformance.sh` |
-| `govulncheck` | `govulncheck ./...` |
 | license check | `.github/license-check.sh` |
 | build | `make build` |
 
-Every step is a hard gate: none carries `continue-on-error` or `if: always()`,
-so the job stops at the first failure.
+The Real Engine Gate builds the fixture first, then runs the half of the suite
+that a real Zoekt and a real CBM are the whole point of:
 
-The three `-v` test steps also run `.github/assert-no-skips.sh` over their output. A
-test that skips is a test that verified nothing, and every skip here means a
+| Step | Command |
+| --- | --- |
+| real engine test | `go test -tags=integration -v` on everything but `integration/` |
+| integration test | `go test -v ./integration/...` |
+| MCP conformance | `.github/mcp-conformance.sh` |
+
+The Full Stress Gate is the only run where the tag and `-race` meet — Fast CI
+races the build without the engines, the engine gate drives the engines without
+the detector — and it is where `govulncheck` lives, because its answer changes
+when its database does rather than when the tree does:
+
+| Step | Command |
+| --- | --- |
+| race test against the real engines | `go test -tags=integration -race -v ./...` |
+| `govulncheck` | `govulncheck ./...` |
+
+Every step is a hard gate: none carries `continue-on-error` or `if: always()`,
+so a job stops at the first failure, and `release` needs all three tiers.
+
+The `-v` test steps also run `.github/assert-no-skips.sh` over their output. A
+test that skips is a test that verified nothing, and every skip there means a
 missing engine or an unbuilt fixture — on an unprepared checkout `go test ./...`
 reports ten skips and still exits 0. CI treats that as a failure.
 
-Zoekt and codebase-memory-mcp are pinned to exact versions in the workflow's
-`env:` block, and the CBM archive is checked against the SHA-256 recorded there
-as well as against its release's `checksums.txt`. Do not replace either with a
-floating version.
+Zoekt and codebase-memory-mcp are pinned to exact versions in
+`.github/actions/prepare-engines/action.yml`, the composite action both
+engine-running tiers share, and the CBM archive is checked against the SHA-256
+recorded there as well as against its release's `checksums.txt`. It is one file
+rather than one copy per tier so that a bump cannot be applied to half of CI.
+Do not replace either pin with a floating version.
 
 The three scripts run outside CI too, against a fixture prepared as above:
 
@@ -215,9 +245,11 @@ and invokes all four tools for real.
 A release is a tag. Pushing one that starts with `v` runs
 `.github/workflows/release.yml`, which does two things in order:
 
-1. `verify` calls `ci.yml` — the same chain a pull request runs, not a second
-   copy of it that can drift. One red step there and the workflow stops: no
-   archives, no GitHub release.
+1. `verify` calls `ci.yml` and `full` calls `full-gate.yml` — the same
+   workflows a pull request and the Actions tab run, not a second copy of them
+   that can drift. That is all three tiers, and a release is the only trigger
+   that waits for the third. One red step in any of them and the workflow
+   stops: no archives, no GitHub release.
 2. `release` runs `.github/release-build.sh <tag> dist` and publishes what it
    produced, titled with the tag.
 

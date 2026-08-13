@@ -1,0 +1,56 @@
+# decision-7's Tier 2: the tests that need a real Zoekt and a real CBM to say
+# anything — version isolation in `search_code` and `trace_calls`, CBM project
+# selection, Zoekt branch isolation, the managed lifecycle end to end — plus the
+# MCP Inspector conformance run, which drives the built binary against the same
+# fixture.
+#
+# These run here and only here. The tag-free half of the suite is ci-fast.yml's,
+# so no `context create` builds an index and a graph twice in one run.
+#
+# Every step is a hard gate, and `defaults.run.shell: bash` selects
+# `bash --noprofile --norc -eo pipefail` so a `go test ... | tee` reports the
+# test's status rather than tee's.
+name: Real Engine Gate
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: ./.github/actions/prepare-engines
+
+      # -timeout everywhere below for the reason the Makefile gives: go's
+      # 10-minute default is a watchdog for hanging tests, and these spend
+      # longer than that legitimately, driving real git, Zoekt and CBM.
+
+      # The same packages ci-fast.yml tested, built with the tag, so the tests
+      # that drive a real Zoekt and a real CBM run here. /integration is
+      # excluded because it is its own package and its own step below.
+      - name: Real engine test (Zoekt + CBM)
+        run: |
+          go test -tags=integration -timeout 30m -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/engine.log"
+          .github/assert-no-skips.sh "$RUNNER_TEMP/engine.log"
+
+      - name: Integration test (Zoekt + CBM)
+        run: |
+          go test -timeout 30m -v ./integration/... 2>&1 | tee "$RUNNER_TEMP/integration.log"
+          .github/assert-no-skips.sh "$RUNNER_TEMP/integration.log"
+
+      - name: MCP Inspector conformance
+        run: .github/mcp-conformance.sh
