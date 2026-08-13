@@ -21,7 +21,9 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
@@ -64,8 +66,52 @@ type Engine struct {
 
 // New returns an Engine resolving context IDs with contexts and answering
 // through the three providers.
+//
+// Any of the three may be nil, for a caller that has only some of them: the
+// query needing the absent one then fails with a provider-unavailable error
+// and the other queries are unaffected, which is doc-1 §23's eighth success
+// criterion — search answers whether or not CBM is present — held for every
+// provider rather than only that pair.
+//
+// New starts nothing, so it cannot fail and has nothing to roll back. That
+// leaves partial-startup cleanup with the caller, which is the only party that
+// can do it: a caller that starts a CBM subprocess, then fails while building
+// the next provider, must close what it already started before returning the
+// error, because there is no Engine yet to close it on the caller's behalf.
+// From the moment New returns, [Engine.Close] takes that over.
 func New(contexts ContextSource, search provider.SearchProvider, graph provider.GraphProvider, source provider.SourceProvider) *Engine {
 	return &Engine{contexts: contexts, search: search, graph: graph, source: source}
+}
+
+// Close releases the dependencies this Engine was handed that can be released.
+// One implementing [io.Closer] is closed; one that does not is left untouched.
+// Every dependency gets its turn whether or not an earlier one failed, and the
+// failures are joined, so a provider that will not shut down is reported
+// without hiding the shutdowns after it.
+//
+// That feature detection is the ownership contract. [New] takes providers the
+// caller has already built, so nothing here can be inferred from construction:
+// handing over a provider that can be closed is what says "close this one for
+// me". A caller keeping ownership — an embedder sharing one CBM session
+// between several Engines, say — hands over a provider with no Close method,
+// or wraps it in a type that does not have one:
+//
+//	type keepOpen struct{ provider.GraphProvider }
+//
+// An embedded interface promotes that interface's methods and no others, so
+// the wrapper is a GraphProvider that is not an io.Closer, and Engine cannot
+// close what its caller still needs. The Engine remains usable after Close
+// only as far as its providers do; closing twice closes the providers twice,
+// which is why [github.com/tc3oliver/version-aware-code-mcp/adapters/cbm.Provider.Close]
+// tolerates it.
+func (e *Engine) Close() error {
+	var errs []error
+	for _, dependency := range []any{e.contexts, e.search, e.graph, e.source} {
+		if closer, ok := dependency.(io.Closer); ok {
+			errs = append(errs, closer.Close())
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // resolve returns the context id names, once it is complete enough to scope a
@@ -212,6 +258,19 @@ func (e *Engine) SearchCode(ctx context.Context, req SearchCodeRequest) (SearchC
 		return SearchCodeResult{}, err
 	}
 
+	// After the resolve, not before it: whether a version exists is the
+	// configuration's answer and must not depend on which providers this
+	// server was built with, so an unconfigured ID is CONTEXT_NOT_FOUND here
+	// exactly as it is everywhere else. The same holds in TraceCalls and
+	// GetCode.
+	if e.search == nil {
+		return SearchCodeResult{}, vacerr.New(
+			vacerr.SearchProviderUnavailable,
+			"search_code: this server was built with no search provider",
+			map[string]any{"context": req.Context},
+		)
+	}
+
 	matches, err := e.search.Search(ctx, codeCtx, provider.SearchQuery{Query: req.Query})
 	if err != nil {
 		return SearchCodeResult{}, err
@@ -248,6 +307,14 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 	codeCtx, err := e.resolve(ctx, req.Context)
 	if err != nil {
 		return TraceCallsResult{}, err
+	}
+
+	if e.graph == nil {
+		return TraceCallsResult{}, vacerr.New(
+			vacerr.GraphProviderUnavailable,
+			"trace_calls: this server was built with no graph provider",
+			map[string]any{"context": req.Context, "symbol": req.Symbol},
+		)
 	}
 
 	graph, err := e.graph.TraceCalls(ctx, codeCtx, provider.TraceRequest{
@@ -293,6 +360,20 @@ func (e *Engine) GetCode(ctx context.Context, req GetCodeRequest) (GetCodeResult
 	codeCtx, err := e.resolve(ctx, req.Context)
 	if err != nil {
 		return GetCodeResult{}, err
+	}
+
+	// There is no SOURCE_PROVIDER_UNAVAILABLE in the v0.1.0 code set, and a new
+	// code would be a change to the public tool API for a case the existing
+	// set already describes: with no source provider there is no repository
+	// this server can read, whatever the context declares, which is what
+	// REPOSITORY_NOT_FOUND says. It is deliberately not INVALID_ARGUMENT, which
+	// would blame the caller's request for how the server was built.
+	if e.source == nil {
+		return GetCodeResult{}, vacerr.New(
+			vacerr.RepositoryNotFound,
+			"get_code: this server was built with no source provider, so no repository can be read",
+			map[string]any{"context": req.Context, "path": req.Path},
+		)
 	}
 
 	src, err := e.source.Read(ctx, codeCtx, req.Path, req.StartLine, req.EndLine)
