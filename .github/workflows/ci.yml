@@ -27,6 +27,18 @@ on:
 permissions:
   contents: read
 
+# A pull request that gets pushed to again while its previous run is still
+# going is checked against a tree nobody will merge — the group is per PR, so
+# the new commit cancels it rather than the two racing to report on the same
+# check. `github.sha` is the fallback instead of `github.ref` on purpose: a
+# push to main and the workflow_call from release.yml both want their own run
+# to finish rather than be cancelled by whatever else lands on the same ref
+# afterwards, and every commit has its own SHA where main and a release tag do
+# not have their own ref.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true # verified live in PR #4
+
 defaults:
   run:
     shell: bash
