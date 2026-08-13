@@ -37,7 +37,7 @@ permissions:
 # not have their own ref.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
+  cancel-in-progress: true # verified live in PR #4
 
 defaults:
   run:
