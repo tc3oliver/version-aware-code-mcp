@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -461,6 +462,20 @@ func TestContextStateMachineOnlyGoesForwards(t *testing.T) {
 	if advances("", contextResolving) || advances(contextCreating, "SOMETHING_ELSE") {
 		t.Error("advances admitted a state that is not in the machine")
 	}
+
+	// REMOVING is reachable from wherever a context got to — one being served,
+	// one that failed, one still being built, and one whose removal was already
+	// interrupted — because every one of them is a record somebody asked to be
+	// taken away. Nothing leads back out of it: what follows REMOVING is the
+	// record being deleted, not another state.
+	for _, from := range append(slices.Clone(order), contextFailed, contextRemoving) {
+		if !advances(from, contextRemoving) {
+			t.Errorf("advances(%s, %s) = false, want true", from, contextRemoving)
+		}
+		if from != contextRemoving && advances(contextRemoving, from) {
+			t.Errorf("advances(%s, %s) = true, want false", contextRemoving, from)
+		}
+	}
 }
 
 // TestAdvanceWritesEveryStateItPassesThrough is the other half of AC #1: the
@@ -551,6 +566,7 @@ func TestReadyContextIsTheOnlyWayIn(t *testing.T) {
 		contextVerifying,
 		contextReady,
 		contextFailed,
+		contextRemoving,
 	} {
 		if err := s.PutContext(store.Context{ID: strings.ToLower(state), Repository: "demo", State: state}); err != nil {
 			t.Fatalf("PutContext(%s): %v", state, err)
@@ -577,7 +593,7 @@ func TestReadyContextIsTheOnlyWayIn(t *testing.T) {
 	// the same answer: not the same code with a different message, the same
 	// error. The comparison is the same id twice — once hidden by its state,
 	// once really gone — so nothing but the state can account for a difference.
-	for _, id := range []string{strings.ToLower(contextFailed), strings.ToLower(contextIndexingGraph)} {
+	for _, id := range []string{strings.ToLower(contextFailed), strings.ToLower(contextIndexingGraph), strings.ToLower(contextRemoving)} {
 		hidden := errorFor(t, func() error { _, err := readyContext(s, id); return err })
 		if hidden.Code != vacerr.ContextNotFound {
 			t.Errorf("readyContext(%s) code = %q, want %q", id, hidden.Code, vacerr.ContextNotFound)
@@ -995,6 +1011,226 @@ func TestConcurrentLifecycleOnOneRepositoryStaysConsistent(t *testing.T) {
 		if !indexed {
 			t.Errorf("%s is READY but its search ref %q is not in the index a concurrent create rebuilt", c.ID, c.Branch)
 		}
+	}
+}
+
+// TestContextRemovePersistsRemovingBeforeItTouchesAnArtifact is AC #1: the
+// state is written down before any artifact is taken apart, so a removal that
+// dies on its very first step leaves a record saying what is happening to it
+// rather than one still claiming READY over a graph that is already gone.
+//
+// The graph engine is broken for the length of the run, which fails the first
+// artifact step there is. Everything the context owns is therefore still there
+// afterwards, and the record already says REMOVING: only a write that happens
+// before the artifacts are touched produces that pair.
+func TestContextRemovePersistsRemovingBeforeItTouchesAnArtifact(t *testing.T) {
+	data, _, _ := managed(t)
+	if _, err := contextRun(t, data, "create", "app", "--repo", "demo", "--ref", "main"); err != nil {
+		t.Fatalf("context create: %v", err)
+	}
+	ready := contextRecord(t, data, "app")
+
+	working := os.Getenv("PATH")
+	t.Setenv("PATH", brokenCBM(t)+string(os.PathListSeparator)+working)
+	if _, err := contextRun(t, data, "remove", "app"); err == nil {
+		t.Fatal("context remove with a failing graph engine returned nil, want an error")
+	}
+	t.Setenv("PATH", working)
+
+	if got := contextRecord(t, data, "app").State; got != contextRemoving {
+		t.Errorf("state after a removal that failed on its first step = %q, want %s", got, contextRemoving)
+	}
+	if head := gitOut(t, "-C", filepath.Join(data, "worktrees", "demo", "app"), "rev-parse", "HEAD"); head != ready.Revision {
+		t.Errorf("worktree HEAD = %q, want a removal that got no further than the state to have left it at %q", head, ready.Revision)
+	}
+	if got := gitOut(t, "-C", filepath.Join(data, "repos", "demo"), "rev-parse", "--verify", "refs/heads/"+ready.Branch); got != ready.Revision {
+		t.Errorf("search ref = %q, want a removal that got no further than the state to have left it at %q", got, ready.Revision)
+	}
+
+	// AC #2 at its first instant: from the line the state was written, the
+	// context is the same CONTEXT_NOT_FOUND an unmanaged one is.
+	if _, err := readyContext(openStore(t, data), "app"); codeFor(t, err) != vacerr.ContextNotFound {
+		t.Errorf("readyContext of a REMOVING context = %v, want %q", err, vacerr.ContextNotFound)
+	}
+	// And a retry is not the way out of REMOVING, which is what keeps it
+	// one-way: the only thing that ends it is the removal itself.
+	if _, err := contextRun(t, data, "retry", "app"); codeFor(t, err) != vacerr.InvalidArgument {
+		t.Errorf("context retry of a REMOVING context, want %q", vacerr.InvalidArgument)
+	}
+	if out, err := contextRun(t, data, "status", "app"); err != nil || !strings.Contains(out, "vacmcp context remove app") {
+		t.Errorf("context status printed\n%s(err %v)\nwant it to point at the removal", out, err)
+	}
+
+	// The same command again, with the engine back, finishes what it started.
+	if out, err := contextRun(t, data, "remove", "app"); err != nil || out != "app\tREMOVED\n" {
+		t.Errorf("re-running context remove = %q (err %v), want it to finish the removal", out, err)
+	}
+	if _, err := openStore(t, data).Context("app"); codeFor(t, err) != vacerr.ContextNotFound {
+		t.Errorf("the record after the removal finished = %v, want %q", err, vacerr.ContextNotFound)
+	}
+}
+
+// TestContextRemoveResumesAfterACrashAtAnyStep is AC #2 and AC #3: a removal
+// killed at any one of its steps leaves a context the query plane does not
+// serve, and running the very same command again finishes it and leaves
+// nothing behind.
+//
+// The crash is produced by taking the steps contextRemove takes, in its order,
+// and stopping — the same functions the command calls, against the same real
+// git, Zoekt and CBM. That is exactly what a killed process leaves, and unlike
+// killing one it stops in a defined place: the state is persisted before any
+// artifact is touched, so every prefix of those steps is a state a record can
+// really be found in afterwards.
+func TestContextRemoveResumesAfterACrashAtAnyStep(t *testing.T) {
+	cbmOrSkip(t)
+	for _, crash := range []struct {
+		what  string
+		after int
+	}{
+		{"REMOVING is persisted and nothing is touched yet", 0},
+		{"the worktree and the graph are gone", 1},
+		{"the search ref is dropped", 2},
+		{"the index is rebuilt", 3},
+	} {
+		t.Run(crash.what, func(t *testing.T) {
+			data, removing, kept := indexedRepository(t)
+			t.Cleanup(func() { discardGraphs(t, data) })
+			crashRemoval(t, data, removing, crash.after)
+
+			if got := contextRecord(t, data, removing.ID).State; got != contextRemoving {
+				t.Fatalf("state after the crash = %q, want %s", got, contextRemoving)
+			}
+			// The rebuild that ran with the record still in front of it left the
+			// ref the record names out, rather than re-creating the source the
+			// step before it had just dropped.
+			if crash.after == 3 {
+				assertNoSearchRef(t, data, removing)
+			}
+
+			// AC #2, through a server that comes up on the data directory as it
+			// is after the crash: the context is not in the registry it serves,
+			// and every query tool answers for it exactly as it does for an id
+			// that was never managed at all.
+			session, _ := serveManaged(t, data, demorepo.StartZoekt(t, filepath.Join(data, "zoekt")))
+			if got, want := listedContexts(t, session), []string{kept.ID}; !slices.Equal(got, want) {
+				t.Errorf("list_contexts = %v, want only the context that is not being removed, %v", got, want)
+			}
+			for _, call := range []struct {
+				tool string
+				args map[string]any
+			}{
+				{"search_code", map[string]any{"context": removing.ID, "query": alphaToken}},
+				{"trace_calls", map[string]any{"context": removing.ID, "symbol": alphaToken, "direction": "callees", "depth": 1}},
+				{"get_code", map[string]any{"context": removing.ID, "path": "alpha.go", "start_line": 1, "end_line": 3}},
+			} {
+				res := callTool(t, session, call.tool, call.args)
+				if !res.IsError {
+					t.Fatalf("%s in a context being removed succeeded, want an error result", call.tool)
+				}
+				if got := errorCode(t, res); got != vacerr.ContextNotFound {
+					t.Errorf("%s in a context being removed = %q, want %q: %s", call.tool, got, vacerr.ContextNotFound, resultText(t, res))
+				}
+			}
+			// The server is answering rather than failing everything: the other
+			// context of the same repository is served out of the same index, so
+			// the answers above are about this context and not about a server
+			// that could not serve anything.
+			if !searchFinds(t, session, kept.ID, betaToken) {
+				t.Errorf("search_code(%s, %s) found nothing, so the answers above would pass for the wrong reason", kept.ID, betaToken)
+			}
+			_ = session.Close()
+
+			// AC #3: the same command again, and it finishes.
+			if out, err := contextRun(t, data, "remove", removing.ID); err != nil || out != removing.ID+"\tREMOVED\n" {
+				t.Fatalf("context remove after a crash = %q (err %v), want it to finish the removal", out, err)
+			}
+			assertRemoved(t, data, removing, kept)
+		})
+	}
+}
+
+// crashRemoval takes the first steps of contextRemove against c and stops there,
+// leaving what a process killed after that step would leave.
+func crashRemoval(t *testing.T, data string, c store.Context, steps int) {
+	t.Helper()
+	s := openStore(t, data)
+	// The state first, as the command writes it first. A crash before this is
+	// not a state of the removal at all: nothing had happened yet.
+	if err := advance(s, &c, contextRemoving); err != nil {
+		t.Fatalf("advance to %s: %v", contextRemoving, err)
+	}
+	worktree, err := s.WorktreeDir(c.Repository, c.ID)
+	if err != nil {
+		t.Fatalf("WorktreeDir: %v", err)
+	}
+	repoDir, err := s.RepositoryDir(c.Repository)
+	if err != nil {
+		t.Fatalf("RepositoryDir: %v", err)
+	}
+
+	for i, step := range []func() error{
+		func() error { return discardSource(t.Context(), repoDir, worktree, c) },
+		func() error { return dropSearchRef(t.Context(), repoDir, c) },
+		func() error { return indexRepository(t.Context(), s, c.Repository) },
+	} {
+		if i >= steps {
+			return
+		}
+		if err := step(); err != nil {
+			t.Fatalf("step %d of the removal: %v", i+1, err)
+		}
+	}
+}
+
+// assertNoSearchRef fails when the clone still has the context's search ref.
+func assertNoSearchRef(t *testing.T, data string, c store.Context) {
+	t.Helper()
+	clone := filepath.Join(data, "repos", c.Repository)
+	out, err := exec.Command("git", "-C", clone, "rev-parse", "--verify", "refs/heads/"+c.Branch).CombinedOutput()
+	if err == nil {
+		t.Errorf("refs/heads/%s is in the clone as %s, want the removal to have taken it out", c.Branch, strings.TrimSpace(string(out)))
+	}
+}
+
+// assertRemoved is what a finished removal leaves: no record, no worktree, no
+// graph, no search ref and nothing of it in the index — with the other context
+// of the same repository untouched, so none of it passes because everything
+// was destroyed.
+func assertRemoved(t *testing.T, data string, removed, kept store.Context) {
+	t.Helper()
+	s := openStore(t, data)
+	if _, err := s.Context(removed.ID); codeFor(t, err) != vacerr.ContextNotFound {
+		t.Errorf("the record of %s after the removal = %v, want %q", removed.ID, err, vacerr.ContextNotFound)
+	}
+	worktree, err := s.WorktreeDir(removed.Repository, removed.ID)
+	if err != nil {
+		t.Fatalf("WorktreeDir: %v", err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Errorf("the worktree of %s is still at %s (err = %v)", removed.ID, worktree, err)
+	}
+	assertNoSearchRef(t, data, removed)
+	if err := verifyGraph(t.Context(), removed); err == nil {
+		t.Errorf("codebase-memory-mcp still holds the graph %q of the removed context", removed.GraphRef)
+	}
+
+	url := demorepo.StartZoekt(t, filepath.Join(data, "zoekt"))
+	indexed, err := searchRefIndexed(t.Context(), url, removed)
+	if err != nil {
+		t.Fatalf("searchRefIndexed(%s): %v", removed.ID, err)
+	}
+	if indexed {
+		t.Errorf("%s: search ref %q is still in the index after the removal finished", removed.ID, removed.Branch)
+	}
+	if searchable(t, url, removed, alphaToken) {
+		t.Errorf("%s: %s is still searchable after the removal finished", removed.ID, alphaToken)
+	}
+
+	if got := contextRecord(t, data, kept.ID); got != kept {
+		t.Errorf("the removal changed the other context:\n before %+v\n  after %+v", kept, got)
+	}
+	if !searchable(t, url, kept, betaToken) {
+		t.Errorf("%s can no longer find %s after the other context was removed", kept.ID, betaToken)
 	}
 }
 
