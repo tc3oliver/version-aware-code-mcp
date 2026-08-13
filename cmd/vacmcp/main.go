@@ -163,13 +163,18 @@ func serve(args []string) error {
 	listen := listenAddress(*address, explicit, cfg)
 
 	srv := server.New(version)
-	// TODO(merge): capture the *engine.Engine addTools returns and `defer
-	// eng.Close()` here, once TASK-50's addTools signature change lands — see
-	// TASK-51. That is what shuts the CBM session down gracefully instead of
-	// leaving it to the process exit. addTools is also where the
-	// partial-startup rule of engine.New applies: it builds three providers in
-	// sequence, so a failure part way through has to close what it started.
-	addTools(srv, cfg)
+	eng := addTools(srv, cfg)
+	// Deferred, not called after ServeStdio/ServeHTTP return normally: both
+	// only return once the server has stopped, so this is the graceful
+	// shutdown path either way, including the CBM session addTools started
+	// that nothing else was closing. A failure here is reported to stderr
+	// rather than returned: the server already answered its whole run, and
+	// STDIO mode's stdout carries the protocol stream, not this.
+	defer func() {
+		if err := eng.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "vacmcp: %v\n", err)
+		}
+	}()
 
 	// Nothing may write to stdout in STDIO mode: it carries the protocol
 	// stream. Errors go to stderr, and only after the server has stopped.

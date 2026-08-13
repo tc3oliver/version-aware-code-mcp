@@ -96,6 +96,53 @@ func TestServeWithoutConfigExposesNoContexts(t *testing.T) {
 	}
 }
 
+// TestServeStaticStopsCleanlyWhenTheClientDisconnects is TASK-51's shutdown
+// path for `serve --config`: closing the transport must make the process exit
+// on its own, which is what proves serve's deferred Engine.Close() ran rather
+// than the process hanging until the SDK's client falls back to SIGTERM.
+//
+// [mcp.CommandTransport]'s Close closes stdin and then waits for the process;
+// it returns whatever Wait reported only when that happened before it had to
+// signal the process itself, so a nil here is the process having exited on the
+// stdin-EOF path — serve returning from ServeStdio and running its defer — not
+// on the fallback path.
+func TestServeStaticStopsCleanlyWhenTheClientDisconnects(t *testing.T) {
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), serveConfigEnv+"="+write(t, twoContexts))
+	cmd.Stderr = os.Stderr
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "vacmcp-test", Version: version}, nil)
+	session, err := client.Connect(t.Context(), &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Errorf("session.Close = %v, want serve to exit on its own once its deferred Engine.Close() ran", err)
+	}
+}
+
+// TestServeManagedStopsCleanlyWhenTheClientDisconnects is the managed-mode
+// twin of TestServeStaticStopsCleanlyWhenTheClientDisconnects. It needs no
+// real Zoekt or CBM: a data directory with no READY context never queries
+// either, so what is under test — that serve --managed's deferred
+// Engine.Close() runs and the process exits — holds independently of whether
+// an engine is reachable, which is also TASK-51's point about a missing
+// provider failing only its own query.
+func TestServeManagedStopsCleanlyWhenTheClientDisconnects(t *testing.T) {
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), serveManagedEnv+"="+t.TempDir())
+	cmd.Stderr = os.Stderr
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "vacmcp-test", Version: version}, nil)
+	session, err := client.Connect(t.Context(), &mcp.CommandTransport{Command: cmd}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Errorf("session.Close = %v, want serve --managed to exit on its own once its deferred Engine.Close() ran", err)
+	}
+}
+
 // callListContexts runs the CLI as an MCP server over STDIO and calls
 // list_contexts on it, returning the contexts it listed.
 func callListContexts(t *testing.T, configPath string) []map[string]string {
