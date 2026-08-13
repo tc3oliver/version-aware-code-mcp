@@ -27,3 +27,31 @@ func lockExclusive(f *os.File) error {
 		}
 	}
 }
+
+// tryLockShared takes the file's shared lock if it can have it at once, and
+// reports whether it got it.
+//
+// Shared and non-blocking are both the point. Shared, because any number of
+// holders may have it together and only an exclusive holder shuts them all
+// out — which is exactly the asymmetry the server lock needs: many management
+// commands beside each other, none of them beside a running server.
+// Non-blocking, because the thing that would be waited for is a server that
+// may run for weeks, and a command that hung until it stopped would be worse
+// than one that says so.
+//
+// EINTR is retried for the same reason it is above; EWOULDBLOCK is not an
+// error but the answer, and is reported as one.
+func tryLockShared(f *os.File) (bool, error) {
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, syscall.EWOULDBLOCK):
+			return false, nil
+		case errors.Is(err, syscall.EINTR):
+		default:
+			return false, err
+		}
+	}
+}

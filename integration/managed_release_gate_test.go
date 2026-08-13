@@ -20,13 +20,10 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 )
@@ -330,28 +327,14 @@ func contextRevision(t *testing.T, binary, data, id string) string {
 // serveManaged starts the binary as `vacmcp serve --managed` over STDIO against
 // a real Zoekt web server over the index the contexts built, and connects a
 // client to it.
+//
+// The server runs for the rest of the test: these two gates never stop one,
+// where managed_snapshot_gate_test.go does, so the stop [startManaged] returns
+// is left to the cleanup it registers.
 func serveManaged(t *testing.T, binary, data string) vacmcp {
 	t.Helper()
-
-	cmd := exec.Command(binary, "serve", "--stdio", "--managed",
-		"--data-dir", data,
-		"--zoekt-url", demorepo.StartZoekt(t, filepath.Join(data, "zoekt")),
-		"--cbm-command", cbmCommand)
-	// The protocol stream owns stdout, so anything the server has to say about
-	// itself arrives on stderr and belongs in this test's output.
-	cmd.Stderr = os.Stderr
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "vacmcp-managed-release-gate", Version: "0.0.0-test"}, nil)
-	session, err := client.Connect(t.Context(), &mcp.CommandTransport{Command: cmd}, nil)
-	if err != nil {
-		t.Fatalf("connecting to `vacmcp serve --stdio --managed --data-dir %s`: %v", data, err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-
-	// cfg is what a failure with no answer of its own quotes from, and a managed
-	// server has no configuration file to quote: every check below reads the
-	// stamp off the answer it got.
-	return vacmcp{session: session}
+	v, _ := startManaged(t, binary, data)
+	return v
 }
 
 // discardGraphs removes every context the data directory still has, which is

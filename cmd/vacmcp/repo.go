@@ -309,6 +309,16 @@ func repoRemove(args []string, out io.Writer) error {
 		return err
 	}
 
+	// A managed server resolves its contexts to paths inside this clone, so
+	// deleting it while one runs would leave the source of contexts it is
+	// serving gone. Asked before the repository's own lock, as decision-6 has
+	// it.
+	release, err := holdManagementLock(s, "repo remove")
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	// The check that no context depends on this repository and the deletion it
 	// permits are one operation: without the lock a `context create` could land
 	// between them and leave a context pinned to a clone that is being deleted.

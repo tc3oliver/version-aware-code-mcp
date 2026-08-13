@@ -121,6 +121,22 @@ func serve(args []string) error {
 		if err != nil {
 			return err
 		}
+		// The server lock, taken before the snapshot is read and held until
+		// this process stops serving. Reading under it is half of what it is
+		// for: the contexts this server is about to commit to for its whole run
+		// are read while no command is taking one of them apart. The other half
+		// is that no command may start doing so afterwards.
+		//
+		// A lock that cannot be taken at all stops the server. A managed server
+		// running without it is one the management plane cannot see, which is
+		// the state decision-6 exists to rule out — starting anyway would be
+		// serving with the guarantee quietly switched off.
+		release, err := holdServerLock(s)
+		if err != nil {
+			return err
+		}
+		defer release()
+
 		loaded, err := managedConfig(s, *zoektURL, *cbmCmd)
 		if err != nil {
 			return err

@@ -243,6 +243,16 @@ func contextCreate(args []string, out io.Writer) error {
 			map[string]any{"context": id},
 		)
 	}
+	// A managed server serving this data directory is the one thing that stops
+	// a context being created here, and it is asked before the repository's own
+	// lock: a create adds a context the running server's snapshot does not
+	// have, and once this id exists it can never mean another revision.
+	release, err := holdManagementLock(s, "context create")
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	// Everything below reads and writes the repository's clone, its search
 	// index and the records of its other contexts, so it is one operation on
 	// that repository and runs alone. The ref is resolved inside the lock too: a
@@ -376,7 +386,17 @@ func contextRetry(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// Read once outside the lock only to learn which repository's lock to take;
+	// A retry throws this context's artifacts away and builds them again, so a
+	// managed server that is serving the data directory refuses it for the same
+	// reason it refuses a removal: it would be rebuilding a worktree and a graph
+	// underneath answers being given out of them.
+	release, err := holdManagementLock(s, "context retry")
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	// Read once outside the repository's lock only to learn which one to take;
 	// every decision below is made again from the record as it is under it.
 	known, err := s.Context(id)
 	if err != nil {
@@ -687,7 +707,16 @@ func contextRemove(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// Read once outside the lock only to learn which repository's lock to take.
+	// The removal decision-6 is written about: a managed server holds the
+	// worktree, the graph and the record this is about to delete in a snapshot
+	// it cannot be told about, so while one runs this is refused outright.
+	release, err := holdManagementLock(s, "context remove")
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	// Read once outside the repository's lock only to learn which one to take.
 	known, err := s.Context(id)
 	if err != nil {
 		return err
