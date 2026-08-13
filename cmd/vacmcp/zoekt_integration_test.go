@@ -3,10 +3,12 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,6 +26,28 @@ import (
 // carrying the ones it deleted, and that the v0.1.0 search adapter finds the
 // result through them — none of which a stub could answer, because all of it is
 // Zoekt's behaviour rather than vacmcp's.
+
+// indexer is the Zoekt indexing binary the managed lifecycle runs. The tests
+// here need the name to know whether it is installed, and to rebuild a shard
+// the way an interrupted removal leaves one.
+const indexer = "zoekt-git-index"
+
+// searchRefIndexed reports whether the Zoekt server at zoektURL has c's search
+// ref in the index it serves.
+//
+// It asks the server rather than reading the shard because a context is only
+// searchable once the engine answering the queries has loaded it: a shard on
+// disk that nothing has picked up yet answers nothing. Asking also keeps the
+// shard format out of these tests — it goes through the same client, with the
+// same timeout, that the search adapter queries with.
+func searchRefIndexed(ctx context.Context, zoektURL string, c store.Context) (bool, error) {
+	cfg := &config.Config{Providers: config.Providers{Zoekt: config.Zoekt{URL: zoektURL}}}
+	branches, err := zoekt.New(cfg).IndexedBranches(ctx, c.Repository)
+	if err != nil {
+		return false, err
+	}
+	return slices.Contains(branches, c.Branch), nil
+}
 
 // requireIndexer skips when the indexing binary is not installed. Every skip in
 // this repository means an engine is missing, which is right for a developer

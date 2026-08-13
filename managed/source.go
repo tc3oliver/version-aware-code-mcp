@@ -1,4 +1,4 @@
-package main
+package managed
 
 import (
 	"bytes"
@@ -36,10 +36,10 @@ import (
 // Zoekt and the context lifecycle is a separate question that must not be
 // answered with a global lock.
 
-// cbmCommand is the graph engine, run as a subprocess. It is the binary name
-// config/example.yaml names, resolved on PATH like every other tool this CLI
-// shells out to.
-const cbmCommand = "codebase-memory-mcp"
+// CBMCommand is the graph engine, run as a subprocess. It is the binary name
+// config/example.yaml names, resolved on PATH like every other tool the
+// management plane shells out to.
+const CBMCommand = "codebase-memory-mcp"
 
 // prepareSource checks out the revision a context pins.
 //
@@ -110,7 +110,7 @@ func verifySource(ctx context.Context, worktree string, c store.Context) error {
 // succeeded is still there: a graph can be deleted out from under a context by
 // anything else driving the same CBM store.
 func verifyGraph(ctx context.Context, c store.Context) error {
-	cmd := exec.CommandContext(ctx, cbmCommand, "cli", "list_projects")
+	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "list_projects")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -142,7 +142,7 @@ func verifyGraph(ctx context.Context, c store.Context) error {
 // too. The status field is therefore read, so a context only carries on with a
 // graph CBM said it indexed.
 func indexGraph(ctx context.Context, worktree string, c store.Context) error {
-	cmd := exec.CommandContext(ctx, cbmCommand, "cli", "index_repository", "--repo-path", worktree, "--name", c.GraphRef)
+	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "index_repository", "--repo-path", worktree, "--name", c.GraphRef)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -174,7 +174,7 @@ func deleteGraph(ctx context.Context, c store.Context) error {
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, cbmCommand, "cli", "delete_project", "--project", c.GraphRef)
+	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "delete_project", "--project", c.GraphRef)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 

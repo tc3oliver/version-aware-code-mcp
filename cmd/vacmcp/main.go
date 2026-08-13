@@ -17,6 +17,7 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/git"
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
@@ -105,18 +106,18 @@ func serve(args []string) error {
 	stdio := fs.Bool("stdio", false, "serve over STDIO instead of Streamable HTTP")
 	address := fs.String("address", server.DefaultAddress, "address to listen on in Streamable HTTP mode")
 	path := fs.String("config", "", "path to the vacmcp configuration file")
-	managed := fs.Bool("managed", false, "serve the READY contexts of a managed data directory")
+	managedMode := fs.Bool("managed", false, "serve the READY contexts of a managed data directory")
 	dataDir := fs.String("data-dir", "", "vacmcp data directory in managed mode (default ~/.vacmcp)")
 	zoektURL := fs.String("zoekt-url", defaultZoektURL, "Zoekt web server to search through in managed mode")
-	cbmCmd := fs.String("cbm-command", cbmCommand, "codebase-memory-mcp binary to trace through in managed mode")
+	cbmCmd := fs.String("cbm-command", managed.CBMCommand, "codebase-memory-mcp binary to trace through in managed mode")
 	_ = fs.Parse(args)
 
-	if *managed && *path != "" {
+	if *managedMode && *path != "" {
 		return errors.New("serve: give either --config or --managed, not both")
 	}
 
 	cfg := &config.Config{}
-	if *managed {
+	if *managedMode {
 		s, err := store.Open(*dataDir)
 		if err != nil {
 			return err
@@ -131,7 +132,7 @@ func serve(args []string) error {
 		// running without it is one the management plane cannot see, which is
 		// the state decision-6 exists to rule out — starting anyway would be
 		// serving with the guarantee quietly switched off.
-		release, err := holdServerLock(s)
+		release, err := managed.HoldServerLock(*dataDir)
 		if err != nil {
 			return err
 		}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
@@ -112,23 +113,9 @@ func TestRepoAddRefusesAURLThatEmbedsACredential(t *testing.T) {
 	}
 }
 
-// TestRepoAddAcceptsAnSSHIdentity keeps the refusal above from swallowing the
-// authentication decision-4 expects people to use: `git@host` is an SSH login
-// name, not a secret, and the key behind it never goes near vacmcp.
-func TestRepoAddAcceptsAnSSHIdentity(t *testing.T) {
-	for _, url := range []string{
-		"ssh://git@example.invalid/x.git",
-		"git@example.invalid:org/x.git",
-		"https://example.invalid/x.git",
-		"file:///srv/git/x.git",
-		"/srv/git/x.git",
-		"https://example.invalid:8443/x.git",
-	} {
-		if embedsCredential(url) {
-			t.Errorf("embedsCredential(%q) = true, want false: no secret is in that URL", url)
-		}
-	}
-}
+// The other side of that refusal — that `git@host` is an SSH login name rather
+// than a secret, and is accepted — is the rule for reading a URL rather than
+// anything git does, and is in managed/repository_test.go.
 
 // TestRepoAddTreatsAHostileArgumentAsAnArgument is AC #2: a name or a URL full
 // of shell metacharacters reaches git as one literal argument and gets no
@@ -173,8 +160,8 @@ func TestRepoAddTreatsAHostileArgumentAsAnArgument(t *testing.T) {
 
 		// A URL git could not clone is a recorded failure, not a repository
 		// that quietly half-exists.
-		if r, err := openStore(t, data).Repository("demo"); err != nil || r.State != repoFailed {
-			t.Errorf("record after repo add --url %q = %+v (err %v), want state %s", argument, r, err, repoFailed)
+		if r, err := openStore(t, data).Repository("demo"); err != nil || r.State != managed.RepositoryFailed {
+			t.Errorf("record after repo add --url %q = %+v (err %v), want state %s", argument, r, err, managed.RepositoryFailed)
 		}
 	}
 }
@@ -230,8 +217,8 @@ func TestRepoAddAuthenticatesThroughTheInheritedEnvironment(t *testing.T) {
 	if _, statErr := os.Stat(proof); statErr != nil {
 		t.Fatalf("git did not run GIT_SSH_COMMAND (%v): the process environment is not reaching git, so no SSH agent or credential helper could either", statErr)
 	}
-	if r, err := openStore(t, data).Repository("demo"); err != nil || r.State != repoFailed {
-		t.Errorf("record = %+v (err %v), want state %s", r, err, repoFailed)
+	if r, err := openStore(t, data).Repository("demo"); err != nil || r.State != managed.RepositoryFailed {
+		t.Errorf("record = %+v (err %v), want state %s", r, err, managed.RepositoryFailed)
 	}
 }
 

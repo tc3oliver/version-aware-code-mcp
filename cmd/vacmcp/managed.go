@@ -8,6 +8,7 @@ import (
 	yaml "go.yaml.in/yaml/v4"
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
@@ -44,9 +45,8 @@ const (
 )
 
 // readyContexts returns the records the query plane may serve, ordered by ID.
-// It is [readyContext] asked of the whole data directory: READY is the only
-// state a context is served in, so every other one is left out here rather than
-// filtered somewhere further down.
+// READY is the only state a context is served in, so every other one is left
+// out here rather than filtered somewhere further down.
 func readyContexts(s *store.Store) ([]store.Context, error) {
 	contexts, err := s.Contexts()
 	if err != nil {
@@ -54,7 +54,7 @@ func readyContexts(s *store.Store) ([]store.Context, error) {
 	}
 	ready := make([]store.Context, 0, len(contexts))
 	for _, c := range contexts {
-		if c.State == contextReady {
+		if c.State == managed.ContextReady {
 			ready = append(ready, c)
 		}
 	}

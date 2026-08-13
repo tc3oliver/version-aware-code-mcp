@@ -22,6 +22,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
@@ -49,8 +50,8 @@ func TestServeManagedServesExactlyTheReadyContexts(t *testing.T) {
 			t.Fatal("context create with a failing graph engine returned nil, want an error")
 		}
 	})
-	if got := contextRecord(t, data, "ctx-broken").State; got != contextFailed {
-		t.Fatalf("ctx-broken is in state %q, want %s", got, contextFailed)
+	if got := contextRecord(t, data, "ctx-broken").State; got != managed.ContextFailed {
+		t.Fatalf("ctx-broken is in state %q, want %s", got, managed.ContextFailed)
 	}
 
 	session, gitLog := serveManaged(t, data, demorepo.StartZoekt(t, filepath.Join(data, "zoekt")))
