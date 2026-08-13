@@ -30,6 +30,14 @@ const (
 	serveManagedZoektEnv = "VACMCP_TEST_SERVE_MANAGED_ZOEKT"
 )
 
+// discardPrepared checks and then takes down the installation the real-engine
+// tests share, and is set only in the build those tests are in. It cannot be a
+// t.Cleanup: the installation outlives the test that built it, and its graphs
+// live in CBM's own store rather than in a temporary directory anything else
+// would remove. It reports a run that left the installation changed, which is
+// a failure of the run rather than of whichever test read it afterwards.
+var discardPrepared func() error
+
 func TestMain(m *testing.M) {
 	if path, ok := os.LookupEnv(serveConfigEnv); ok {
 		args := []string{"serve", "--stdio"}
@@ -55,7 +63,14 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if discardPrepared != nil {
+		if err := discardPrepared(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			code = 1
+		}
+	}
+	os.Exit(code)
 }
 
 // TestServeExposesTheConfiguredContexts is the wiring check: `serve --config`

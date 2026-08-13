@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -166,10 +165,11 @@ func TestTraceCallsSymbolNotFound(t *testing.T) {
 	t.Logf("demo-v2 NewHandler -> %s", traceCallsOK(t, cfg, args))
 }
 
-// AC #2. The demo repository duplicates no name, so the ambiguity is built as
-// its own real CBM project: two packages, one function name. Both candidates
-// have to reach the client, because returning the call graph of whichever one
-// CBM listed first is a wrong answer that looks exactly like a right one.
+// AC #2. The demo repository duplicates no name, so the ambiguity is its own
+// real CBM project, built with the rest of the prepared baseline. Both
+// candidates have to reach the client, because returning the call graph of
+// whichever one CBM listed first is a wrong answer that looks exactly like a
+// right one.
 func TestTraceCallsAmbiguousSymbol(t *testing.T) {
 	cfg := traceFixture(t)
 	demo := cfg.Contexts["demo-v1"]
@@ -178,7 +178,7 @@ func TestTraceCallsAmbiguousSymbol(t *testing.T) {
 		Repository: demo.Repository,
 		Branch:     demo.Branch,
 		Revision:   demo.Revision,
-		GraphRef:   indexAmbiguousProject(t, cfg.Providers.CBM.Command),
+		GraphRef:   demorepo.AmbiguousGraph,
 	}
 
 	body := traceCallsError(t, cfg, map[string]any{
@@ -377,40 +377,6 @@ func traceCallsError(t *testing.T, cfg *config.Config, args map[string]any) trac
 		t.Fatalf("error result is not the documented shape: %s", raw)
 	}
 	return body
-}
-
-// indexAmbiguousProject builds a real CBM project holding one function name in
-// two packages, and returns its graph_ref. The project is deleted afterwards so
-// a test run leaves nothing behind in CBM's store.
-func indexAmbiguousProject(t *testing.T, command string) string {
-	t.Helper()
-	const graphRef = "vacmcp-trace-calls-ambiguous"
-
-	dir := t.TempDir()
-	files := map[string]string{
-		"go.mod":       "module ambiguous\n\ngo 1.26\n",
-		"alpha/dup.go": "package alpha\n\nfunc Duplicated() {}\n",
-		"beta/dup.go":  "package beta\n\nfunc Duplicated() {}\n",
-	}
-	for name, body := range files {
-		path := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatalf("MkdirAll(%s): %v", filepath.Dir(path), err)
-		}
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatalf("WriteFile(%s): %v", path, err)
-		}
-	}
-
-	if out, err := exec.Command(command, "cli", "index_repository", "--repo-path", dir, "--name", graphRef).CombinedOutput(); err != nil {
-		t.Fatalf("cbm index_repository: %v\n%s", err, out)
-	}
-	t.Cleanup(func() {
-		if out, err := exec.Command(command, "cli", "delete_project", "--project", graphRef).CombinedOutput(); err != nil {
-			t.Logf("cbm delete_project %s: %v\n%s", graphRef, err, out)
-		}
-	})
-	return graphRef
 }
 
 // calleesOf returns the names the result says symbol calls.

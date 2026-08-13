@@ -142,11 +142,14 @@ It wipes and rebuilds everything under `testdata/fixture/`, which is in
 | --- | --- |
 | `zoekt-index/` | one index carrying `main`, `release/v1` and `release/v2` |
 | `worktrees/` | a checkout per release, the directories CBM indexes |
+| `ambiguous/` | two packages declaring one function name, indexed as `vacmcp-demo-ambiguous` |
 | `config.yaml` | repositories and contexts naming both, with resolved revisions |
 
 Each release is indexed into its own CBM project, named after the `graph_ref`
 of its context. Two versions sharing one project would trace calls against the
-other version's graph.
+other version's graph. `vacmcp-demo-ambiguous` is no release of the repository
+— it is the duplicated symbol `trace_calls` has to report both candidates for,
+built here rather than by each test that asks about one.
 
 Tests reach the result through `demorepo.Prepared`, which skips when the
 fixture has not been built. Nothing `make test` runs asks for it — that is what
