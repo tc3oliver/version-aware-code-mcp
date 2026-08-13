@@ -8,12 +8,40 @@
 ## Build, test, lint
 
 ```bash
-make build   # go build -o bin/vacmcp ./cmd/vacmcp
-make test    # go test ./...
-make lint    # golangci-lint run
-make fmt     # gofmt -l -w .
-make vet     # go vet ./...
+make build            # go build -o bin/vacmcp ./cmd/vacmcp
+make test             # go test ./...
+make test-integration # go test -tags=integration ./...
+make lint             # golangci-lint run --build-tags=integration
+make fmt              # gofmt -l -w .
+make vet              # go vet ./...
 ```
+
+### The two test runs
+
+A test that needs a real Zoekt or a real codebase-memory-mcp to say anything is
+behind `//go:build integration`, in a file named `*_integration_test.go` beside
+the one holding the rest of its package's tests. So there are two runs:
+
+| Run | What it covers | Needs |
+| --- | --- | --- |
+| `make test` | everything decided by this module alone: path traversal, state transitions, atomic writes, revision immutability, CLI arguments, lock semantics | git |
+| `make test-integration` | that, plus every test that queries a real engine: Zoekt branch isolation, CBM project selection, `trace_calls` version isolation, the managed lifecycle end to end | git, Zoekt, CBM, a prepared fixture |
+
+The tag adds tests to the run rather than replacing any, so the second is a
+superset of the first and nothing is only ever run one way.
+
+When you add a test, the question to answer is whether a real engine is what
+makes its assertion mean something. If yes, it goes in the package's
+`*_integration_test.go`; if the invariant is this module's own, it goes in the
+plain `_test.go` and stays in the fast run. Do not reach for a mock engine to
+avoid the tag: correctness that involves an external engine is verified against
+the real engine, and a mock result does not satisfy a release gate. The tag
+moves when a test runs, never what it is allowed to talk to.
+
+The top-level `integration/` package is not tagged. It is the release gate, and
+a gate that runs nothing because a tag was forgotten is worse than a slow one,
+so it stays visible to a plain `go test` and skips itself when the fixture has
+not been built.
 
 ## Repository layout
 
@@ -121,9 +149,11 @@ of its context. Two versions sharing one project would trace calls against the
 other version's graph.
 
 Tests reach the result through `demorepo.Prepared`, which skips when the
-fixture has not been built, so `make test` still passes without Zoekt and CBM
-installed. Verify the fixture directly, never through `vacmcp` — otherwise a
-broken fixture looks like a broken adapter:
+fixture has not been built. Nothing `make test` runs asks for it — that is what
+the build tag is for — so the fast run passes without Zoekt and CBM installed
+at all, and `make test-integration` is the run that needs both. Verify the
+fixture directly, never through `vacmcp` — otherwise a broken fixture looks
+like a broken adapter:
 
 ```bash
 zoekt -index_dir testdata/fixture/zoekt-index 'NewHandler branch:release/v2'
@@ -145,6 +175,7 @@ one. It builds the fixture first, then runs, in order:
 | staticcheck | `make lint` (golangci-lint, staticcheck enabled) |
 | unit test | `go test -v` on everything but `integration/` |
 | race test | `go test -race` on the same packages |
+| real engine test | `go test -tags=integration -v` on the same packages |
 | integration test | `go test -v ./integration/...` |
 | MCP conformance | `.github/mcp-conformance.sh` |
 | `govulncheck` | `govulncheck ./...` |
@@ -154,7 +185,7 @@ one. It builds the fixture first, then runs, in order:
 Every step is a hard gate: none carries `continue-on-error` or `if: always()`,
 so the job stops at the first failure.
 
-The two test steps also run `.github/assert-no-skips.sh` over their output. A
+The three `-v` test steps also run `.github/assert-no-skips.sh` over their output. A
 test that skips is a test that verified nothing, and every skip here means a
 missing engine or an unbuilt fixture — on an unprepared checkout `go test ./...`
 reports ten skips and still exits 0. CI treats that as a failure.
@@ -224,8 +255,9 @@ pre-release, so it does not become the release a first-time visitor downloads.
 - Include tests for behavior changes.
 - Update documentation affected by the change in the same pull request.
 - Run `make fmt`, `make vet`, `make lint`, `make test` and `make build` before
-  opening it. The pull request template asks for each of them, and CI runs the
-  same checks against real engines on top.
+  opening it, and `make test-integration` too if you have the engines and the
+  fixture. The pull request template asks for each of them, and CI runs every
+  one of them against real engines whether or not you did.
 - Every step of the pipeline is a hard gate. A red run is something to fix, not
   something to re-run.
 

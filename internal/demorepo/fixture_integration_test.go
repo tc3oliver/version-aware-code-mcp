@@ -1,3 +1,5 @@
+//go:build integration
+
 package demorepo_test
 
 import (

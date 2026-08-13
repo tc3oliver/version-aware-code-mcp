@@ -138,13 +138,31 @@ jobs:
       # -timeout everywhere below for the reason the Makefile gives: go's
       # 10-minute default is a watchdog for hanging tests, and these spend
       # longer than that legitimately, driving real git, Zoekt and CBM.
+      #
+      # decision-7 splits the tests in two. A test that needs a real Zoekt or a
+      # real CBM to say anything is behind `//go:build integration`, so the two
+      # steps below compile without it and the one after them compiles with it.
+      # That is what stops the same real-engine test from being paid for twice:
+      # before this, every `context create` that built an index and a graph ran
+      # once under Unit test and again under Race test.
       - name: Unit test
         run: |
           go test -timeout 30m -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/unit.log"
           .github/assert-no-skips.sh "$RUNNER_TEMP/unit.log"
 
+      # No tag, so -race is spent on the tests whose invariants are this
+      # module's own — locks, state transitions, atomic writes. The real-engine
+      # tests under -race move to the nightly gate (TASK-46).
       - name: Race test
         run: go test -timeout 30m -race $(go list ./... | grep -v '/integration$')
+
+      # The other half: the same packages, built with the tag, so the tests that
+      # drive a real Zoekt and a real CBM run here and only here. /integration
+      # is excluded because it is its own package and its own step below.
+      - name: Real engine test (Zoekt + CBM)
+        run: |
+          go test -tags=integration -timeout 30m -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/engine.log"
+          .github/assert-no-skips.sh "$RUNNER_TEMP/engine.log"
 
       - name: Integration test (Zoekt + CBM)
         run: |
