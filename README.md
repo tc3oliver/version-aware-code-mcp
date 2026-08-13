@@ -644,13 +644,15 @@ Vulnerability reports go to the address in [SECURITY.md](SECURITY.md).
 
 v0.1.0 is the four tools above, one context per call, with the version isolation
 and evidence they are built around. v0.2.0 is the managed lifecycle that puts a
-repository behind them without anyone assembling one by hand. Ahead of those:
+repository behind them without anyone assembling one by hand. v0.3.0 is the same
+query plane as a Go package, so a program of your own can call it directly
+instead of running this server and talking MCP to it. Ahead of those:
 
 | Version | Direction |
 | --- | --- |
 | v0.1.0 | version-aware query plane: the four tools, context isolation, evidence — done |
-| v0.2.0 | managed repository and context lifecycle: `repo` and `context` commands, automatic Zoekt and graph provisioning, readiness verification — this release |
-| v0.3.0 | embeddable core / extension API: a stable Go API to embed this core in your own gateway |
+| v0.2.0 | managed repository and context lifecycle: `repo` and `context` commands, automatic Zoekt and graph provisioning, readiness verification — done |
+| v0.3.0 | embeddable core / extension API: a stable Go API to embed this core in your own gateway — this release |
 | v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff |
 | v0.5.0 | multi-repo contexts, cross-repo search and graph |
 | v0.6.0 | operations: metrics, OpenTelemetry, garbage collection, scheduled sync primitives |
