@@ -138,9 +138,9 @@ func TestEngineRunsOnImplementationsOfNothingButItsInterfaces(t *testing.T) {
 }
 
 // The other half of the claim: the engine does not merely work without a
-// backend, it cannot see one. An import of an adapter or of the resolver would
-// make the interfaces above decoration — the package would still compile, and
-// the next change would quietly reach for the concrete type.
+// backend and without MCP, it cannot see either. An import of any of the
+// packages below would make the interfaces above decoration — the package would
+// still compile, and the next change would quietly reach for the concrete type.
 //
 // `go list -deps` rather than a grep over the source, for two reasons: it is
 // the toolchain's own answer to "what does this package pull in", so it cannot
@@ -148,8 +148,28 @@ func TestEngineRunsOnImplementationsOfNothingButItsInterfaces(t *testing.T) {
 // a dependency fails this too. Its default is the non-test package — the fakes
 // in this file are not in its output, which is what makes them legal and a real
 // import not.
-func TestEngineDependsOnNoBackend(t *testing.T) {
+//
+// This runs in the tag-free build, so ci-fast.yml's Tier 1 already pays for it:
+// the gate needs no workflow step of its own, and cannot be one that the
+// workflow and the test disagree about.
+func TestEngineDependsOnNoBackendOrProtocol(t *testing.T) {
 	const module = "github.com/tc3oliver/version-aware-code-mcp"
+
+	// Each entry is a package tree the engine must not reach, and what reaching
+	// it would mean. The first two are backends. The rest are the protocol and
+	// the transport that sit *above* the engine: doc-1's split is that MCP,
+	// JSON-RPC and HTTP ask the engine questions and are never asked from inside
+	// it, so an engine that could name them is one no second front end — a CLI,
+	// an LSP server, a library caller — could reuse without dragging a server in.
+	forbidden := []struct{ tree, why string }{
+		{module + "/adapters", "it is written against a backend rather than against provider and ContextSource"},
+		{module + "/resolver", "it is written against a backend rather than against ContextSource"},
+		{"github.com/modelcontextprotocol/go-sdk", "the answers would be shaped by the protocol that asked for them"},
+		{"net/http", "it would carry a transport, and what vacmcp answers does not depend on how it was asked"},
+		{module + "/tools", "the engine would depend on the MCP adapters that are supposed to depend on it"},
+		{module + "/server", "the engine would depend on the server that is supposed to serve it"},
+		{module + "/cmd", "the engine would depend on the binary that is supposed to build it"},
+	}
 
 	out, err := exec.Command("go", "list", "-deps", ".").Output()
 	if err != nil {
@@ -157,8 +177,13 @@ func TestEngineDependsOnNoBackend(t *testing.T) {
 	}
 
 	for _, dep := range strings.Fields(string(out)) {
-		if strings.HasPrefix(dep, module+"/adapters/") || dep == module+"/resolver" {
-			t.Errorf("engine depends on %s, so it is written against a backend rather than against provider and ContextSource", dep)
+		for _, banned := range forbidden {
+			// The tree and everything under it, rather than a bare prefix: the
+			// latter would also match a package whose name merely starts the same
+			// way, and report an import nobody made.
+			if dep == banned.tree || strings.HasPrefix(dep, banned.tree+"/") {
+				t.Errorf("engine depends on %s, so %s", dep, banned.why)
+			}
 		}
 	}
 }
