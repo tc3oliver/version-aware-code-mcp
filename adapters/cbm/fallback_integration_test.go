@@ -1,3 +1,5 @@
+//go:build integration
+
 package cbm_test
 
 import (

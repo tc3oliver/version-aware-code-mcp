@@ -1,3 +1,5 @@
+//go:build integration
+
 package main
 
 // The worktree and the graph a context owns, tested against real git
