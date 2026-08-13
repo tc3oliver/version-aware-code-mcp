@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Embeddable core: the query plane and the management plane are Go packages that
+can be called directly, and the MCP server is one caller of them rather than the
+only way in.
+
+### Added
+
+- `engine`: the four queries — `ListContexts`, `SearchCode`, `TraceCalls`,
+  `GetCode` — as a package with no MCP, no JSON-RPC and no HTTP in it, so "this
+  query ran in that version and no other" is a function call rather than a
+  server test. `engine.New(contexts, search, graph, source)` builds one from a
+  `ContextSource` and the three providers, any of which may be nil, and
+  `Close` releases those that implement `io.Closer` and leaves those that do
+  not, which is how a caller keeps ownership of a provider it shares. A request
+  names its scope with a context id and nothing else, and every result type has
+  unexported fields, so a result that carries its version context and its
+  evidence is the only kind that exists.
+- `managed`: `RepositoryManager` and `ContextManager` as a public API over a
+  data directory, so a program embedding vacmcp builds the same installation
+  `vacmcp repo` and `vacmcp context` do rather than a second one that drifts
+  from it. It reports domain facts — a name, an id, a state, a revision — and no
+  on-disk layout, record format or lock.
+- `examples/embed`: a complete program embedding the engine. Its context source
+  and search provider are stand-ins, so it runs with no Zoekt, no
+  codebase-memory-mcp and no checkout, and CI builds and runs it on every pull
+  request.
+- README's Embedding Guide and Custom Provider Guide: constructing and closing
+  an Engine, the ownership contract `Close` implements, and the four interfaces
+  — `ContextSource`, `SearchProvider`, `GraphProvider`, `SourceProvider` — a
+  different backend implements. These packages are a **supported embedding
+  API**: documented, tested and meant to be used from outside this repository.
+  That is not a permanent backward-compatibility guarantee, which remains
+  v1.0.0's; until then a breaking change is possible and arrives with a release
+  note.
+
+### Changed
+
+- `tools` is a thin adapter over `engine`: it maps MCP arguments in and JSON
+  out, and every resolution, check and provider call happens below it. The four
+  tools answer exactly as before — same arguments, same output shape, same error
+  codes.
+
 ## [0.2.0] - 2026-08-14
 
 Managed Repository & Context Lifecycle: onboarding a repository no longer means

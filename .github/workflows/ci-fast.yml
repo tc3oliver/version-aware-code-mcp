@@ -111,3 +111,14 @@ jobs:
 
       - name: Build
         run: make build
+
+      # examples/embed is the embedding API used the way an embedder uses it:
+      # from a package outside this module's own wiring, through exported
+      # identifiers only. Its providers are stand-ins, so it needs no engine and
+      # Tier 1 can run it as well as compile it — a breaking change to
+      # engine.New, ContextSource or the provider interfaces stops here rather
+      # than in someone else's build.
+      - name: Build and run the embedding example
+        run: |
+          go build -o "$RUNNER_TEMP/embed" ./examples/embed
+          "$RUNNER_TEMP/embed"
