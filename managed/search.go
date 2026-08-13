@@ -1,4 +1,4 @@
-package main
+package managed
 
 import (
 	"context"
@@ -9,11 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 
-	"github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
-	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
@@ -101,7 +98,7 @@ func indexRepository(ctx context.Context, s *store.Store, repository string) err
 		// has just taken out — the removal's own rebuild, and any create of the
 		// same repository that lands between an interrupted removal and the run
 		// that finishes it.
-		if c.Repository != repository || c.Branch == "" || c.State == contextRemoving {
+		if c.Repository != repository || c.Branch == "" || c.State == ContextRemoving {
 			continue
 		}
 		if err := putSearchRef(ctx, repoDir, c); err != nil {
@@ -209,21 +206,4 @@ func searchUnavailable(c store.Context, reason string) error {
 		fmt.Sprintf("context %q: %s", c.ID, reason),
 		map[string]any{"context": c.ID, "repository": c.Repository},
 	)
-}
-
-// searchRefIndexed reports whether the Zoekt server at zoektURL has c's search
-// ref in the index it serves.
-//
-// It asks the server rather than reading the shard because a context is only
-// searchable once the engine answering the queries has loaded it: a shard on
-// disk that nothing has picked up yet answers nothing. Asking also keeps the
-// shard format out of this module — it goes through the same client, with the
-// same timeout, that the search adapter queries with.
-func searchRefIndexed(ctx context.Context, zoektURL string, c store.Context) (bool, error) {
-	cfg := &config.Config{Providers: config.Providers{Zoekt: config.Zoekt{URL: zoektURL}}}
-	branches, err := zoekt.New(cfg).IndexedBranches(ctx, c.Repository)
-	if err != nil {
-		return false, err
-	}
-	return slices.Contains(branches, c.Branch), nil
 }

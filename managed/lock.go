@@ -1,4 +1,4 @@
-package main
+package managed
 
 import (
 	"fmt"
@@ -39,10 +39,10 @@ var repositoryLocks sync.Map
 //
 // The file lock is advisory and released by the kernel when the file descriptor
 // closes, which a dying process does too: a killed vacmcp leaves a retryable
-// context behind (see contextRetry) and never a repository nothing can lock
-// again.
+// context behind (see [ContextManager.Retry]) and never a repository nothing
+// can lock again.
 //
-// Callers are the CLI subcommands, and only they: nothing this calls takes the
+// Callers are the manager methods, and only they: nothing this calls takes the
 // lock again, which is what keeps a re-entrant acquisition — the one way this
 // deadlocks — out of the code rather than out of a convention.
 func withRepositoryLock(s *store.Store, repository string, fn func() error) error {

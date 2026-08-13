@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
 )
 
@@ -230,7 +231,7 @@ func preparedFingerprint(data string) (string, error) {
 
 	// And the graphs, which are the one artifact that does not live in the
 	// directory above: a deleted graph is invisible to everything else here.
-	out, err := exec.Command(cbmCommand, "cli", "list_projects").Output()
+	out, err := exec.Command(managed.CBMCommand, "cli", "list_projects").Output()
 	if err != nil {
 		return "", fmt.Errorf("codebase-memory-mcp cli list_projects: %w", err)
 	}

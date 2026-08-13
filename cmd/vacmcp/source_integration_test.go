@@ -9,6 +9,9 @@ package main
 // answer differently — is exactly what a stub could not tell the truth about.
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +22,7 @@ import (
 
 	cbmadapter "github.com/tc3oliver/version-aware-code-mcp/adapters/cbm"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
@@ -37,9 +41,36 @@ const (
 // runs it, so without it there is nothing to test rather than something to fail.
 func cbmOrSkip(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath(cbmCommand); err != nil {
-		t.Skipf("%s is not on PATH: %v", cbmCommand, err)
+	if _, err := exec.LookPath(managed.CBMCommand); err != nil {
+		t.Skipf("%s is not on PATH: %v", managed.CBMCommand, err)
 	}
+}
+
+// graphExists reports, as an error when it does not, whether
+// codebase-memory-mcp holds the graph the context names.
+//
+// It asks CBM what it has rather than the lifecycle's own verification, so what
+// a create built and what a removal took away are observed from outside the code
+// that did either.
+func graphExists(ctx context.Context, c store.Context) error {
+	out, err := exec.CommandContext(ctx, managed.CBMCommand, "cli", "list_projects").Output()
+	if err != nil {
+		return fmt.Errorf("%s cli list_projects: %w", managed.CBMCommand, err)
+	}
+	var body struct {
+		Projects []struct {
+			Name string `json:"name"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(out, &body); err != nil {
+		return fmt.Errorf("list_projects did not answer with the JSON it promises: %w", err)
+	}
+	for _, project := range body.Projects {
+		if project.Name == c.GraphRef {
+			return nil
+		}
+	}
+	return fmt.Errorf("codebase-memory-mcp holds no graph %q for context %q", c.GraphRef, c.ID)
 }
 
 // discardGraphs deletes the graph of every context still recorded in dataDir.
@@ -79,7 +110,7 @@ func discardGraphsIn(dataDir string, logf func(string, ...any)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if out, err := exec.Command(cbmCommand, "cli", "delete_project", "--project", c.GraphRef).CombinedOutput(); err != nil {
+			if out, err := exec.Command(managed.CBMCommand, "cli", "delete_project", "--project", c.GraphRef).CombinedOutput(); err != nil {
 				logf("cleanup: delete_project %s: %v\n%s", c.GraphRef, err, out)
 			}
 		}()
@@ -131,7 +162,7 @@ func managedVersions(t *testing.T, v1, v2 string) (data, first, second string) {
 // the graphs a context now owns rather than of CBM's command line.
 func graphProvider(t *testing.T) *cbmadapter.Provider {
 	t.Helper()
-	p := cbmadapter.New(&config.Config{Providers: config.Providers{CBM: config.CBM{Command: cbmCommand}}})
+	p := cbmadapter.New(&config.Config{Providers: config.Providers{CBM: config.CBM{Command: managed.CBMCommand}}})
 	t.Cleanup(func() { _ = p.Close() })
 	return p
 }
@@ -226,7 +257,7 @@ func TestContextCreateBuildsAWorktreeAndAGraphPerContext(t *testing.T) {
 		{"app-v2", newHandler, legacyHandler},
 	} {
 		c := contextRecord(t, data, tc.id)
-		if err := verifyGraph(t.Context(), c); err != nil {
+		if err := graphExists(t.Context(), c); err != nil {
 			t.Fatalf("%s: the graph was not built: %v", tc.id, err)
 		}
 
@@ -275,7 +306,7 @@ func TestContextRemoveTakesOnlyItsOwnWorktreeAndGraph(t *testing.T) {
 	if listed := gitOut(t, "-C", clone, "worktree", "list"); strings.Contains(listed, worktree) {
 		t.Errorf("git worktree list =\n%s\nwant the removed worktree pruned", listed)
 	}
-	if err := verifyGraph(t.Context(), dropped); err == nil {
+	if err := graphExists(t.Context(), dropped); err == nil {
 		t.Errorf("CBM still holds the graph %q of the removed context", dropped.GraphRef)
 	}
 
@@ -284,7 +315,7 @@ func TestContextRemoveTakesOnlyItsOwnWorktreeAndGraph(t *testing.T) {
 	if head := gitOut(t, "-C", filepath.Join(data, "worktrees", "demo", "keep"), "rev-parse", "HEAD"); head != second {
 		t.Errorf("keep worktree HEAD = %q after removing drop, want %q", head, second)
 	}
-	if err := verifyGraph(t.Context(), kept); err != nil {
+	if err := graphExists(t.Context(), kept); err != nil {
 		t.Fatalf("removing drop took the graph of keep: %v", err)
 	}
 	if called := tracedCallees(t, graphProvider(t), kept); !slices.Contains(called, newHandler) {
@@ -333,7 +364,7 @@ func TestContextVerifyChecksTheArtifacts(t *testing.T) {
 	// A graph deleted out from under a context is GRAPH_PROVIDER_UNAVAILABLE
 	// rather than a context that reports itself as fine.
 	kept := contextRecord(t, data, "app-v2")
-	if out, err := exec.Command(cbmCommand, "cli", "delete_project", "--project", kept.GraphRef).CombinedOutput(); err != nil {
+	if out, err := exec.Command(managed.CBMCommand, "cli", "delete_project", "--project", kept.GraphRef).CombinedOutput(); err != nil {
 		t.Fatalf("delete_project %s: %v\n%s", kept.GraphRef, err, out)
 	}
 	_, err = contextRun(t, data, "verify", "app-v2")
@@ -387,7 +418,7 @@ func TestConcurrentContextCreatesIndexIndependentGraphs(t *testing.T) {
 	p := graphProvider(t)
 	for _, name := range repositories {
 		c := contextRecord(t, data, name+"-ctx")
-		if err := verifyGraph(t.Context(), c); err != nil {
+		if err := graphExists(t.Context(), c); err != nil {
 			t.Fatalf("%s: concurrent indexing left no graph: %v", name, err)
 		}
 		called := tracedCallees(t, p, c)

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
 )
 
@@ -28,23 +29,23 @@ func TestManagedConfigServesTheReadyRecordsAndNoRemoteURL(t *testing.T) {
 	const revision = "0123456789abcdef0123456789abcdef01234567"
 
 	s := openStore(t, t.TempDir())
-	if err := s.PutRepository(store.Repository{Name: "demo", URL: remote, State: repoReady}); err != nil {
+	if err := s.PutRepository(store.Repository{Name: "demo", URL: remote, State: managed.RepositoryReady}); err != nil {
 		t.Fatalf("PutRepository: %v", err)
 	}
-	for id, state := range map[string]string{"app-ready": contextReady, "app-failed": contextFailed, "app-building": contextIndexingGraph} {
+	for id, state := range map[string]string{"app-ready": managed.ContextReady, "app-failed": managed.ContextFailed, "app-building": managed.ContextIndexingGraph} {
 		if err := s.PutContext(store.Context{
 			ID:         id,
 			Repository: "demo",
-			Branch:     searchRef(id, revision),
+			Branch:     "vacmcp/" + id + "-" + revision[:12],
 			Revision:   revision,
-			GraphRef:   graphRef("demo", id, revision),
+			GraphRef:   "vacmcp-demo-" + id + "-" + revision[:12],
 			State:      state,
 		}); err != nil {
 			t.Fatalf("PutContext(%s): %v", id, err)
 		}
 	}
 
-	cfg, err := managedConfig(s, "http://127.0.0.1:6070", cbmCommand)
+	cfg, err := managedConfig(s, "http://127.0.0.1:6070", managed.CBMCommand)
 	if err != nil {
 		t.Fatalf("managedConfig: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestManagedConfigServesTheReadyRecordsAndNoRemoteURL(t *testing.T) {
 	if strings.Contains(generated, remote) {
 		t.Errorf("the generated configuration carries the remote URL:\n%s", generated)
 	}
-	for _, want := range []string{clone, "app-ready", "http://127.0.0.1:6070", cbmCommand} {
+	for _, want := range []string{clone, "app-ready", "http://127.0.0.1:6070", managed.CBMCommand} {
 		if !strings.Contains(generated, want) {
 			t.Errorf("the generated configuration does not name %q:\n%s", want, generated)
 		}
@@ -89,11 +90,11 @@ func TestManagedConfigServesTheReadyRecordsAndNoRemoteURL(t *testing.T) {
 // server `serve` without a --config gives — no contexts, and no error either.
 func TestManagedConfigOfADataDirectoryWithNothingReady(t *testing.T) {
 	s := openStore(t, t.TempDir())
-	if err := s.PutContext(store.Context{ID: "app", Repository: "demo", State: contextFailed}); err != nil {
+	if err := s.PutContext(store.Context{ID: "app", Repository: "demo", State: managed.ContextFailed}); err != nil {
 		t.Fatalf("PutContext: %v", err)
 	}
 
-	cfg, err := managedConfig(s, defaultZoektURL, cbmCommand)
+	cfg, err := managedConfig(s, defaultZoektURL, managed.CBMCommand)
 	if err != nil {
 		t.Fatalf("managedConfig of a data directory with nothing READY: %v", err)
 	}
@@ -121,13 +122,13 @@ func TestDoctorManagedReportsTheRepositoriesAndTheContexts(t *testing.T) {
 	revision := gitOut(t, "-C", source, "rev-parse", "HEAD")
 
 	s := openStore(t, data)
-	for id, state := range map[string]string{"app-ready": contextReady, "app-failed": contextFailed, "app-building": contextIndexingGraph} {
+	for id, state := range map[string]string{"app-ready": managed.ContextReady, "app-failed": managed.ContextFailed, "app-building": managed.ContextIndexingGraph} {
 		if err := s.PutContext(store.Context{
 			ID:         id,
 			Repository: "demo",
-			Branch:     searchRef(id, revision),
+			Branch:     "vacmcp/" + id + "-" + revision[:12],
 			Revision:   revision,
-			GraphRef:   graphRef("demo", id, revision),
+			GraphRef:   "vacmcp-demo-" + id + "-" + revision[:12],
 			State:      state,
 		}); err != nil {
 			t.Fatalf("PutContext(%s): %v", id, err)
@@ -163,7 +164,7 @@ func TestDoctorManagedReportsTheRepositoriesAndTheContexts(t *testing.T) {
 			t.Errorf("%s = %s, want %s", row, got, want)
 		}
 	}
-	for _, want := range []string{contextReady, contextFailed, contextIndexingGraph, revision} {
+	for _, want := range []string{managed.ContextReady, managed.ContextFailed, managed.ContextIndexingGraph, revision} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the Contexts section does not report %q:\n%s", want, out)
 		}
