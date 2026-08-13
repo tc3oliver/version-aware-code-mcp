@@ -16,16 +16,23 @@ description: Installs pinned Zoekt and codebase-memory-mcp, then builds the demo
 outputs:
   zoekt-version:
     description: The Zoekt pseudo-version these steps installed.
-    value: ${{ steps.zoekt.outputs.version }}
+    value: ${{ steps.pins.outputs.zoekt-version }}
   cbm-version:
     description: The codebase-memory-mcp release tag these steps installed.
-    value: ${{ steps.cbm.outputs.version }}
+    value: ${{ steps.pins.outputs.cbm-version }}
 
 runs:
   using: composite
   steps:
-    - name: Install the pinned Zoekt binaries
-      id: zoekt
+    # The pins live here and only here. Every step below reads one back
+    # through this step's outputs rather than its own copy, which is the same
+    # reason this file exists in the first place: a pin written down twice is
+    # one copy that gets bumped and one that keeps authenticating the old
+    # binary — the cache steps this task adds would otherwise be a second
+    # place these three values could drift from the install steps that use
+    # them.
+    - name: Read the pins and the Go tool directory
+      id: pins
       shell: bash
       env:
         # decision-3: the engines are pinned, never `latest`, so a green run
@@ -33,22 +40,60 @@ runs:
         # release, so the pin is the module pseudo-version and the Go checksum
         # database authenticates it.
         ZOEKT_VERSION: v0.0.0-20260807124253-c4d8f3537f7a
-      run: |
-        echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
-        go install "github.com/sourcegraph/zoekt/cmd/zoekt-git-index@$ZOEKT_VERSION"
-        go install "github.com/sourcegraph/zoekt/cmd/zoekt-webserver@$ZOEKT_VERSION"
-        echo "version=$ZOEKT_VERSION" >>"$GITHUB_OUTPUT"
-
-    - name: Install codebase-memory-mcp
-      id: cbm
-      shell: bash
-      env:
         # CBM ships release archives, so the pin is the tag plus the SHA-256
         # recorded from that release's checksums.txt. Linux gets the
         # `-portable` build: the plain linux archive dynamically links glibc.
         CBM_VERSION: v0.10.1
-        CBM_ARCHIVE: codebase-memory-mcp-linux-amd64-portable.tar.gz
         CBM_SHA256: 97c6580a13d772d040e936584f3c5234586ab03f31a77354af8a763851a39a7f
+      run: |
+        gobin="$(go env GOPATH)/bin"
+        echo "$gobin" >>"$GITHUB_PATH"
+        {
+          echo "gobin=$gobin"
+          echo "go-version=$(go env GOVERSION)"
+          echo "zoekt-version=$ZOEKT_VERSION"
+          echo "cbm-version=$CBM_VERSION"
+          echo "cbm-sha256=$CBM_SHA256"
+        } >>"$GITHUB_OUTPUT"
+
+    # Built from source, so the toolchain that built it is part of the key —
+    # not because Zoekt itself is toolchain-sensitive the way golangci-lint
+    # is, but a stale binary surviving a Go upgrade is exactly the silent
+    # staleness a cache should not risk for a pin this cheap to rebuild.
+    - name: Cache the pinned Zoekt binaries
+      id: zoekt-cache
+      uses: actions/cache@v6
+      with:
+        path: |
+          ${{ steps.pins.outputs.gobin }}/zoekt-git-index
+          ${{ steps.pins.outputs.gobin }}/zoekt-webserver
+        key: ${{ runner.os }}-zoekt-${{ steps.pins.outputs.go-version }}-${{ steps.pins.outputs.zoekt-version }}
+
+    - name: Install the pinned Zoekt binaries
+      id: zoekt
+      if: steps.zoekt-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        ZOEKT_VERSION: ${{ steps.pins.outputs.zoekt-version }}
+      run: |
+        go install "github.com/sourcegraph/zoekt/cmd/zoekt-git-index@$ZOEKT_VERSION"
+        go install "github.com/sourcegraph/zoekt/cmd/zoekt-webserver@$ZOEKT_VERSION"
+
+    - name: Cache codebase-memory-mcp
+      id: cbm-cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/cbm
+        key: ${{ runner.os }}-cbm-${{ steps.pins.outputs.cbm-version }}-${{ steps.pins.outputs.cbm-sha256 }}
+
+    - name: Install codebase-memory-mcp
+      id: cbm
+      if: steps.cbm-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CBM_VERSION: ${{ steps.pins.outputs.cbm-version }}
+        CBM_ARCHIVE: codebase-memory-mcp-linux-amd64-portable.tar.gz
+        CBM_SHA256: ${{ steps.pins.outputs.cbm-sha256 }}
       run: |
         # Downloaded and verified here rather than through the project's
         # install.sh: that script resolves `latest` and picks its own asset,
@@ -66,9 +111,20 @@ runs:
 
         mkdir -p "$RUNNER_TEMP/cbm"
         tar -xzf "$RUNNER_TEMP/$CBM_ARCHIVE" -C "$RUNNER_TEMP/cbm"
-        echo "$RUNNER_TEMP/cbm" >>"$GITHUB_PATH"
-        echo "version=$CBM_VERSION" >>"$GITHUB_OUTPUT"
 
+    # Unconditional: the cache above only skips downloading and re-verifying
+    # the archive, not putting it on PATH, and that has to happen whichever
+    # step actually produced $RUNNER_TEMP/cbm.
+    - name: Put codebase-memory-mcp on PATH
+      shell: bash
+      run: echo "$RUNNER_TEMP/cbm" >>"$GITHUB_PATH"
+
+    # Not cached, deliberately: this builds the Zoekt shard and the CBM graphs
+    # fresh every run. Reusing them across CI runs is a different, larger
+    # claim than caching a binary — this repository, this Go toolchain and
+    # this fixture-generation script producing the same index and graphs
+    # again is exactly what the tests below are there to prove, not something
+    # to assume a cache hit still holds.
     - name: Prepare the versioned demo fixture
       shell: bash
       run: |
