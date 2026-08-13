@@ -10,10 +10,22 @@
 name: Prepare the real engines
 description: Installs pinned Zoekt and codebase-memory-mcp, then builds the demo fixture, index and graphs.
 
+# The pins are reported back so a job can say which engines it was green
+# against without writing the versions down a second time — a copy in a
+# workflow is a copy that keeps naming the old version after a bump here.
+outputs:
+  zoekt-version:
+    description: The Zoekt pseudo-version these steps installed.
+    value: ${{ steps.zoekt.outputs.version }}
+  cbm-version:
+    description: The codebase-memory-mcp release tag these steps installed.
+    value: ${{ steps.cbm.outputs.version }}
+
 runs:
   using: composite
   steps:
     - name: Install the pinned Zoekt binaries
+      id: zoekt
       shell: bash
       env:
         # decision-3: the engines are pinned, never `latest`, so a green run
@@ -25,8 +37,10 @@ runs:
         echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
         go install "github.com/sourcegraph/zoekt/cmd/zoekt-git-index@$ZOEKT_VERSION"
         go install "github.com/sourcegraph/zoekt/cmd/zoekt-webserver@$ZOEKT_VERSION"
+        echo "version=$ZOEKT_VERSION" >>"$GITHUB_OUTPUT"
 
     - name: Install codebase-memory-mcp
+      id: cbm
       shell: bash
       env:
         # CBM ships release archives, so the pin is the tag plus the SHA-256
@@ -53,6 +67,7 @@ runs:
         mkdir -p "$RUNNER_TEMP/cbm"
         tar -xzf "$RUNNER_TEMP/$CBM_ARCHIVE" -C "$RUNNER_TEMP/cbm"
         echo "$RUNNER_TEMP/cbm" >>"$GITHUB_PATH"
+        echo "version=$CBM_VERSION" >>"$GITHUB_OUTPUT"
 
     - name: Prepare the versioned demo fixture
       shell: bash

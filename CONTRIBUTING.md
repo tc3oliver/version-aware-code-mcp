@@ -174,7 +174,7 @@ different clock:
 | --- | --- | --- |
 | Fast CI | `.github/workflows/ci-fast.yml` | every pull request, every push to `main`, on demand, and every release |
 | Real Engine Gate | `.github/workflows/engine-gate.yml` | the same four |
-| Full Stress Gate | `.github/workflows/full-gate.yml` | every release, and on demand from the Actions tab |
+| Full Stress Gate | `.github/workflows/full-gate.yml` | nightly at 21:17 UTC, every release, and on demand from the Actions tab |
 
 `.github/workflows/ci.yml` is what the first two are called from — it runs no
 step itself — and `.github/workflows/release.yml` calls `ci.yml` plus the full
@@ -212,9 +212,23 @@ when its database does rather than when the tree does:
 | --- | --- |
 | race test against the real engines | `go test -tags=integration -race -v ./...` |
 | `govulncheck` | `govulncheck ./...` |
+| run summary | parses the test log into the run's page |
 
-Every step is a hard gate: none carries `continue-on-error` or `if: always()`,
-so a job stops at the first failure, and `release` needs all three tiers.
+`./...` here has nothing filtered out of it, unlike the two tiers above, so this
+run is a superset of both: every test either of them compiles, plus the tagged
+ones, plus `integration/`'s release gates, all under `-race`. The nightly is
+what makes that worth having — the crash-injection and concurrency cases and
+`govulncheck` all answer questions that can change while the tree does not.
+
+The summary step is the one exception to the rule below: it writes the run's
+duration, its ten slowest tests, the engine versions it ran against and each
+release gate's result to the run's page. It carries `if: always()` because the
+failed run is the one worth reading, it reports rather than gates, and every
+command in it exits 0 so it cannot fail a run of its own accord.
+
+Every other step is a hard gate: none carries `continue-on-error` or
+`if: always()`, so a job stops at the first failure, and `release` needs all
+three tiers.
 
 The `-v` test steps also run `.github/assert-no-skips.sh` over their output. A
 test that skips is a test that verified nothing, and every skip there means a
@@ -250,9 +264,9 @@ A release is a tag. Pushing one that starts with `v` runs
 
 1. `verify` calls `ci.yml` and `full` calls `full-gate.yml` — the same
    workflows a pull request and the Actions tab run, not a second copy of them
-   that can drift. That is all three tiers, and a release is the only trigger
-   that waits for the third. One red step in any of them and the workflow
-   stops: no archives, no GitHub release.
+   that can drift. That is all three tiers; the nightly runs the third one too,
+   but a release is the only thing that waits on its answer. One red step in
+   any of them and the workflow stops: no archives, no GitHub release.
 2. `release` runs `.github/release-build.sh <tag> dist` and publishes what it
    produced, titled with the tag.
 
