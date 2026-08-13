@@ -22,10 +22,10 @@ package engine
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
-	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
@@ -38,9 +38,25 @@ const (
 	maxDepth = 5
 )
 
+// ContextSource is where an Engine gets its version scopes from. It is the
+// method set of [github.com/tc3oliver/version-aware-code-mcp/resolver.Resolver],
+// named here so the engine states what it needs rather than which type supplies
+// it.
+//
+// Contexts takes no [context.Context] and cannot fail because listing what is
+// configured reads no repository; Resolve can, because it checks the version it
+// names is really there.
+//
+// An implementation is not trusted to have validated what it returns: see
+// [Engine.resolve].
+type ContextSource interface {
+	Contexts() []vacctx.CodeContext
+	Resolve(ctx context.Context, id string) (vacctx.CodeContext, error)
+}
+
 // Engine answers the four queries of doc-1 §5 against one configuration.
 type Engine struct {
-	contexts *resolver.Resolver
+	contexts ContextSource
 	search   provider.SearchProvider
 	graph    provider.GraphProvider
 	source   provider.SourceProvider
@@ -48,8 +64,43 @@ type Engine struct {
 
 // New returns an Engine resolving context IDs with contexts and answering
 // through the three providers.
-func New(contexts *resolver.Resolver, search provider.SearchProvider, graph provider.GraphProvider, source provider.SourceProvider) *Engine {
+func New(contexts ContextSource, search provider.SearchProvider, graph provider.GraphProvider, source provider.SourceProvider) *Engine {
 	return &Engine{contexts: contexts, search: search, graph: graph, source: source}
+}
+
+// resolve returns the context id names, once it is complete enough to scope a
+// query with.
+//
+// The four fields are re-checked here, after the [ContextSource] has already
+// had its say, because [ContextSource] is an interface: whichever
+// implementation is installed, an incomplete scope must not reach a provider.
+// A context missing its revision is not a narrower question, it is a different
+// one — a provider handed an empty revision reads whatever the checkout happens
+// to be on, which is the cross-version answer this server exists to refuse. The
+// code is [vacerr.InvalidArgument] for the reason config's own equivalent check
+// uses it: a required field is absent. It is deliberately not
+// [vacerr.SourceMismatch], which reports two revisions that disagree and has no
+// second revision to name here.
+func (e *Engine) resolve(ctx context.Context, id string) (vacctx.CodeContext, error) {
+	codeCtx, err := e.contexts.Resolve(ctx, id)
+	if err != nil {
+		return vacctx.CodeContext{}, err
+	}
+	for _, field := range []struct{ name, value string }{
+		{"repository", codeCtx.Repository},
+		{"branch", codeCtx.Branch},
+		{"revision", codeCtx.Revision},
+		{"graph_ref", codeCtx.GraphRef},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return vacctx.CodeContext{}, vacerr.New(
+				vacerr.InvalidArgument,
+				fmt.Sprintf("context %q resolved without a %s, so there is no version to answer in", id, field.name),
+				map[string]any{"context": id, "field": field.name},
+			)
+		}
+	}
+	return codeCtx, nil
 }
 
 // answer is the half of a successful result that doc-1's Tool Contract fixes:
@@ -156,7 +207,7 @@ func (e *Engine) ListContexts(context.Context) []vacctx.CodeContext {
 // It reaches no graph provider, which is doc-1 §23's eighth success criterion
 // held in the code: search answers whether or not CBM is present.
 func (e *Engine) SearchCode(ctx context.Context, req SearchCodeRequest) (SearchCodeResult, error) {
-	codeCtx, err := e.contexts.Resolve(ctx, req.Context)
+	codeCtx, err := e.resolve(ctx, req.Context)
 	if err != nil {
 		return SearchCodeResult{}, err
 	}
@@ -194,7 +245,7 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 		)
 	}
 
-	codeCtx, err := e.contexts.Resolve(ctx, req.Context)
+	codeCtx, err := e.resolve(ctx, req.Context)
 	if err != nil {
 		return TraceCallsResult{}, err
 	}
@@ -229,15 +280,17 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 // context may declare a branch name or a short SHA; reporting the commit the
 // bytes came from is what lets a caller check the claim instead of trusting it.
 //
-// It holds no version check of its own: resolving an ID is the resolver's, and
-// the fail-closed [vacerr.SourceMismatch] check is
-// [resolver.VerifyWorktree], which the source provider reaches on the one path
-// where the object database cannot serve the declared revision's bytes. A
-// second implementation here would be a second thing to keep correct. What this
-// method guarantees is the other half of failing closed: an error from either
-// dependency is returned with no content beside it.
+// Beyond [Engine.resolve]'s completeness check it holds no version check of its
+// own: resolving an ID is the [ContextSource]'s, and the fail-closed
+// [vacerr.SourceMismatch] check is
+// [github.com/tc3oliver/version-aware-code-mcp/resolver.VerifyWorktree], which
+// the source provider reaches on the one path where the object database cannot
+// serve the declared revision's bytes. A second implementation here would be a
+// second thing to keep correct. What this method guarantees is the other half of
+// failing closed: an error from either dependency is returned with no content
+// beside it.
 func (e *Engine) GetCode(ctx context.Context, req GetCodeRequest) (GetCodeResult, error) {
-	codeCtx, err := e.contexts.Resolve(ctx, req.Context)
+	codeCtx, err := e.resolve(ctx, req.Context)
 	if err != nil {
 		return GetCodeResult{}, err
 	}
