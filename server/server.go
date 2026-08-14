@@ -53,19 +53,30 @@ func ServeStdio(ctx context.Context, srv *mcp.Server) error {
 // ServeHTTP serves srv over Streamable HTTP on addr, or on [DefaultAddress]
 // when addr is empty. It blocks until the listener fails.
 func ServeHTTP(srv *mcp.Server, addr string) error {
-	return http.ListenAndServe(listenAddress(addr), handler(srv))
+	return http.ListenAndServe(listenAddress(addr), Handler(srv))
 }
 
-// handler mounts srv on a Streamable HTTP handler in stateless mode.
+// Handler mounts srv on a Streamable HTTP handler in stateless mode. It is
+// exported so an embedder can serve vacmcp on a mux of its own, and so a test
+// can exercise the wiring [ServeHTTP] really runs rather than a copy of it.
 //
 // Stateless is not a tuning choice: MCP 2026-07-28 removed the protocol-level
 // session and the initialize handshake in favour of server/discover, and the
 // SDK only offers that version to clients on a stateless server. A stateful
 // handler would negotiate an older protocol version instead.
-func handler(srv *mcp.Server) http.Handler {
+//
+// PropagateRequestCancellation is what makes a client's cancellation reach the
+// engine. Stateless has no session for a notifications/cancelled to arrive on —
+// that notification is a second POST, and the SDK rejects it — so without this
+// the POST being abandoned would stop nothing: the client gives up while the
+// server runs the whole query against Zoekt, CBM and git to deliver an answer
+// down a connection that is gone. Over STDIO the notification does arrive and
+// does cancel, so this is also what keeps the two transports answering a
+// cancellation the same way.
+func Handler(srv *mcp.Server) http.Handler {
 	return mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
-		&mcp.StreamableHTTPOptions{Stateless: true},
+		&mcp.StreamableHTTPOptions{Stateless: true, PropagateRequestCancellation: true},
 	)
 }
 
