@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
@@ -130,8 +131,8 @@ func TestRepoAddClonesWithoutAWorkingTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Repository(demo): %v", err)
 	}
-	if r.URL != source || r.State != repoReady {
-		t.Errorf("record = %+v, want URL %q and state %s", r, source, repoReady)
+	if r.URL != source || r.State != managed.RepositoryReady {
+		t.Errorf("record = %+v, want URL %q and state %s", r, source, managed.RepositoryReady)
 	}
 	if !r.LastSyncAt.IsZero() {
 		t.Errorf("record.LastSyncAt = %v, want zero: adding is not syncing", r.LastSyncAt)
@@ -153,8 +154,8 @@ func TestRepoAddRecordsAFailedClone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Repository(demo): %v", err)
 	}
-	if r.State != repoFailed {
-		t.Errorf("record.State = %q, want %s", r.State, repoFailed)
+	if r.State != managed.RepositoryFailed {
+		t.Errorf("record.State = %q, want %s", r.State, managed.RepositoryFailed)
 	}
 }
 
@@ -255,8 +256,8 @@ func TestRepoSyncFetchesWithoutMovingAPinnedRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Repository(demo): %v", err)
 	}
-	if r.LastSyncAt.IsZero() || r.State != repoReady {
-		t.Errorf("record after sync = %+v, want state %s and a last sync time", r, repoReady)
+	if r.LastSyncAt.IsZero() || r.State != managed.RepositoryReady {
+		t.Errorf("record after sync = %+v, want state %s and a last sync time", r, managed.RepositoryReady)
 	}
 }
 
@@ -291,11 +292,11 @@ func TestRepoSyncAllReportsEveryFailure(t *testing.T) {
 	}
 
 	s := openStore(t, data)
-	if r, err := s.Repository("gone"); err != nil || r.State != repoFailed {
-		t.Errorf("gone = %+v (err %v), want state %s", r, err, repoFailed)
+	if r, err := s.Repository("gone"); err != nil || r.State != managed.RepositoryFailed {
+		t.Errorf("gone = %+v (err %v), want state %s", r, err, managed.RepositoryFailed)
 	}
-	if r, err := s.Repository("good"); err != nil || r.State != repoReady {
-		t.Errorf("good = %+v (err %v), want state %s", r, err, repoReady)
+	if r, err := s.Repository("good"); err != nil || r.State != managed.RepositoryReady {
+		t.Errorf("good = %+v (err %v), want state %s", r, err, managed.RepositoryReady)
 	}
 }
 
@@ -424,7 +425,7 @@ func TestRepoStatusReportsThePathAndTheDependingContexts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repo status: %v", err)
 	}
-	for _, want := range []string{"demo", source, repoReady, filepath.Join(data, "repos", "demo"), "never synced", "demo-v1"} {
+	for _, want := range []string{"demo", source, managed.RepositoryReady, filepath.Join(data, "repos", "demo"), "never synced", "demo-v1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("repo status printed\n%s\nwant it to report %q", out, want)
 		}

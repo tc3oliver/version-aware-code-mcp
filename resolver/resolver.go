@@ -25,7 +25,9 @@ package resolver
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
@@ -42,6 +44,27 @@ type Resolver struct {
 // New returns a Resolver serving the contexts of cfg.
 func New(cfg *config.Config) *Resolver {
 	return &Resolver{contexts: cfg.Contexts, repositories: cfg.Repositories}
+}
+
+// Contexts returns every configured context, sorted by ID so repeated calls
+// answer identically.
+//
+// It reports what is configured, not what currently resolves: unlike
+// [Resolver.Resolve] it reads no repository, because listing the versions a
+// caller may ask for is the answer to a different question than whether one of
+// them is serviceable right now.
+func (r *Resolver) Contexts() []vacctx.CodeContext {
+	// Not a nil slice: to a caller putting this on a wire, null and [] are
+	// different answers, and "there are none" is [].
+	listed := make([]vacctx.CodeContext, 0, len(r.contexts))
+	for _, id := range slices.Sorted(maps.Keys(r.contexts)) {
+		codeCtx := r.contexts[id]
+		// config.Load fills this in from the key; a hand-built Config may not
+		// have, so the key is the source of truth.
+		codeCtx.ID = id
+		listed = append(listed, codeCtx)
+	}
+	return listed
 }
 
 // Resolve returns the [vacctx.CodeContext] named by id, once its repository is

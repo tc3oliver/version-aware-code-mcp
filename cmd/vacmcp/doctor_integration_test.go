@@ -122,7 +122,7 @@ func TestDoctorReportsACBMWithNoResidentDaemon(t *testing.T) {
 // The fixture names the fixed port a long-running Zoekt would listen on, so a
 // test that brings its own server up — or that needs one genuinely unreachable
 // — has to rewrite that value rather than assume it.
-func fixtureConfig(t *testing.T, zoektURL string, cbmCommand ...string) string {
+func fixtureConfig(t *testing.T, zoektURL string, cbmCmd ...string) string {
 	t.Helper()
 	fixture := demorepo.Prepared(t)
 
@@ -137,8 +137,8 @@ func fixtureConfig(t *testing.T, zoektURL string, cbmCommand ...string) string {
 
 	body := string(data)
 	replacements := map[string]string{cfg.Providers.Zoekt.URL: zoektURL}
-	if len(cbmCommand) > 0 {
-		replacements[cfg.Providers.CBM.Command] = cbmCommand[0]
+	if len(cbmCmd) > 0 {
+		replacements[cfg.Providers.CBM.Command] = cbmCmd[0]
 	}
 	for old, new := range replacements {
 		replaced := strings.Replace(body, old, new, 1)

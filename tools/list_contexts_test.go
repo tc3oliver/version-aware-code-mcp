@@ -10,6 +10,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
+	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
@@ -133,11 +136,14 @@ func callListContexts(t *testing.T, contexts map[string]vacctx.CodeContext) stri
 // session serves a vacmcp server carrying the tool over stateless Streamable
 // HTTP and connects a client to it, so every assertion is made on what came
 // back over a real wire rather than on a Go value.
+//
+// The engine is built with no providers: list_contexts reaches none, and one
+// that tried would fail the test rather than answer from a stub.
 func session(t *testing.T, contexts map[string]vacctx.CodeContext) *mcp.ClientSession {
 	t.Helper()
 
 	srv := server.New(testVersion)
-	AddListContexts(srv, contexts)
+	AddListContexts(srv, engine.New(resolver.New(&config.Config{Contexts: contexts}), nil, nil, nil))
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },

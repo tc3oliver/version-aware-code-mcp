@@ -17,6 +17,7 @@ import (
 	cbmadapter "github.com/tc3oliver/version-aware-code-mcp/adapters/cbm"
 	zoektadapter "github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
@@ -305,11 +306,16 @@ func fixtureConfig(t *testing.T) *config.Config {
 // searchSession serves search_code over cfg on a real MCP server and connects a
 // client to it, so every assertion is made on what came back over a wire rather
 // than on a Go value.
+//
+// The engine is given the graph provider cfg names even though search never
+// reaches one, so doc-1 §23's eighth success criterion is tested on the wiring a
+// server really runs: TestSearchCodeWorksWhenTheGraphProviderIsUnavailable
+// points that provider at a binary that is not installed.
 func searchSession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
 
 	srv := server.New(testVersion)
-	AddSearchCode(srv, resolver.New(cfg), zoektadapter.New(cfg))
+	AddSearchCode(srv, engine.New(resolver.New(cfg), zoektadapter.New(cfg), cbmadapter.New(cfg), nil))
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },

@@ -42,7 +42,7 @@ func TestServeStdioDiscovery(t *testing.T) {
 }
 
 func TestServeHTTPDiscovery(t *testing.T) {
-	httpServer := httptest.NewServer(handler(New(testVersion)))
+	httpServer := httptest.NewServer(Handler(New(testVersion)))
 	t.Cleanup(httpServer.Close)
 
 	assertDiscoverable(t, connect(t, &mcp.StreamableClientTransport{Endpoint: httpServer.URL}))

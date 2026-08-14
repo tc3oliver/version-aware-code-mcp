@@ -17,6 +17,8 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/git"
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
@@ -105,18 +107,18 @@ func serve(args []string) error {
 	stdio := fs.Bool("stdio", false, "serve over STDIO instead of Streamable HTTP")
 	address := fs.String("address", server.DefaultAddress, "address to listen on in Streamable HTTP mode")
 	path := fs.String("config", "", "path to the vacmcp configuration file")
-	managed := fs.Bool("managed", false, "serve the READY contexts of a managed data directory")
+	managedMode := fs.Bool("managed", false, "serve the READY contexts of a managed data directory")
 	dataDir := fs.String("data-dir", "", "vacmcp data directory in managed mode (default ~/.vacmcp)")
 	zoektURL := fs.String("zoekt-url", defaultZoektURL, "Zoekt web server to search through in managed mode")
-	cbmCmd := fs.String("cbm-command", cbmCommand, "codebase-memory-mcp binary to trace through in managed mode")
+	cbmCmd := fs.String("cbm-command", managed.CBMCommand, "codebase-memory-mcp binary to trace through in managed mode")
 	_ = fs.Parse(args)
 
-	if *managed && *path != "" {
+	if *managedMode && *path != "" {
 		return errors.New("serve: give either --config or --managed, not both")
 	}
 
 	cfg := &config.Config{}
-	if *managed {
+	if *managedMode {
 		s, err := store.Open(*dataDir)
 		if err != nil {
 			return err
@@ -131,7 +133,7 @@ func serve(args []string) error {
 		// running without it is one the management plane cannot see, which is
 		// the state decision-6 exists to rule out — starting anyway would be
 		// serving with the guarantee quietly switched off.
-		release, err := holdServerLock(s)
+		release, err := managed.HoldServerLock(*dataDir)
 		if err != nil {
 			return err
 		}
@@ -161,7 +163,18 @@ func serve(args []string) error {
 	listen := listenAddress(*address, explicit, cfg)
 
 	srv := server.New(version)
-	addTools(srv, cfg)
+	eng := addTools(srv, cfg)
+	// Deferred, not called after ServeStdio/ServeHTTP return normally: both
+	// only return once the server has stopped, so this is the graceful
+	// shutdown path either way, including the CBM session addTools started
+	// that nothing else was closing. A failure here is reported to stderr
+	// rather than returned: the server already answered its whole run, and
+	// STDIO mode's stdout carries the protocol stream, not this.
+	defer func() {
+		if err := eng.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "vacmcp: %v\n", err)
+		}
+	}()
 
 	// Nothing may write to stdout in STDIO mode: it carries the protocol
 	// stream. Errors go to stderr, and only after the server has stopped.
@@ -193,12 +206,19 @@ func listenAddress(flagValue string, explicit bool, cfg *config.Config) string {
 //
 // doctor registers them too, on a server of its own, which is how it can report
 // on the MCP layer without going near a port.
-func addTools(srv *mcp.Server, cfg *config.Config) {
+//
+// The four tools share one engine, and the engine is what they are: the tools
+// decode a call and encode a result, everything about which version answers it
+// is the engine's. It is returned so a caller that owns the server's lifetime
+// can shut it down.
+func addTools(srv *mcp.Server, cfg *config.Config) *engine.Engine {
 	contexts := resolver.New(cfg)
-	tools.AddListContexts(srv, cfg.Contexts)
-	tools.AddSearchCode(srv, contexts, zoekt.New(cfg))
-	tools.AddTraceCalls(srv, contexts, cbm.New(cfg))
-	tools.AddGetCode(srv, contexts, git.New(cfg))
+	eng := engine.New(contexts, zoekt.New(cfg), cbm.New(cfg), git.New(cfg))
+	tools.AddListContexts(srv, eng)
+	tools.AddSearchCode(srv, eng)
+	tools.AddTraceCalls(srv, eng)
+	tools.AddGetCode(srv, eng)
+	return eng
 }
 
 // validate reports whether a configuration file loads and passes validation.

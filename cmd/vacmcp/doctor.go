@@ -19,6 +19,7 @@ import (
 
 	"github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
@@ -98,15 +99,15 @@ func (c check) String() string {
 func doctor(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("vacmcp doctor", flag.ExitOnError)
 	path := fs.String("config", "", "path to the vacmcp configuration file")
-	managed := fs.Bool("managed", false, "diagnose a managed data directory instead of a configuration file")
+	managedMode := fs.Bool("managed", false, "diagnose a managed data directory instead of a configuration file")
 	dataDir := fs.String("data-dir", "", "vacmcp data directory in managed mode (default ~/.vacmcp)")
 	zoektURL := fs.String("zoekt-url", defaultZoektURL, "Zoekt web server to check in managed mode")
-	cbmCmd := fs.String("cbm-command", cbmCommand, "codebase-memory-mcp binary to check in managed mode")
+	cbmCmd := fs.String("cbm-command", managed.CBMCommand, "codebase-memory-mcp binary to check in managed mode")
 	_ = fs.Parse(args)
 	switch {
-	case *managed && *path != "":
+	case *managedMode && *path != "":
 		return errors.New("doctor: give either --config or --managed, not both")
-	case !*managed && *path == "":
+	case !*managedMode && *path == "":
 		return errors.New("doctor: --config is required")
 	}
 
@@ -119,7 +120,7 @@ func doctor(args []string, out io.Writer) error {
 	var s *store.Store
 	var cfg *config.Config
 	var cfgErr error
-	if *managed {
+	if *managedMode {
 		if s, cfgErr = store.Open(*dataDir); cfgErr == nil {
 			source = filepath.Join(s.RuntimeDir(), generatedConfig)
 			cfg, cfgErr = managedConfig(s, *zoektURL, *cbmCmd)
@@ -146,13 +147,13 @@ func doctor(args []string, out io.Writer) error {
 		for _, name := range []string{zoektCheck, cbmCheck, gitCheck} {
 			checks = append(checks, check{name, statusSkip, because})
 		}
-		if *managed {
+		if *managedMode {
 			repositories = []check{{"-", statusSkip, because}}
 		}
 		contexts = append(contexts, check{"-", statusSkip, because})
 	} else {
 		checks = append(checks, checkZoekt(ctx, cfg), checkCBM(ctx, cfg), checkGit(ctx, cfg))
-		if *managed {
+		if *managedMode {
 			repositories, contexts = checkRepositories(s), checkManagedContexts(ctx, s, cfg)
 		} else {
 			contexts = checkContexts(ctx, cfg)
@@ -163,7 +164,7 @@ func doctor(args []string, out io.Writer) error {
 	for _, c := range checks {
 		lines = append(lines, c.String())
 	}
-	if *managed {
+	if *managedMode {
 		lines = append(lines, "", "Repositories")
 		for _, c := range repositories {
 			lines = append(lines, c.String())
@@ -201,10 +202,10 @@ func checkRepositories(s *store.Store) []check {
 	rows := make([]check, 0, len(records))
 	for _, r := range records {
 		status := statusOK
-		if r.State != repoReady {
+		if r.State != managed.RepositoryReady {
 			status = statusFail
 		}
-		rows = append(rows, check{r.Name, status, fmt.Sprintf("%s, %s", r.State, lastSync(r))})
+		rows = append(rows, check{r.Name, status, fmt.Sprintf("%s, %s", r.State, lastSync(r.LastSyncAt))})
 	}
 	return rows
 }
@@ -227,9 +228,9 @@ func checkManagedContexts(ctx context.Context, s *store.Store, cfg *config.Confi
 	contexts := resolver.New(cfg)
 	rows := make([]check, 0, len(records))
 	for _, record := range records {
-		if record.State != contextReady {
+		if record.State != managed.ContextReady {
 			status := statusSkip
-			if record.State == contextFailed {
+			if record.State == managed.ContextFailed {
 				status = statusFail
 			}
 			rows = append(rows, check{record.ID, status, fmt.Sprintf("%s %s", record.State, record.Revision)})
@@ -257,7 +258,13 @@ func checkSDK(ctx context.Context, cfg *config.Config) check {
 	defer cancel()
 
 	srv := server.New(version)
-	addTools(srv, cfg)
+	eng := addTools(srv, cfg)
+	// The ownership serve takes, taken here too: whoever asks addTools for an
+	// engine closes it. Nothing this check does reaches a provider, so today it
+	// closes a CBM session that was never started. The error is dropped rather
+	// than reported, unlike serve's: this row is the MCP layer's verdict, and a
+	// shutdown is not part of it.
+	defer func() { _ = eng.Close() }()
 
 	clientSide, serverSide := mcp.NewInMemoryTransports()
 	serverSession, err := srv.Connect(ctx, serverSide, nil)

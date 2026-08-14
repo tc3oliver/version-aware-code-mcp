@@ -15,6 +15,7 @@ import (
 
 	cbmadapter "github.com/tc3oliver/version-aware-code-mcp/adapters/cbm"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/engine"
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
@@ -313,7 +314,9 @@ func traceCallsSession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
 
 	srv := server.New(testVersion)
-	AddTraceCalls(srv, resolver.New(cfg), cbmadapter.New(cfg))
+	// No search or source provider: trace_calls reaches neither, and one that
+	// tried would fail the test rather than answer from a stub.
+	AddTraceCalls(srv, engine.New(resolver.New(cfg), nil, cbmadapter.New(cfg), nil))
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
