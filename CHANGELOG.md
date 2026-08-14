@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-15
+
+Supersedes v0.3.0, which shipped no binaries: tagging it surfaced 5 reachable
+Go standard-library CVEs (GO-2026-6218, GO-2026-6090, GO-2026-6089,
+GO-2026-5972, GO-2026-5026, two of them TLS/HTTP-handshake related) that
+`full-gate.yml`'s `govulncheck` step — a hard release gate — correctly refused
+to let through. All five are fixed upstream in `go1.26.6`, released the day
+before this tag. No application code changed from v0.3.0.
+
+### Fixed
+
+- `go.mod`'s `go` directive moves to `1.26.6`, so every CI/release workflow
+  (all resolving their toolchain from it) and a plain `go build` of this module
+  get the patched standard library, with nothing to hardcode a second version
+  in and drift from. `docker/Dockerfile`'s three `golang:1.26.5-trixie` base
+  images move to `1.26.6-trixie` for the same reason, on the compose stack and
+  a hand build alike. `govulncheck ./...` reports 0 reachable vulnerabilities.
+
 ## [0.3.0] - 2026-08-15
+
+No binaries were published for this tag — see 0.3.1 above. It remains tagged,
+rather than moved or replaced, because a module proxy or checksum database may
+already have observed it.
 
 Embeddable core: the query plane and the management plane are Go packages that
 can be called directly, and the MCP server is one caller of them rather than the
