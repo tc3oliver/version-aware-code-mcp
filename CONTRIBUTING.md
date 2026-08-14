@@ -48,7 +48,9 @@ not been built.
 ```text
 cmd/vacmcp/     binary entry point: serve, validate, contexts, doctor, version
 server/         MCP server construction and the STDIO and HTTP transports
-tools/          the four MCP tool handlers
+tools/          the four MCP tool handlers, a thin adapter over engine
+engine/         the four queries as a Go package, with no MCP in them
+managed/        the repository and context lifecycle the CLI commands drive
 provider/       SearchProvider / GraphProvider / SourceProvider interfaces
 adapters/       the v0.1.0 implementations: zoekt, cbm, git
 resolver/       context id to CodeContext, and the fail-closed worktree check
@@ -71,9 +73,13 @@ Dependencies point one way, and the direction is what keeps version isolation
 enforceable in one place:
 
 ```text
-cmd/vacmcp  ── wires the adapters to the tools; the only place that knows both
+cmd/vacmcp  ── wires the adapters into the engine and the engine to the tools;
+                the only place that knows both
     │
-tools/      ── resolves a context, calls a provider, returns evidence.Output
+tools/      ── MCP arguments in, JSON out; no resolution, no provider call and
+                no version check of its own
+    │
+engine/     ── resolves a context, calls a provider, returns evidence.Output
     │
     ├── resolver/  the only thing that turns an id into a version scope
     ├── provider/  the three interfaces, in provider/provider.go
@@ -83,9 +89,9 @@ adapters/   ── implement provider's interfaces; cmd/vacmcp is the only
                 non-test package that imports them
 ```
 
-A tool that imported `adapters/zoekt` would break that. The tools are written
-against `provider.SearchProvider`, `provider.GraphProvider` and
-`provider.SourceProvider`, so a different engine is a new package under
+An engine or a tool that imported `adapters/zoekt` would break that. `engine/`
+is written against `provider.SearchProvider`, `provider.GraphProvider` and
+`provider.SourceProvider`, so a different backend is a new package under
 `adapters/` plus one line in `cmd/vacmcp`, and no change anywhere else. Tests
 are the exception and import adapters freely — several of the tool tests run
 against a real engine, which is the point of them.

@@ -526,9 +526,12 @@ result.Matches()   // the payload
 ```
 
 `engine.New(contexts, search, graph, source)` starts nothing, so it cannot fail.
-Any of the three providers may be nil: the query needing an absent one fails
-with a provider-unavailable error and the others are unaffected, so an engine
-built with a search provider and no graph still searches.
+Any of the three providers may be nil: the query needing an absent one fails and
+the others are unaffected, so an engine built with a search provider and no
+graph still searches. `SearchCode` and `TraceCalls` name what is missing —
+`SEARCH_PROVIDER_UNAVAILABLE` and `GRAPH_PROVIDER_UNAVAILABLE`. `GetCode` with
+no source provider fails with `REPOSITORY_NOT_FOUND` instead: the code set has
+no source equivalent, and adding one would change the public tool API.
 
 A request names its scope with a context id and nothing else — no request type
 has a repository, branch or revision field — and every successful result carries
@@ -570,10 +573,13 @@ Anything under `internal/` is not part of this and may change in any release.
 
 Four interfaces are the whole extension surface. Implement them and the engine
 answers out of your backend — an SCIP index, another graph service, something
-in-house — with no fork of anything here. Every method takes the version scope
-(`vacctx.CodeContext`) as well as a cancellation `context.Context`: an
-implementation that ignores the first answers from the wrong version, which is
-the one thing this project is for.
+in-house — with no fork of anything here. `SearchProvider`, `GraphProvider` and
+`SourceProvider` are each handed the version scope (`vacctx.CodeContext`)
+alongside a cancellation `context.Context`: an implementation that ignores the
+scope answers from the wrong version, which is the one thing this project is
+for. `ContextSource` is where those scopes come from rather than something
+handed one — `Contexts()` lists the versions that exist and takes no arguments,
+and `Resolve(ctx, id)` turns an id into the one it names.
 
 | Interface | Package | Responsible for |
 | --- | --- | --- |
@@ -604,6 +610,13 @@ declares is a `vacerr` `SOURCE_MISMATCH` and never a warning or a best effort.
 And a `ContextSource` refuses an id it does not hold with `CONTEXT_NOT_FOUND` —
 the engine re-checks that a resolved context has all four of its fields, but it
 cannot check that the version you returned is the version that was asked for.
+
+Validating what a caller sent is yours as well. Those four fields of the
+resolved context are the whole of what the engine checks: the `path` handed to
+`SourceProvider.Read` and the query handed to `SearchProvider.Search` reach you
+exactly as the caller wrote them. A provider serving files from a checkout is
+therefore the one that has to refuse a path traversing out of it, and a provider
+building a backend query out of one is the one that has to make it safe.
 
 `engine/extension_test.go`'s
 `TestEngineRunsOnImplementationsOfNothingButItsInterfaces` is a tested
@@ -652,7 +665,7 @@ instead of running this server and talking MCP to it. Ahead of those:
 | --- | --- |
 | v0.1.0 | version-aware query plane: the four tools, context isolation, evidence — done |
 | v0.2.0 | managed repository and context lifecycle: `repo` and `context` commands, automatic Zoekt and graph provisioning, readiness verification — done |
-| v0.3.0 | embeddable core / extension API: a stable Go API to embed this core in your own gateway — this release |
+| v0.3.0 | embeddable core / extension API: a supported, documented Go API to embed this core in your own gateway, not yet under a compatibility guarantee — this release |
 | v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff |
 | v0.5.0 | multi-repo contexts, cross-repo search and graph |
 | v0.6.0 | operations: metrics, OpenTelemetry, garbage collection, scheduled sync primitives |
