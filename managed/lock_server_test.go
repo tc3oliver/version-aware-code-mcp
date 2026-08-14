@@ -3,10 +3,14 @@
 package managed
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
 // The server lock's own behaviour: a running server shuts every
@@ -39,6 +43,41 @@ func TestManagementCommandsDoNotExcludeEachOther(t *testing.T) {
 		t.Fatalf("a second management command was refused while a first held the lock: %v", err)
 	}
 	second()
+}
+
+// TestSyncIsRefusedWhileAManagedServerRuns is the operation decision-6's own
+// list left out. A fetch rewrites the refs of the clone a running server reads
+// its source out of, so it fails closed like every other command that changes
+// what a server is serving.
+//
+// The repository named here is not managed at all: the refusal has to come
+// before any record is read, so a RepositoryNotFound here would mean Sync got
+// as far as looking one up before asking about the server.
+func TestSyncIsRefusedWhileAManagedServerRuns(t *testing.T) {
+	data := t.TempDir()
+	release, err := HoldServerLock(data)
+	if err != nil {
+		t.Fatalf("HoldServerLock: %v", err)
+	}
+	defer release()
+
+	m, err := NewRepositoryManager(data)
+	if err != nil {
+		t.Fatalf("NewRepositoryManager: %v", err)
+	}
+	for _, names := range [][]string{{"demo"}, nil} {
+		_, err := m.Sync(context.Background(), names)
+		if code := codeFor(t, err); code != vacerr.InvalidArgument {
+			t.Fatalf("Sync(%v) while a server runs returned %s, want %s", names, code, vacerr.InvalidArgument)
+		}
+		// The message is what an operator gets: the command that was refused,
+		// the server that refused it and the way out of it.
+		for _, want := range []string{"repo sync", "managed server is running", "serve --managed", "start the server again"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Sync(%v) failed with %q, want it to mention %q", names, err, want)
+			}
+		}
+	}
 }
 
 // TestTheServerLockIsFreeOnceTheServerHasStopped is the other half of AC #2:
