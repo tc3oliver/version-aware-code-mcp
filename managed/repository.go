@@ -42,23 +42,32 @@ func (m *RepositoryManager) Add(ctx context.Context, name, url string) (Reposito
 	if err != nil {
 		return RepositoryStatus{}, err
 	}
-	if _, err := m.store.Repository(name); err == nil {
-		return RepositoryStatus{}, vacerr.New(
-			vacerr.InvalidArgument,
-			fmt.Sprintf("repo add: repository %q is already managed in %s; remove it first to re-add it", name, m.store.Root()),
-			map[string]any{"repository": name},
-		)
-	}
 
-	record := store.Repository{Name: name, URL: url, State: RepositoryReady}
-	if cloneErr := runGit(ctx, "clone", "--no-checkout", "--quiet", "--end-of-options", url, path); cloneErr != nil {
-		record.State = RepositoryFailed
-		if err := m.store.PutRepository(record); err != nil {
-			return RepositoryStatus{}, err
+	var record store.Repository
+	// The refusal above and the clone it permits are one operation on this
+	// repository, so they run under its lock: two adds of one name that both
+	// read no record would both clone into this directory, and the one that lost
+	// would record FAILED over a clone that is perfectly good.
+	err = withRepositoryLock(m.store, name, func() error {
+		if _, err := m.store.Repository(name); err == nil {
+			return vacerr.New(
+				vacerr.InvalidArgument,
+				fmt.Sprintf("repo add: repository %q is already managed in %s; remove it first to re-add it", name, m.store.Root()),
+				map[string]any{"repository": name},
+			)
 		}
-		return RepositoryStatus{}, fmt.Errorf("repo add: %s: %w", name, cloneErr)
-	}
-	if err := m.store.PutRepository(record); err != nil {
+
+		record = store.Repository{Name: name, URL: url, State: RepositoryReady}
+		if cloneErr := runGit(ctx, "clone", "--no-checkout", "--quiet", "--end-of-options", url, path); cloneErr != nil {
+			record.State = RepositoryFailed
+			if err := m.store.PutRepository(record); err != nil {
+				return err
+			}
+			return fmt.Errorf("repo add: %s: %w", name, cloneErr)
+		}
+		return m.store.PutRepository(record)
+	})
+	if err != nil {
 		return RepositoryStatus{}, err
 	}
 	return RepositoryStatus{Repository: repositoryOf(record), Path: path}, nil
@@ -109,10 +118,24 @@ func (m *RepositoryManager) Status(name string) (RepositoryStatus, error) {
 // A fetch that fails does not stop the ones after it, and all of them are
 // reported together, for the same reason doctor runs every check: a run that
 // stopped at the first unreachable remote would hide whether the rest are fine.
+//
+// It is refused while a managed server is serving the data directory. What a
+// context serves is read out of its repository's object database for as long as
+// the server runs, and a fetch rewrites the refs of exactly that clone, so this
+// is not something to run underneath one.
 func (m *RepositoryManager) Sync(ctx context.Context, names []string) ([]Repository, error) {
+	// Asked before a single record is read, so a refused sync is a sync that
+	// looked at nothing, and held for the whole run rather than merely asked
+	// about: a server starting between the check and a fetch would read its
+	// snapshot out of a clone this is about to rewrite.
+	release, err := holdManagementLock(m.store, "repo sync")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	var records []store.Repository
 	if len(names) == 0 {
-		var err error
 		if records, err = m.store.Repositories(); err != nil {
 			return nil, err
 		}

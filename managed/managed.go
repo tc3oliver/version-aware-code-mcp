@@ -18,8 +18,17 @@
 //   - A context is READY only with every artifact built and checked, and
 //     verification asks the artifacts rather than the record. Anything that
 //     disagrees fails closed.
-//   - One operation per repository at a time, and none at all while a managed
-//     server is serving the data directory.
+//   - One operation per repository at a time. Every method here that changes a
+//     repository, a context or an artifact of one runs alone under that
+//     repository's lock, against the other methods and against another process
+//     running them.
+//   - Nothing that changes what a managed server is already serving runs while
+//     one serves the data directory. [ContextManager.Create],
+//     [ContextManager.Retry], [ContextManager.Remove],
+//     [RepositoryManager.Sync] and [RepositoryManager.Remove] are refused for
+//     as long as it runs. [RepositoryManager.Add] is not among them, and that
+//     is the whole of the exception: a repository added while a server runs has
+//     no contexts, so nothing in the snapshot a server is serving can name it.
 //
 // What is deliberately not on this surface is how any of that is stored. The
 // on-disk layout, the file format of a record, the lock files and the way they
@@ -30,6 +39,14 @@
 // paths and identifiers `repo status` and `context status` report to an
 // operator, as opaque strings that say where something is rather than how it is
 // named or arranged.
+//
+// What holds those last two rules between processes is a file lock, and there
+// is no file lock outside unix. Taking one there is a no-op, so on such a
+// platform the first of them holds only between the goroutines of one program
+// and the second does not hold at all: nothing there can find out that a server
+// is running. A caller embedding this package on one is therefore the only
+// thing that may touch its data directory. `vacmcp repo` and `vacmcp context`
+// say so when they are run there, and an embedder is told nowhere but here.
 package managed
 
 import (
@@ -156,10 +173,14 @@ func NewContextManager(dir string) (*ContextManager, error) {
 // HoldServerLock says a server is serving the contexts of the data directory
 // dir, and returns the release that ends the claim.
 //
-// While it is held, every method here that would change a repository, a context
-// or an artifact of one is refused, because a server reads the contexts it
-// serves once and serves that snapshot for its whole run: taking one apart
-// underneath it would be serving a version that is no longer there. It waits
+// While it is held, every method here that would change what such a server is
+// serving is refused: [ContextManager.Create], [ContextManager.Retry],
+// [ContextManager.Remove], [RepositoryManager.Sync] and
+// [RepositoryManager.Remove]. A server reads the contexts it serves once and
+// serves that snapshot for its whole run, so taking one apart underneath it —
+// or rewriting the clone its source is read out of — would be serving a version
+// that is no longer there. [RepositoryManager.Add] is not refused: it can only
+// add a repository no context of that snapshot names. It waits
 // for the management commands already running rather than refusing to start
 // behind them, and a process that dies instead of releasing has the kernel drop
 // the claim with it.
