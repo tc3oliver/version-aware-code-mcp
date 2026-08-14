@@ -258,7 +258,13 @@ func checkSDK(ctx context.Context, cfg *config.Config) check {
 	defer cancel()
 
 	srv := server.New(version)
-	addTools(srv, cfg)
+	eng := addTools(srv, cfg)
+	// The ownership serve takes, taken here too: whoever asks addTools for an
+	// engine closes it. Nothing this check does reaches a provider, so today it
+	// closes a CBM session that was never started. The error is dropped rather
+	// than reported, unlike serve's: this row is the MCP layer's verdict, and a
+	// shutdown is not part of it.
+	defer func() { _ = eng.Close() }()
 
 	clientSide, serverSide := mcp.NewInMemoryTransports()
 	serverSession, err := srv.Connect(ctx, serverSide, nil)
