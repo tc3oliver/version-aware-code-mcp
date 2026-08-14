@@ -24,11 +24,14 @@
 //     running them.
 //   - Nothing that changes what a managed server is already serving runs while
 //     one serves the data directory. [ContextManager.Create],
-//     [ContextManager.Retry], [ContextManager.Remove],
-//     [RepositoryManager.Sync] and [RepositoryManager.Remove] are refused for
-//     as long as it runs. [RepositoryManager.Add] is not among them, and that
-//     is the whole of the exception: a repository added while a server runs has
-//     no contexts, so nothing in the snapshot a server is serving can name it.
+//     [ContextManager.Retry], [ContextManager.Remove] and
+//     [RepositoryManager.Remove] are refused for as long as it runs.
+//     [RepositoryManager.Add] and [RepositoryManager.Sync] are not among them:
+//     a repository added while a server runs has no contexts, so nothing in the
+//     snapshot a server is serving can name it, and a sync only fetches remote
+//     refs into a clone and writes its own repository record — no context
+//     record, worktree, search ref or graph is touched, so there is nothing in
+//     a running server's snapshot for it to invalidate (decision-6).
 //
 // What is deliberately not on this surface is how any of that is stored. The
 // on-disk layout, the file format of a record, the lock files and the way they
@@ -175,12 +178,14 @@ func NewContextManager(dir string) (*ContextManager, error) {
 //
 // While it is held, every method here that would change what such a server is
 // serving is refused: [ContextManager.Create], [ContextManager.Retry],
-// [ContextManager.Remove], [RepositoryManager.Sync] and
-// [RepositoryManager.Remove]. A server reads the contexts it serves once and
-// serves that snapshot for its whole run, so taking one apart underneath it —
-// or rewriting the clone its source is read out of — would be serving a version
-// that is no longer there. [RepositoryManager.Add] is not refused: it can only
-// add a repository no context of that snapshot names. It waits
+// [ContextManager.Remove] and [RepositoryManager.Remove]. A server reads the
+// contexts it serves once and serves that snapshot for its whole run, so
+// taking one apart underneath it would be serving a version that is no longer
+// there. [RepositoryManager.Add] is not refused: it can only add a repository
+// no context of that snapshot names. [RepositoryManager.Sync] is not refused
+// either: it only fetches remote refs into a clone and writes its own
+// repository record, so it changes nothing a running snapshot reads (decision-6,
+// validated in TASK-40's TestRepoSyncRunsBesideARunningManagedServer). It waits
 // for the management commands already running rather than refusing to start
 // behind them, and a process that dies instead of releasing has the kernel drop
 // the claim with it.

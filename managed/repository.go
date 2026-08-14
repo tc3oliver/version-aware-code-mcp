@@ -119,23 +119,16 @@ func (m *RepositoryManager) Status(name string) (RepositoryStatus, error) {
 // reported together, for the same reason doctor runs every check: a run that
 // stopped at the first unreachable remote would hide whether the rest are fine.
 //
-// It is refused while a managed server is serving the data directory. What a
-// context serves is read out of its repository's object database for as long as
-// the server runs, and a fetch rewrites the refs of exactly that clone, so this
-// is not something to run underneath one.
+// Not refused while a managed server is serving the data directory, unlike the
+// other mutations here: it fetches remote refs into the clone and writes its
+// own repository record, and touches no context record, no worktree, no search
+// ref and no graph, so a running server's snapshot has nothing in it for a
+// fetch to invalidate (decision-6, validated in TASK-40's
+// TestRepoSyncRunsBesideARunningManagedServer).
 func (m *RepositoryManager) Sync(ctx context.Context, names []string) ([]Repository, error) {
-	// Asked before a single record is read, so a refused sync is a sync that
-	// looked at nothing, and held for the whole run rather than merely asked
-	// about: a server starting between the check and a fetch would read its
-	// snapshot out of a clone this is about to rewrite.
-	release, err := holdManagementLock(m.store, "repo sync")
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
 	var records []store.Repository
 	if len(names) == 0 {
+		var err error
 		if records, err = m.store.Repositories(); err != nil {
 			return nil, err
 		}
