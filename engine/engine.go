@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
@@ -49,8 +50,8 @@ const (
 // configured reads no repository; Resolve can, because it checks the version it
 // names is really there.
 //
-// An implementation is not trusted to have validated what it returns: see
-// [Engine.resolve].
+// An implementation is not trusted to have validated what it returns, nor to
+// have ordered it: see [Engine.resolve] and [Engine.ListContexts].
 type ContextSource interface {
 	Contexts() []vacctx.CodeContext
 	Resolve(ctx context.Context, id string) (vacctx.CodeContext, error)
@@ -67,11 +68,22 @@ type Engine struct {
 // New returns an Engine resolving context IDs with contexts and answering
 // through the three providers.
 //
-// Any of the three may be nil, for a caller that has only some of them: the
-// query needing the absent one then fails with a provider-unavailable error
-// and the other queries are unaffected, which is doc-1 §23's eighth success
-// criterion — search answers whether or not CBM is present — held for every
-// provider rather than only that pair.
+// contexts is required and is the one dependency with no degraded mode: every
+// query starts by resolving its context ID, so an Engine built with a nil
+// [ContextSource] panics on [Engine.SearchCode], [Engine.TraceCalls],
+// [Engine.GetCode] and [Engine.ListContexts] alike. It is a precondition rather
+// than a checked argument because there is no version-scoped answer to give
+// without it, and failing at the first query rather than at construction would
+// only move the same programming error further from its cause.
+//
+// Any of the three providers may be nil, for a caller that has only some of
+// them: the query needing the absent one then fails with a *[vacerr.Error]
+// naming what is missing, and the other queries are unaffected, which is doc-1
+// §23's eighth success criterion — search answers whether or not CBM is
+// present — held for every provider rather than only that pair. The code is
+// [vacerr.SearchProviderUnavailable], [vacerr.GraphProviderUnavailable] and,
+// for want of a source equivalent, [vacerr.RepositoryNotFound]: see
+// [Engine.GetCode].
 //
 // New starts nothing, so it cannot fail and has nothing to roll back. That
 // leaves partial-startup cleanup with the caller, which is the only party that
@@ -114,36 +126,53 @@ func (e *Engine) Close() error {
 	return errors.Join(errs...)
 }
 
+// require refuses a resolved context whose named field is blank.
+//
+// The code is [vacerr.InvalidArgument] for the reason config's own equivalent
+// check uses it: a required field is absent. It is deliberately not
+// [vacerr.SourceMismatch], which reports two revisions that disagree and has no
+// second revision to name here.
+func require(id, name, value string) error {
+	if strings.TrimSpace(value) != "" {
+		return nil
+	}
+	return vacerr.New(
+		vacerr.InvalidArgument,
+		fmt.Sprintf("context %q resolved without a %s, so there is no version to answer in", id, name),
+		map[string]any{"context": id, "field": name},
+	)
+}
+
 // resolve returns the context id names, once it is complete enough to scope a
 // query with.
 //
-// The four fields are re-checked here, after the [ContextSource] has already
-// had its say, because [ContextSource] is an interface: whichever
-// implementation is installed, an incomplete scope must not reach a provider.
-// A context missing its revision is not a narrower question, it is a different
-// one — a provider handed an empty revision reads whatever the checkout happens
-// to be on, which is the cross-version answer this server exists to refuse. The
-// code is [vacerr.InvalidArgument] for the reason config's own equivalent check
-// uses it: a required field is absent. It is deliberately not
-// [vacerr.SourceMismatch], which reports two revisions that disagree and has no
-// second revision to name here.
+// The fields are re-checked here, after the [ContextSource] has already had its
+// say, because [ContextSource] is an interface: whichever implementation is
+// installed, an incomplete scope must not reach a provider. A context missing
+// its revision is not a narrower question, it is a different one — a provider
+// handed an empty revision reads whatever the checkout happens to be on, which
+// is the cross-version answer this server exists to refuse. The ID is checked
+// with them because it is what every result and every citation is scoped by:
+// without it [evidence.New] refuses the answer downstream, with an error that
+// is not a *[vacerr.Error] and names no context.
+//
+// GraphRef is not checked here, because only [Engine.TraceCalls] reads a graph:
+// requiring it of all three would leave a caller with no graph backend at all
+// unable to search, which is the independent failure of the providers given up
+// at the [ContextSource]. It is checked where it is used.
 func (e *Engine) resolve(ctx context.Context, id string) (vacctx.CodeContext, error) {
 	codeCtx, err := e.contexts.Resolve(ctx, id)
 	if err != nil {
 		return vacctx.CodeContext{}, err
 	}
 	for _, field := range []struct{ name, value string }{
+		{"id", codeCtx.ID},
 		{"repository", codeCtx.Repository},
 		{"branch", codeCtx.Branch},
 		{"revision", codeCtx.Revision},
-		{"graph_ref", codeCtx.GraphRef},
 	} {
-		if strings.TrimSpace(field.value) == "" {
-			return vacctx.CodeContext{}, vacerr.New(
-				vacerr.InvalidArgument,
-				fmt.Sprintf("context %q resolved without a %s, so there is no version to answer in", id, field.name),
-				map[string]any{"context": id, "field": field.name},
-			)
+		if err := require(id, field.name, field.value); err != nil {
+			return vacctx.CodeContext{}, err
 		}
 	}
 	return codeCtx, nil
@@ -169,8 +198,13 @@ type answer struct {
 func (a answer) Context() vacctx.CodeContext { return a.codeCtx }
 
 // Evidence reports where the answer can be checked. On a successful result it
-// is non-nil and empty only when there was nothing to cite; nil is the zero
-// value, which is to say a result that no method returned.
+// is non-nil, and empty only when there was nothing to cite.
+//
+// nil is the zero value, and so is what every failed call reports: the error
+// paths of [Engine.SearchCode], [Engine.TraceCalls] and [Engine.GetCode] all
+// return the zero result beside the error. nil therefore means "this is not an
+// answer" — a result nobody built, or one that was not reached — and never "an
+// answer that cited nothing", which is the empty list.
 func (a answer) Evidence() []evidence.Evidence { return a.citations }
 
 // SearchCodeRequest is a search inside one version context. Where to search is
@@ -234,11 +268,20 @@ func (r GetCodeResult) Source() provider.SourceContent { return r.source }
 
 // ListContexts returns every configured version context, sorted by ID.
 //
+// The order is imposed here rather than taken on trust: [ContextSource] is an
+// interface and promises no order, so a caller paging or diffing this list gets
+// the same answer whichever implementation is installed. The sort is on a copy,
+// because a source is entitled to hand back a slice it reuses.
+//
 // An empty configuration is an answer and not a failure: this is what a caller
 // asks before it knows which versions exist, so there is nothing yet for it to
 // have got wrong.
 func (e *Engine) ListContexts(context.Context) []vacctx.CodeContext {
-	return e.contexts.Contexts()
+	listed := slices.Clone(e.contexts.Contexts())
+	slices.SortFunc(listed, func(a, b vacctx.CodeContext) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	return listed
 }
 
 // SearchCode searches the code of the context req names.
@@ -317,6 +360,14 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 		)
 	}
 
+	// The one field [Engine.resolve] leaves to its caller, because this is the
+	// only query that names a graph. It is checked after the provider, so that a
+	// server built with no graph at all says so once rather than blaming
+	// whichever context was asked about.
+	if err := require(req.Context, "graph_ref", codeCtx.GraphRef); err != nil {
+		return TraceCallsResult{}, err
+	}
+
 	graph, err := e.graph.TraceCalls(ctx, codeCtx, provider.TraceRequest{
 		Symbol:    req.Symbol,
 		Direction: req.Direction,
@@ -356,6 +407,14 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 // second thing to keep correct. What this method guarantees is the other half of
 // failing closed: an error from either dependency is returned with no content
 // beside it.
+//
+// With no source provider it fails with [vacerr.RepositoryNotFound], not a
+// provider-unavailable code: the code set has
+// [vacerr.SearchProviderUnavailable] and [vacerr.GraphProviderUnavailable] and
+// deliberately no source equivalent, so rather than add one — a change to the
+// public tool API — this reuses the code that already says what is true, that
+// there is no repository this server can read. The asymmetry is the compromise,
+// and it is here rather than in the taxonomy.
 func (e *Engine) GetCode(ctx context.Context, req GetCodeRequest) (GetCodeResult, error) {
 	codeCtx, err := e.resolve(ctx, req.Context)
 	if err != nil {

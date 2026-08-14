@@ -180,42 +180,45 @@ func TestUnknownContextIsContextNotFound(t *testing.T) {
 }
 
 // A ContextSource is not trusted to have validated what it hands back. A
-// context missing any of the four fields names no version to answer in, and is
-// refused before a provider sees it: a provider given an empty revision reads
-// whatever the checkout happens to be on, which is an answer from a version
-// nobody asked for.
+// context missing any field every query is scoped by names no version to answer
+// in, and is refused before a provider sees it: a provider given an empty
+// revision reads whatever the checkout happens to be on, which is an answer
+// from a version nobody asked for.
+//
+// The ID is one of them. Without it the query would reach its provider, get an
+// answer, and only then fail in evidence.New — with an error that is not a
+// *vacerr.Error and names no context, which is the one shape doc-1 says a
+// failure never takes.
 func TestIncompleteResolvedContextIsRefusedBeforeAnyProvider(t *testing.T) {
-	complete := vacctx.CodeContext{
-		ID: "demo@main", Repository: "demo", Branch: "main",
-		Revision: "0123456789abcdef0123456789abcdef01234567", GraphRef: "demo-main",
-	}
-
 	for _, tc := range []struct {
 		field string
 		blank func(*vacctx.CodeContext)
 	}{
+		{"id", func(c *vacctx.CodeContext) { c.ID = "" }},
 		{"repository", func(c *vacctx.CodeContext) { c.Repository = "" }},
 		{"branch", func(c *vacctx.CodeContext) { c.Branch = "" }},
 		// Whitespace, not empty: a revision of " " is as unusable as none, and
 		// would otherwise pass a bare != "" check.
 		{"revision", func(c *vacctx.CodeContext) { c.Revision = "  " }},
-		{"graph_ref", func(c *vacctx.CodeContext) { c.GraphRef = "" }},
 	} {
 		t.Run(tc.field, func(t *testing.T) {
-			incomplete := complete
+			incomplete := usable
 			tc.blank(&incomplete)
 			search, graph, source := &fakeSearch{}, &fakeGraph{}, &fakeSource{}
 			eng := engine.New(fakeContexts{codeCtx: incomplete}, search, graph, source)
 			ctx := context.Background()
 
-			if _, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: incomplete.ID, Query: "demo"}); err != nil {
+			// usable.ID, not incomplete.ID: what is under test is a
+			// ContextSource answering a well-formed request with a context it
+			// should not have, so the request itself stays well-formed.
+			if _, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: usable.ID, Query: "demo"}); err != nil {
 				assertCode(t, err, vacerr.InvalidArgument)
 			} else {
 				t.Fatal("SearchCode answered in an incomplete context")
 			}
 
 			if _, err := eng.TraceCalls(ctx, engine.TraceCallsRequest{
-				Context: incomplete.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
+				Context: usable.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
 			}); err != nil {
 				assertCode(t, err, vacerr.InvalidArgument)
 			} else {
@@ -223,7 +226,7 @@ func TestIncompleteResolvedContextIsRefusedBeforeAnyProvider(t *testing.T) {
 			}
 
 			if _, err := eng.GetCode(ctx, engine.GetCodeRequest{
-				Context: incomplete.ID, Path: "process.go", StartLine: 1, EndLine: 1,
+				Context: usable.ID, Path: "process.go", StartLine: 1, EndLine: 1,
 			}); err != nil {
 				assertCode(t, err, vacerr.InvalidArgument)
 			} else {
@@ -235,6 +238,54 @@ func TestIncompleteResolvedContextIsRefusedBeforeAnyProvider(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Only trace_calls names a graph, so only trace_calls needs the context to name
+// one. A caller with no graph backend at all configures no graph_ref and must
+// still be able to search and read code: requiring it of every query would make
+// the absent graph provider break the two queries that never wanted it, which
+// is the independent failure of doc-1 §23's eighth criterion given up one layer
+// down, at the context instead of the provider.
+func TestOnlyTraceCallsNeedsAGraphRef(t *testing.T) {
+	searchOnly := usable
+	searchOnly.GraphRef = ""
+	contexts := fakeContexts{codeCtx: searchOnly}
+
+	// With a graph provider present the context is what is incomplete, so the
+	// refusal blames the context — and still reaches no provider.
+	t.Run("with a graph provider", func(t *testing.T) {
+		search, graph, source := &fakeSearch{}, &fakeGraph{}, &fakeSource{}
+		eng := engine.New(contexts, search, graph, source)
+
+		searchErr, traceErr, getErr := queryAll(t, eng)
+		assertCode(t, traceErr, vacerr.InvalidArgument)
+		if searchErr != nil || getErr != nil {
+			t.Fatalf("a context with no graph_ref broke a query that reads no graph: search=%v get=%v", searchErr, getErr)
+		}
+		if graph.called {
+			t.Fatal("a context with no graph_ref reached the graph provider")
+		}
+		if !search.called || !source.called {
+			t.Fatalf("a query that reads no graph was not run: search=%v source=%v", search.called, source.called)
+		}
+	})
+
+	// The whole shape a search-only embedder has: no graph provider and no
+	// graph_ref anywhere. Trace says which of the two is missing; nothing else
+	// notices.
+	t.Run("with no graph provider", func(t *testing.T) {
+		search, source := &fakeSearch{}, &fakeSource{}
+		eng := engine.New(contexts, search, nil, source)
+
+		searchErr, traceErr, getErr := queryAll(t, eng)
+		assertCode(t, traceErr, vacerr.GraphProviderUnavailable)
+		if searchErr != nil || getErr != nil {
+			t.Fatalf("a search-only deployment broke a query it can answer: search=%v get=%v", searchErr, getErr)
+		}
+		if !search.called || !source.called {
+			t.Fatalf("a query that reads no graph was not run: search=%v source=%v", search.called, source.called)
+		}
+	})
 }
 
 // The provider is handed the resolved context, graph reference included, and
@@ -523,6 +574,40 @@ func TestListContexts(t *testing.T) {
 	empty := engine.New(resolver.New(&config.Config{}), &fakeSearch{}, &fakeGraph{}, &fakeSource{})
 	if got := empty.ListContexts(context.Background()); got == nil || len(got) != 0 {
 		t.Fatalf("an empty configuration listed %v, want an empty non-nil list", got)
+	}
+}
+
+// unsortedContexts is a ContextSource answering in the order it was written,
+// which a *resolver.Resolver never does. The order of ListContexts is the
+// engine's promise, so it must not rest on the one implementation that happens
+// to sort for it.
+type unsortedContexts []vacctx.CodeContext
+
+func (u unsortedContexts) Contexts() []vacctx.CodeContext { return u }
+
+func (u unsortedContexts) Resolve(_ context.Context, id string) (vacctx.CodeContext, error) {
+	return vacctx.CodeContext{}, vacerr.New(vacerr.ContextNotFound, "no", map[string]any{"context": id})
+}
+
+func TestListContextsSortsWhateverTheSourceHandsBack(t *testing.T) {
+	source := unsortedContexts{{ID: "demo@v2"}, {ID: "demo@v10"}, {ID: "demo@v1"}}
+	eng := engine.New(source, &fakeSearch{}, &fakeGraph{}, &fakeSource{})
+
+	listed := eng.ListContexts(context.Background())
+	want := []string{"demo@v1", "demo@v10", "demo@v2"}
+	if len(listed) != len(want) {
+		t.Fatalf("listed %v, want %d contexts", listed, len(want))
+	}
+	for i, id := range want {
+		if listed[i].ID != id {
+			t.Fatalf("listed %v, want them sorted by id as %v", listed, want)
+		}
+	}
+
+	// The source's own slice is not the engine's to reorder: one that reuses
+	// what it hands back would find it shuffled under it.
+	if source[0].ID != "demo@v2" {
+		t.Fatalf("ListContexts sorted the source's slice in place: %v", source)
 	}
 }
 
