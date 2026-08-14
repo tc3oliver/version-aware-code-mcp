@@ -41,12 +41,22 @@ only way in.
   v1.0.0's; until then a breaking change is possible and arrives with a release
   note.
 
+- `server.Handler`: the Streamable HTTP handler `ServeHTTP` mounts, exported so
+  a program embedding vacmcp can serve it on a mux of its own.
+
 ### Changed
 
 - `tools` is a thin adapter over `engine`: it maps MCP arguments in and JSON
   out, and every resolution, check and provider call happens below it. The four
   tools answer exactly as before — same arguments, same output shape, same error
   codes.
+- A client that gives up mid-call now stops the work it started. Over Streamable
+  HTTP the in-flight call is tied to the POST carrying it, so an abandoned
+  `search_code`, `trace_calls` or `get_code` unwinds at the provider instead of
+  running to completion against Zoekt, codebase-memory-mcp and git to produce an
+  answer nobody will read. STDIO already did this through the protocol's
+  `notifications/cancelled`; the stateless HTTP transport has no session for
+  that notification to arrive on.
 
 ## [0.2.0] - 2026-08-14
 
