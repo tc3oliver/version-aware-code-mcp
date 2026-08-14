@@ -53,12 +53,12 @@ func (d demoContexts) Resolve(_ context.Context, id string) (vacctx.CodeContext,
 	)
 }
 
-// What the stand-in index holds, per branch: `Process()` calls a different
-// handler in each version, which is the difference a version-aware search has
-// to report.
+// What the stand-in index holds, keyed by the repository and branch it belongs
+// to: `Process()` calls a different handler in each version, which is the
+// difference a version-aware search has to report.
 var index = map[string][]provider.SearchResult{
-	"release/v1": {{Path: "processor.go", Line: 5, Snippet: "return LegacyHandler(req)"}},
-	"release/v2": {{Path: "processor.go", Line: 5, Snippet: "return NewHandler(req)"}},
+	"demo/release/v1": {{Path: "processor.go", Line: 5, Snippet: "return LegacyHandler(req)"}},
+	"demo/release/v2": {{Path: "processor.go", Line: 5, Snippet: "return NewHandler(req)"}},
 }
 
 // demoSearch stands in for adapters/zoekt. Like every provider it is handed the
@@ -67,7 +67,7 @@ type demoSearch struct{}
 
 func (demoSearch) Search(_ context.Context, codeCtx vacctx.CodeContext, query provider.SearchQuery) ([]provider.SearchResult, error) {
 	var matches []provider.SearchResult
-	for _, candidate := range index[codeCtx.Branch] {
+	for _, candidate := range index[codeCtx.Repository+"/"+codeCtx.Branch] {
 		if strings.Contains(candidate.Snippet, query.Query) {
 			matches = append(matches, candidate)
 		}
@@ -92,8 +92,9 @@ func main() {
 
 func run() error {
 	// Only a search provider: with no graph and no source provider, TraceCalls
-	// and GetCode fail with a provider-unavailable error and search is
-	// unaffected.
+	// fails with GRAPH_PROVIDER_UNAVAILABLE and GetCode with
+	// REPOSITORY_NOT_FOUND — there is no source-provider-unavailable code, and
+	// no repository can be read without one — while search is unaffected.
 	eng := engine.New(versions, demoSearch{}, nil, nil)
 
 	// Both errors, so a failed query still closes the engine and a failed close

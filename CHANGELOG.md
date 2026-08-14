@@ -27,7 +27,9 @@ only way in.
   data directory, so a program embedding vacmcp builds the same installation
   `vacmcp repo` and `vacmcp context` do rather than a second one that drifts
   from it. It reports domain facts — a name, an id, a state, a revision — and no
-  on-disk layout, record format or lock.
+  on-disk layout or record format. `HoldServerLock` is the one lock on the
+  surface: it says a server is serving a data directory, and the four methods
+  that would change what one serves are refused while it is held.
 - `examples/embed`: a complete program embedding the engine. Its context source
   and search provider are stand-ins, so it runs with no Zoekt, no
   codebase-memory-mcp and no checkout, and CI builds and runs it on every pull

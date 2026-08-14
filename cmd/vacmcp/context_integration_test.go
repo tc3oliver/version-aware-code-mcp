@@ -942,15 +942,29 @@ func TestContextRemoveResumesAfterACrashAtAnyStep(t *testing.T) {
 	}
 }
 
-// crashRemoval takes the first steps of `context remove` against c and stops
-// there, leaving what a process killed after that step would leave. kept is the
-// other context of the same repository, whose search ref the rebuild in the
-// last step is the one that survives.
+// crashRemoval takes the steps `context remove` takes against c, in its order —
+// the state, then the graph and the checkout, then the search ref, then the
+// shard rebuilt beside the record left behind — and stops after the given
+// number of them, leaving what a process killed there would leave. kept is the
+// other context of the same repository, whose search ref is the one that
+// survives the rebuild.
 //
-// Each step is run against the engine the command runs it against, in the
-// command's own order: the state, then the graph and the checkout, then the
-// search ref, then the shard rebuilt out of the records the removal leaves
-// behind — which is the one that must not put back the ref just dropped.
+// Those steps are re-implemented here rather than called: the removal's stages
+// live in managed/ and are unexported. What is faithful to the command is the
+// order and the engines — the same git, codebase-memory-mcp and zoekt-git-index
+// it drives — and not the code path. Three things this does not reproduce: it
+// takes neither the server lock nor the repository lock, and writes REMOVING
+// straight to the store rather than through the transition check; it builds the
+// clone and worktree paths itself instead of asking the store for them; and its
+// rebuild names kept.Branch outright, where the command indexes every
+// non-REMOVING record of the repository and drops the shards when none is left.
+// For this fixture's two contexts, one removing and one kept, those two rebuilds
+// produce the same shard; a third context, or none surviving, would not be
+// covered by this and would need the real rebuild.
+//
+// Every step here must also succeed, where the command's tolerate a graph, a
+// clone or a ref that is already gone so that an interrupted removal stays
+// resumable. Here they are all present by construction.
 func crashRemoval(t *testing.T, data string, c, kept store.Context, steps int) {
 	t.Helper()
 	clone := filepath.Join(data, "repos", c.Repository)
