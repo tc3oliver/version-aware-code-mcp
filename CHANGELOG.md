@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-15
+
 Embeddable core: the query plane and the management plane are Go packages that
 can be called directly, and the MCP server is one caller of them rather than the
 only way in.
