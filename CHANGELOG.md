@@ -182,10 +182,12 @@ cloning, indexing, checking out and writing a configuration file by hand.
 - Per-repository locking, so operations on different repositories run in
   parallel while a sync, a create and a remove on one repository serialise, and
   a data-directory lock a managed server holds for its whole run.
-- `integration/managed_release_gate_test.go`: doc-1 §15's four
-  version-correctness checks re-run against contexts the management plane built,
-  plus the lifecycle gate — a remote branch that moves after a context was
-  created must not change what that context answers.
+- `integration/managed_release_gate_test.go`: the four version-correctness
+  checks — that `search_code` and `trace_calls` answer only from a context's
+  own branch and revision, never another version's — re-run against contexts
+  the management plane built, plus the lifecycle gate: a remote branch that
+  moves after a context was created must not change what that context
+  answers.
 
 ### Changed
 
