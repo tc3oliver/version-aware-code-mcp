@@ -14,12 +14,17 @@ import (
 	"fmt"
 )
 
-// Code is a v0.1.0 error code. The string values are part of the public tool
+// Code is a vacmcp error code. The string values are part of the public tool
 // API and must not change.
+//
+// There are eleven: the ten the v0.1.0 specification fixed, in the block below,
+// and [SourceDiffUnavailable], which compare_code added after it.
 type Code string
 
 // The ten v0.1.0 error codes. Each one documents where it is produced in
-// v0.1.0; a code with no v0.1.0 producer is marked as reserved.
+// v0.1.0; a code with no v0.1.0 producer is marked as reserved. A code added
+// after v0.1.0 is declared below this block rather than inside it, so what the
+// specification fixed stays legible as one set.
 const (
 	// ContextNotFound is produced by the context resolver whenever a tool is
 	// called with a context ID that is not present in the configuration.
@@ -75,10 +80,22 @@ const (
 	InvalidArgument Code = "INVALID_ARGUMENT"
 )
 
-// SourceDiffUnavailable is produced by compare_code when the configured source
-// provider reads one version at a time and does not have the optional
-// SourceDiffer capability. It is added after v0.1.0, which is why it is not in
-// the block above: comparing two versions is a query v0.1.0 did not have.
+// SourceDiffUnavailable is produced by the engine in compare_code when the
+// configured source provider does not implement the optional
+// [github.com/tc3oliver/version-aware-code-mcp/provider.SourceDiffer]
+// capability: it reads one version at a time and has no way to compare two, so
+// the type assertion for that capability fails and the caller is told this
+// server cannot compare code rather than handed an apology shaped like an
+// answer.
+//
+// It is a fact about this server's capability, not about the code asked for:
+// nothing is claimed about the file, the revisions or the repository. A server
+// built with no source provider at all reports [RepositoryNotFound] instead —
+// there is then no repository to read, whatever the contexts declare — and a
+// provider that can diff but fails reports its own error unchanged.
+//
+// It is added after v0.1.0, which is why it is not in the block above:
+// comparing two versions is a query v0.1.0 did not have.
 const SourceDiffUnavailable Code = "SOURCE_DIFF_UNAVAILABLE"
 
 // Error is a tool error carrying a Code, a human readable message and

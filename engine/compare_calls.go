@@ -217,6 +217,16 @@ func (e *Engine) traceSide(ctx context.Context, codeCtx vacctx.CodeContext, req 
 // answering the one it already answers, and no backend can disagree with
 // another about what "the same call" means.
 //
+// Both contexts must name the same repository, as they must for
+// [Engine.CompareCode]. Two repositories' call graphs are not two versions of
+// one, and here nothing would stop the comparison running: each side is walked
+// in its own graph, so the two would be set against each other and the result
+// would read as "these calls were removed" about code that was never in the
+// same project. That is why the check is here rather than left to the graph
+// backend, which never sees the two contexts together and so could not notice.
+// It is [vacerr.InvalidArgument], refused before either graph is walked and
+// with no dedicated code of its own, exactly as compare_code refuses it.
+//
 // The identity a call is compared by is caller, callee and path, without the
 // line: see [relation]. A symbol found in only one version is an answer rather
 // than a failure — that is what PresenceFromOnly and PresenceToOnly are for —
@@ -247,6 +257,24 @@ func (e *Engine) CompareCalls(ctx context.Context, req CompareCallsRequest) (Com
 	toCtx, err := e.resolve(ctx, req.ToContext)
 	if err != nil {
 		return CompareCallsResult{}, err
+	}
+
+	// Before the provider check, as in [Engine.CompareCode]: a request that names
+	// two repositories is wrong whatever this server was built with, and the
+	// caller can fix that where it cannot fix the build.
+	if fromCtx.Repository != toCtx.Repository {
+		return CompareCallsResult{}, vacerr.New(
+			vacerr.InvalidArgument,
+			fmt.Sprintf("compare_calls: contexts %q and %q name different repositories (%q and %q), whose call graphs are not two versions of one",
+				req.FromContext, req.ToContext, fromCtx.Repository, toCtx.Repository),
+			map[string]any{
+				"from_context":    req.FromContext,
+				"to_context":      req.ToContext,
+				"from_repository": fromCtx.Repository,
+				"to_repository":   toCtx.Repository,
+				"symbol":          req.Symbol,
+			},
+		)
 	}
 
 	if e.graph == nil {
