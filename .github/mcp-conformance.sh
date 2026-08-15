@@ -13,6 +13,15 @@
 # Needs the fixture (testdata/prepare-fixture.sh), a Zoekt web server, which it
 # starts itself, and codebase-memory-mcp reachable at the command the fixture
 # configuration names.
+#
+# The Inspector spawns the server it is configured for without this shell's
+# environment: it passes through the basics a child process needs to start
+# (PATH included), but not an arbitrary variable like CBM_CACHE_DIR just
+# because this script happens to have it set. So the vacmcp it starts is told
+# explicitly, in "env" below, rather than left to inherit a value it would
+# actually not receive — the CBM graphs prepare-fixture.sh built live under
+# CBM_CACHE_DIR, and a vacmcp that does not know it falls back to CBM's own
+# default store, where none of this fixture's projects exist.
 set -euo pipefail
 
 inspector=@modelcontextprotocol/inspector@2.1.0
@@ -20,6 +29,7 @@ inspector=@modelcontextprotocol/inspector@2.1.0
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 config="$root/testdata/fixture/config.yaml"
 index="$root/testdata/fixture/zoekt-index"
+cbm_cache_dir="${CBM_CACHE_DIR:-$root/testdata/fixture/cbm-data}"
 
 if [ ! -f "$config" ]; then
 	echo "mcp-conformance: $config missing, run testdata/prepare-fixture.sh" >&2
@@ -58,6 +68,7 @@ cat >"$work/inspector.json" <<EOF
     "vacmcp": {
       "command": "$work/vacmcp",
       "args": ["serve", "--stdio", "--config", "$config"],
+      "env": { "CBM_CACHE_DIR": "$cbm_cache_dir" },
       "protocolEra": "modern"
     }
   }
@@ -128,7 +139,14 @@ if discover:
 tools = result("tools_list")
 if tools:
     got = sorted(t["name"] for t in tools["tools"])
-    want = ["get_code", "list_contexts", "search_code", "trace_calls"]
+    want = [
+        "compare_calls",
+        "compare_code",
+        "get_code",
+        "list_contexts",
+        "search_code",
+        "trace_calls",
+    ]
     check("tools/list", got == want, f"tools are {got}, want {want}")
 
 contexts = structured("list_contexts")
