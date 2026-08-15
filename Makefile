@@ -19,8 +19,12 @@ test:
 # tearing down the repositories, indexes and graphs it asserts against. The tag
 # adds the real-engine tests to the run rather than replacing anything, so this
 # is every test in the module; it needs testdata/prepare-fixture.sh to have run.
+#
+# CBM_CACHE_DIR points every CBM subprocess these tests spawn at the fixture's
+# own store instead of the developer's global ~/.cache/codebase-memory-mcp —
+# see testdata/prepare-fixture.sh, which builds that store at the same path.
 test-integration:
-	go test -tags=integration -timeout 30m ./...
+	CBM_CACHE_DIR=$(CURDIR)/testdata/fixture/cbm-data go test -tags=integration -timeout 30m ./...
 
 # With the tag, because that is the build every file is in: nothing carries
 # `!integration`, so the tagged build is the tag-free one plus the

@@ -136,6 +136,18 @@ runs:
         echo "$cbm_version"
         grep -q '0\.10\.1' <<<"$cbm_version"
 
+        # CBM has no --data-dir flag; it derives its store from this variable,
+        # falling back to ~/.cache/codebase-memory-mcp. The runner's HOME is
+        # already fresh every job, so this is not a correctness fix here the
+        # way it is for a long-lived local checkout — it is what lets this
+        # step's daemon and every later go-test step's CBM subprocess agree on
+        # where the fixture's graphs live, via $GITHUB_ENV rather than a
+        # second copy of the path. testdata/prepare-fixture.sh, which this
+        # step calls below, falls back to the same path when it is run
+        # standalone with the variable unset.
+        echo "CBM_CACHE_DIR=$GITHUB_WORKSPACE/testdata/fixture/cbm-data" >>"$GITHUB_ENV"
+        export CBM_CACHE_DIR="$GITHUB_WORKSPACE/testdata/fixture/cbm-data"
+
         # Every CBM `cli` call otherwise cold-starts a throwaway daemon.
         # Measured on the adapters/cbm package alone: 147s without a daemon,
         # 52s with one already running.

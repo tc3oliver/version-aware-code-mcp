@@ -79,6 +79,7 @@ func indexedRepository(t *testing.T) (data string, alpha, beta store.Context) {
 	mustGit(t, "-C", source, "checkout", "-q", "main")
 
 	data = t.TempDir()
+	t.Cleanup(func() { discardGraphs(t, data) })
 	if _, err := repoRun(t, data, "add", "demo", "--url", source); err != nil {
 		t.Fatalf("repo add: %v", err)
 	}
