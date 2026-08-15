@@ -348,10 +348,15 @@ func parityEngine(t *testing.T, cfg *config.Config) *engine.Engine {
 	return eng
 }
 
-// paritySession serves all four tools over a real MCP server on its own engine,
-// and connects a client to it. Its engine is a second one over the same
+// paritySession serves every tool over a real MCP server on its own engine, and
+// connects a client to it. Its engine is a second one over the same
 // configuration rather than the caller's: two stacks agreeing is the claim, and
 // sharing one would leave only the encoding tested.
+//
+// It is the wiring cmd/vacmcp runs, so the comparison tools are registered here
+// too — compare_code_integration_test.go and compare_calls_integration_test.go
+// ask this session for them rather than standing up a second server that would
+// have to be kept the same as this one.
 func paritySession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
 
@@ -361,6 +366,8 @@ func paritySession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	AddSearchCode(srv, eng)
 	AddTraceCalls(srv, eng)
 	AddGetCode(srv, eng)
+	AddCompareCode(srv, eng)
+	AddCompareCalls(srv, eng)
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
