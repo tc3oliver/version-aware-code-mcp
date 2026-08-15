@@ -34,18 +34,26 @@ permissions:
 # going is checked against a tree nobody will merge — the group is per PR, so
 # the new commit cancels it rather than the two racing to report on the same
 # check. `github.sha` is the fallback instead of `github.ref` on purpose: a
-# push to main and the workflow_call from release.yml both want their own run
-# to finish rather than be cancelled by whatever else lands on the same ref
-# afterwards, and every commit has its own SHA where main and a release tag do
-# not have their own ref.
+# push to main wants its own run to finish rather than be cancelled by
+# whatever else lands on the same ref afterwards, and every commit has its own
+# SHA where main does not have its own ref.
+#
+# `github.sha` alone is not enough to tell every caller apart, though: when a
+# release tag points at the commit main was just pushed at, the standalone
+# push-to-main run and the workflow_call release.yml makes to verify that same
+# commit share one SHA — and without `github.workflow` in the key, they shared
+# one group and cancelled each other, whichever claimed it first. A reusable
+# workflow call runs in the caller's context, `github.workflow` included, so
+# it reads "CI" for a standalone run here and the caller's own name ("Release")
+# for release.yml's call — exactly the distinction a shared SHA cannot make.
 #
 # It stays in this file and out of the tiers: a called workflow evaluates its
 # concurrency group in the caller's context, so a group declared down there
 # would be shared by every caller of that tier and a release tag would cancel
 # the run of the commit it points at.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true # verified live in PR #4
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   fast:
