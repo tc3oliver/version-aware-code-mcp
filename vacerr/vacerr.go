@@ -75,6 +75,12 @@ const (
 	InvalidArgument Code = "INVALID_ARGUMENT"
 )
 
+// SourceDiffUnavailable is produced by compare_code when the configured source
+// provider reads one version at a time and does not have the optional
+// SourceDiffer capability. It is added after v0.1.0, which is why it is not in
+// the block above: comparing two versions is a query v0.1.0 did not have.
+const SourceDiffUnavailable Code = "SOURCE_DIFF_UNAVAILABLE"
+
 // Error is a tool error carrying a Code, a human readable message and
 // optional structured details.
 type Error struct {
