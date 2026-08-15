@@ -31,14 +31,16 @@ version, and evidence. Your agent does the reasoning.
 
 vacmcp sits between your agent and the engines that already index your code. It
 adds one thing to them: a *context*, an id that names one repository, one
-branch, one revision and one call graph. Every tool call takes a context id, and
-nothing it returns comes from outside that scope.
+branch, one revision and one call graph. Every tool call takes a context id —
+two, when it compares two versions — and nothing it returns comes from outside
+that scope.
 
 ```text
   your agent
       │   MCP 2026-07-28, over STDIO or Streamable HTTP
       ▼
-   vacmcp ──── list_contexts   search_code   trace_calls   get_code
+   vacmcp ──── list_contexts   search_code    trace_calls   get_code
+      │        compare_code    compare_calls
       │
       │   resolve the context id against the configuration:
       │   repository, branch, revision, graph reference
@@ -62,6 +64,9 @@ back on every answer.
   context's revision, never in another version's.
 - **Source read at a revision.** Lines come out of the commit the context
   declares, not out of whatever the working tree is on.
+- **Comparison between two versions.** One file or one symbol's call graph, read
+  in two contexts and reported as two sides, so neither version's evidence is
+  mixed into the other's.
 - **Evidence on every result.** Repository, branch, revision, file and line, so
   an answer can be checked instead of trusted.
 - **Local-first.** Local Zoekt, local codebase-memory-mcp, local git. No LLM API
@@ -193,7 +198,7 @@ zoekt-webserver -index ~/.vacmcp/zoekt-index -listen 127.0.0.1:6070 -rpc &
 if any of them did not pass:
 
 ```text
-MCP SDK       OK    go-sdk v1.7.0, 4 tools
+MCP SDK       OK    go-sdk v1.7.0, 6 tools
 Config        OK    vacmcp.yaml: 1 repositories, 2 contexts
 Zoekt         OK    http://127.0.0.1:6070
 CBM           OK    0.10.1
@@ -222,7 +227,7 @@ configuration, and `vacmcp serve --config FILE` serves what you wrote. Managed
 mode does that part for you. `vacmcp repo add` clones a repository into a data
 directory, `vacmcp context create` pins a ref to a commit and builds that
 commit's index and graph, and `vacmcp serve --managed` serves the contexts that
-came out ready. Same engines, same four tools, same isolation — no configuration
+came out ready. Same engines, same six tools, same isolation — no configuration
 file and no `zoekt-git-index`, `git worktree` or `index_repository` by hand.
 
 ```bash
@@ -394,6 +399,8 @@ vacmcp contexts --config vacmcp.yaml    # id, repository, branch, revision
 | `search_code` | `context`, `query` | matches as path, line and snippet, from that context's branch only |
 | `trace_calls` | `context`, `symbol`, `direction`, `depth` | call edges as caller, callee, path and line, from that context's graph only |
 | `get_code` | `context`, `path`, `start_line`, `end_line` | those lines as they are at that context's revision |
+| `compare_code` | `from_context`, `to_context`, `path` | what happened to that file between the two revisions — `ADDED`, `REMOVED`, `MODIFIED` or `UNCHANGED` — with the changed regions as hunks |
+| `compare_calls` | `from_context`, `to_context`, `symbol`, `direction`, `depth` | which versions had the symbol, and the call relations added, removed and unchanged between them |
 
 `direction` is `callers` or `callees`; `depth` is 1 to 5. A query is wrapped in
 the context's `repo:` and `branch:` filters and otherwise passed to Zoekt as
@@ -429,6 +436,81 @@ That is `get_code` on `processor.go`. The same three lines in `backend-v1` read
 already carrying those four fields, and there is no single version to scope it
 to. An unconfigured server answers it with an empty list rather than an error.
 
+The two comparison tools take two contexts instead of one and answer in both, so
+they carry two of those blocks rather than one merged pair. `from` and `to` each
+hold the version that side was answered in and the evidence backing it, and the
+side of a version that does not have the file or the symbol is `null`. There is
+no combined context or evidence beside them: a citation only means anything at
+the revision it was read at, so one flattened list could not say which version
+an entry came from.
+
+```json
+{
+  "from": {
+    "context": {
+      "id": "backend-v1",
+      "repository": "backend",
+      "branch": "release/1.x",
+      "revision": "68c19fdb264bad80cf220f672f89dc90478a9d66"
+    },
+    "evidence": []
+  },
+  "to": {
+    "context": {
+      "id": "backend-v2",
+      "repository": "backend",
+      "branch": "release/2.x",
+      "revision": "7b05c6aeb7544cc7fd2b69c56c89c9bcfd46a1a2"
+    },
+    "evidence": []
+  },
+  "change": "MODIFIED",
+  "path": "processor.go",
+  "binary": false,
+  "hunks": [
+    {
+      "old_start": 2,
+      "old_lines": 5,
+      "new_start": 2,
+      "new_lines": 5,
+      "lines": [
+        { "kind": "CONTEXT", "content": "" },
+        { "kind": "CONTEXT", "content": "// Process handles one request." },
+        { "kind": "CONTEXT", "content": "func Process(req string) string {" },
+        { "kind": "REMOVED", "content": "\treturn LegacyHandler(req)" },
+        { "kind": "ADDED", "content": "\treturn NewHandler(req)" },
+        { "kind": "CONTEXT", "content": "}" }
+      ]
+    }
+  ]
+}
+```
+
+That is `compare_code` on the file `get_code` read above, across the two
+contexts: the one line that differs between the versions, as one hunk, with the
+lines it covers in each of them. A binary file is marked `binary` and has no
+hunks, which is what tells it apart from a file with nothing to show.
+`compare_calls` answers in the same two sides, with `presence` — `BOTH`,
+`FROM_ONLY` or `TO_ONLY` — saying which versions had the symbol at all, and the
+relations around it as `added`, `removed` and `unchanged`, each carrying its
+call sites in each version separately. A relation is caller, callee and path
+without the line, so code moving down a file is not reported as one call
+disappearing and another appearing.
+
+**What a comparison does not do.** Paths and symbol names are matched literally.
+There is no rename or move detection: a file renamed between the two revisions
+is one path removed and another added rather than one path that moved, and a
+symbol renamed between versions is not recognised as the same symbol. Each side
+resolves the name that was asked for on its own — `requested_symbol` is what was
+asked for, `from_resolved_symbol` and `to_resolved_symbol` are what each version
+matched it to — and a version with no such symbol is the absent side rather than
+a failure, while a symbol neither version has is `SYMBOL_NOT_FOUND`. Identity
+here is textual, not semantic or AST-aware, so a comparison is not an impact
+analysis. Comparison also stays inside one repository: two repositories have no
+shared history, and their call graphs are not two versions of one, so two
+contexts naming different repositories are `INVALID_ARGUMENT`. Comparing across
+repositories waits for the multi-repo contexts in the [Roadmap](#roadmap).
+
 A failure is one shape too, with a code to branch on:
 
 ```json
@@ -447,6 +529,7 @@ A failure is one shape too, with a code to branch on:
 | `GRAPH_PROVIDER_UNAVAILABLE` | codebase-memory-mcp cannot be reached, or the graph is not indexed |
 | `SOURCE_MISMATCH` | the source is not the revision the context declares |
 | `INVALID_ARGUMENT` | an argument is missing or outside its range |
+| `SOURCE_DIFF_UNAVAILABLE` | the source this server has reads one version at a time and cannot compare two |
 
 ## How It Works
 
@@ -499,8 +582,8 @@ can be marked flaky.
 
 ## Embedding Guide
 
-The four tools are a thin MCP layer over a Go package you can call directly.
-`engine.Engine` answers all four queries with no server, no transport and no
+The six tools are a thin MCP layer over a Go package you can call directly.
+`engine.Engine` answers all six queries with no server, no transport and no
 wire schema in the way, so a gateway of your own holds the same version
 isolation this server does — and can be tested without a server in front of it.
 
@@ -532,8 +615,13 @@ graph still searches. `SearchCode` and `TraceCalls` name what is missing —
 `SEARCH_PROVIDER_UNAVAILABLE` and `GRAPH_PROVIDER_UNAVAILABLE`. `GetCode` with
 no source provider fails with `REPOSITORY_NOT_FOUND` instead: the code set has
 no source equivalent, and adding one would change the public tool API.
+`CompareCalls` names an absent graph provider exactly as `TraceCalls` does, and
+`CompareCode` with no source provider fails exactly as `GetCode` does. A source
+provider that is there but cannot compare two versions is a different answer
+again, `SOURCE_DIFF_UNAVAILABLE`, and the next section is where that capability
+is implemented.
 
-A request names its scope with a context id and nothing else — no request type
+A request names its scope with context ids and nothing else — no request type
 has a repository, branch or revision field — and every successful result carries
 the version it was answered in together with its evidence, because the result
 types have no exported fields and only a method on the engine builds one. The
@@ -571,15 +659,16 @@ Anything under `internal/` is not part of this and may change in any release.
 
 ## Custom Provider Guide
 
-Four interfaces are the whole extension surface. Implement them and the engine
-answers out of your backend — an SCIP index, another graph service, something
-in-house — with no fork of anything here. `SearchProvider`, `GraphProvider` and
-`SourceProvider` are each handed the version scope (`vacctx.CodeContext`)
-alongside a cancellation `context.Context`: an implementation that ignores the
-scope answers from the wrong version, which is the one thing this project is
-for. `ContextSource` is where those scopes come from rather than something
-handed one — `Contexts()` lists the versions that exist and takes no arguments,
-and `Resolve(ctx, id)` turns an id into the one it names.
+Four interfaces are the whole required extension surface. Implement them and the
+engine answers out of your backend — an SCIP index, another graph service,
+something in-house — with no fork of anything here. `SearchProvider`,
+`GraphProvider` and `SourceProvider` are each handed the version scope
+(`vacctx.CodeContext`) alongside a cancellation `context.Context`: an
+implementation that ignores the scope answers from the wrong version, which is
+the one thing this project is for. `ContextSource` is where those scopes come
+from rather than something handed one — `Contexts()` lists the versions that
+exist and takes no arguments, and `Resolve(ctx, id)` turns an id into the one it
+names.
 
 | Interface | Package | Responsible for |
 | --- | --- | --- |
@@ -603,6 +692,30 @@ type SourceProvider interface {
     Read(ctx context.Context, codeCtx vacctx.CodeContext, path string, start, end int) (*SourceContent, error)
 }
 ```
+
+**Optional: comparing two versions.** A `SourceProvider` may additionally
+implement `provider.SourceDiffer`, and that is what `compare_code` is answered
+by. It is a capability of its own rather than a fifth method on `SourceProvider`
+because not every source backend has a second revision to compare against, and a
+backend that cannot compare should be a type assertion that fails rather than a
+`Read`-shaped promise returning an apology:
+
+```go
+type SourceDiffer interface {
+    Diff(ctx context.Context, from, to vacctx.CodeContext, req SourceDiffRequest) (*SourceDiff, error)
+}
+```
+
+The two contexts are the entire scope of the comparison, exactly as the single
+one is for `Read`, and the answer is structured — added, removed, modified or
+unchanged, with the changed regions as hunks — never diff text for someone else
+to parse. A `SourceProvider` that does not implement it is not a broken one:
+every other query is unaffected, `compare_calls` included, since that walks each
+version's graph through the `GraphProvider` you already wrote. `compare_code` is
+then the only thing that fails, with `SOURCE_DIFF_UNAVAILABLE` — a fact about
+this server's capability rather than about the file, the revisions or the
+repository, so the tool is still there and still says exactly why it cannot
+answer. `adapters/git` implements it, over the same repository it reads.
 
 Two rules are yours to hold rather than the engine's to enforce. A
 `SourceProvider` must fail closed: content that is not the revision the context
@@ -655,18 +768,20 @@ Vulnerability reports go to the address in [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-v0.1.0 is the four tools above, one context per call, with the version isolation
-and evidence they are built around. v0.2.0 is the managed lifecycle that puts a
-repository behind them without anyone assembling one by hand. v0.3.0 is the same
-query plane as a Go package, so a program of your own can call it directly
-instead of running this server and talking MCP to it. Ahead of those:
+v0.1.0 is the first four tools above, one context per call, with the version
+isolation and evidence they are built around. v0.2.0 is the managed lifecycle
+that puts a repository behind them without anyone assembling one by hand. v0.3.0
+is the same query plane as a Go package, so a program of your own can call it
+directly instead of running this server and talking MCP to it. v0.4.0 is the
+other two tools, the first queries that name two versions and answer in both.
+Ahead of those:
 
 | Version | Direction |
 | --- | --- |
 | v0.1.0 | version-aware query plane: the four tools, context isolation, evidence — done |
 | v0.2.0 | managed repository and context lifecycle: `repo` and `context` commands, automatic Zoekt and graph provisioning, readiness verification — done |
-| v0.3.0 | embeddable core / extension API: a supported, documented Go API to embed this core in your own gateway, not yet under a compatibility guarantee — this release |
-| v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff |
+| v0.3.0 | embeddable core / extension API: a supported, documented Go API to embed this core in your own gateway, not yet under a compatibility guarantee — done |
+| v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff within one repository — this release |
 | v0.5.0 | multi-repo contexts, cross-repo search and graph |
 | v0.6.0 | operations: metrics, OpenTelemetry, garbage collection, scheduled sync primitives |
 | v1.0.0 | stable public API and compatibility contract |
