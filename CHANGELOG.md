@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-16
+
 Version intelligence: a query can name two versions instead of one, and the
 answer says what changed between them with each version's context and evidence
 kept on its own side. The comparison is literal and stays inside one repository:
