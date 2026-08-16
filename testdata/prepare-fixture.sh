@@ -4,6 +4,7 @@
 #
 #   testdata/fixture/zoekt-index   main + release/v1 + release/v2 in one index
 #   testdata/fixture/worktrees/    a checkout per release, what CBM indexes
+#   testdata/fixture/cbm-data/     the three graphs, CBM's own store
 #   testdata/fixture/config.yaml   repositories + contexts for the integration tests
 #
 # Each release gets its own CBM project, named after its graph_ref. Sharing one
@@ -23,6 +24,16 @@ fixture="$root/testdata/fixture"
 # codebase-memory-mcp is not installed system-wide everywhere; CI points CBM_BIN
 # at whatever it downloaded.
 cbm=${CBM_BIN:-codebase-memory-mcp}
+
+# CBM has no --data-dir flag; it derives its store from this variable, falling
+# back to ~/.cache/codebase-memory-mcp. Every index_repository call below is
+# kept out of that global, developer-shared directory — otherwise a long
+# enough run of `make test-integration` accumulates CBM projects there
+# forever, which is what degraded the real-engine suite before this existed.
+# A caller (CI) that already exported this to start a shared daemon keeps its
+# value; a bare local run defaults to the fixture's own subdirectory, wiped
+# with the rest of it below.
+export CBM_CACHE_DIR="${CBM_CACHE_DIR:-$fixture/cbm-data}"
 
 for tool in git zoekt-git-index "$cbm"; do
 	if ! command -v "$tool" >/dev/null 2>&1; then

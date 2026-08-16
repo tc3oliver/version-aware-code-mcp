@@ -148,8 +148,29 @@ It wipes and rebuilds everything under `testdata/fixture/`, which is in
 | --- | --- |
 | `zoekt-index/` | one index carrying `main`, `release/v1` and `release/v2` |
 | `worktrees/` | a checkout per release, the directories CBM indexes |
+| `cbm-data/` | CBM's own store for the three graphs below |
 | `ambiguous/` | two packages declaring one function name, indexed as `vacmcp-demo-ambiguous` |
 | `config.yaml` | repositories and contexts naming both, with resolved revisions |
+
+`cbm-data/` exists because CBM has no `--data-dir` flag; it keys its store off
+`CBM_CACHE_DIR`, falling back to the developer's global
+`~/.cache/codebase-memory-mcp` when unset. The script and `make
+test-integration` both set it to `testdata/fixture/cbm-data`, so the three
+graphs below live beside the rest of the fixture instead of accumulating in
+that global directory — re-running `prepare-fixture.sh` wipes them with
+everything else, the same reset a stale Zoekt index already gets. If you keep
+a CBM daemon running locally for the startup-cost speedup CI's comment
+describes, point it at the same directory:
+`CBM_CACHE_DIR=testdata/fixture/cbm-data codebase-memory-mcp daemon start` —
+running the tests without a daemon warm under that directory still passes,
+just slower per `cli` call, the same tradeoff CI's comment describes.
+
+CBM keeps only one cache directory active per account at a time: a daemon
+warmed under `testdata/fixture/cbm-data` refuses a concurrent command that
+asks for a different one (including the default), erroring rather than
+running against the wrong store. `codebase-memory-mcp daemon stop` before
+switching directories, including before using CBM against something outside
+this repository.
 
 Each release is indexed into its own CBM project, named after the `graph_ref`
 of its context. Two versions sharing one project would trace calls against the

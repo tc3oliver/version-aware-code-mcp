@@ -3,13 +3,21 @@ package vacerr_test
 import (
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
-// codes lists every v0.1.0 error code with the exact string the specification
-// requires on the wire.
+// codes lists every error code with the exact string it must have on the wire:
+// the ten the v0.1.0 specification fixed, then the one added after them. The
+// list is checked against the constants vacerr.go declares, so a code added
+// without a line here fails rather than going untested.
 var codes = []struct {
 	code vacerr.Code
 	want string
@@ -24,11 +32,14 @@ var codes = []struct {
 	{vacerr.GraphProviderUnavailable, "GRAPH_PROVIDER_UNAVAILABLE"},
 	{vacerr.SourceMismatch, "SOURCE_MISMATCH"},
 	{vacerr.InvalidArgument, "INVALID_ARGUMENT"},
+
+	// Added after v0.1.0, for compare_code.
+	{vacerr.SourceDiffUnavailable, "SOURCE_DIFF_UNAVAILABLE"},
 }
 
 func TestEveryCodeSerialisesToSpecShape(t *testing.T) {
-	if len(codes) != 10 {
-		t.Fatalf("expected the 10 v0.1.0 codes, got %d", len(codes))
+	if len(codes) != 11 {
+		t.Fatalf("expected the 10 v0.1.0 codes and the one added after them, got %d", len(codes))
 	}
 	for _, c := range codes {
 		t.Run(c.want, func(t *testing.T) {
@@ -48,6 +59,94 @@ func TestEveryCodeSerialisesToSpecShape(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Every code this package declares is documented where it is declared and
+// pinned to its wire string above. Both halves are the same guarantee: a code
+// nobody wrote down is one no tool author can produce on purpose and no caller
+// can be told to expect, and its string is part of the public tool API whether
+// or not anyone remembered to test it.
+//
+// SourceDiffUnavailable is checked by name because it is the one code added
+// after the specification: its comment has to say which tool produces it and
+// under what condition, exactly as the ten before it do.
+func TestEveryDeclaredCodeIsDocumentedAndPinned(t *testing.T) {
+	declared := declaredCodes(t)
+
+	var wire []string
+	for name, code := range declared {
+		wire = append(wire, code.wire)
+		if strings.TrimSpace(code.doc) == "" {
+			t.Errorf("%s is declared with no doc comment, so nothing says where it is produced", name)
+		}
+	}
+	var pinned []string
+	for _, c := range codes {
+		pinned = append(pinned, c.want)
+	}
+	slices.Sort(wire)
+	slices.Sort(pinned)
+	if !slices.Equal(wire, pinned) {
+		t.Fatalf("vacerr.go declares %v, the list above pins %v", wire, pinned)
+	}
+
+	doc := declared["SourceDiffUnavailable"].doc
+	for _, want := range []string{"compare_code", "SourceDiffer"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("SourceDiffUnavailable's doc comment does not mention %q, so it does not say when it is produced:\n%s", want, doc)
+		}
+	}
+}
+
+type codeDecl struct{ wire, doc string }
+
+// declaredCodes reads back the Code constants vacerr.go declares, each with the
+// string it has on the wire and the comment above it.
+//
+// The source is read rather than the constants listed by hand, because a
+// hand-maintained list is exactly what cannot notice a twelfth code being
+// declared beside the eleven — and a new code is a new failure every caller has
+// to handle, arriving without anyone deciding to add it.
+func declaredCodes(t *testing.T) map[string]codeDecl {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "vacerr.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing vacerr.go: %v", err)
+	}
+
+	found := map[string]codeDecl{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if ident, isIdent := value.Type.(*ast.Ident); !isIdent || ident.Name != "Code" || len(value.Values) != 1 {
+				continue
+			}
+			name := value.Names[0].Name
+			lit, ok := value.Values[0].(*ast.BasicLit)
+			if !ok {
+				t.Fatalf("%s is not declared as a string literal, so its wire string cannot be read back", name)
+			}
+			wire, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			// A constant declared on its own carries its comment on the
+			// declaration; one inside a block carries its own.
+			doc := value.Doc
+			if doc == nil {
+				doc = gen.Doc
+			}
+			found[name] = codeDecl{wire, doc.Text()}
+		}
+	}
+	return found
 }
 
 func TestMarshalWithDetails(t *testing.T) {

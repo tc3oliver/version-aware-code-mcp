@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Version intelligence: a query can name two versions instead of one, and the
+answer says what changed between them with each version's context and evidence
+kept on its own side. The comparison is literal and stays inside one repository:
+there is no rename or move detection, so a file renamed between the two
+revisions is one path removed and another added rather than one path that moved;
+a symbol renamed between versions is not recognised as the same symbol, since
+each side resolves the name that was asked for on its own and identity here is
+textual rather than semantic or AST-aware; and two contexts naming different
+repositories are `INVALID_ARGUMENT`, because two repositories have no shared
+history and their call graphs are not two versions of one. Comparing across
+repositories waits for multi-repo contexts.
+
+### Added
+
+- `compare_code`: one file between two version contexts. `change` is `ADDED`
+  (only the to context has it), `REMOVED`, `MODIFIED` or `UNCHANGED`, with the
+  changed regions as structured hunks rather than diff text, and a binary file
+  is marked as one instead of being reported as a change with nothing to show.
+  The same path is read on both sides — a difference produced by reading two
+  different files is not a difference between two versions.
+- `compare_calls`: one symbol's call graph between two version contexts, walked
+  with the same symbol, direction and depth in each version's own graph.
+  `presence` says which versions had the symbol at all — `BOTH`, `FROM_ONLY` or
+  `TO_ONLY` — and the relations come back as `added`, `removed` and `unchanged`,
+  each carrying its call sites in each version separately. A relation is caller,
+  callee and path without the line, so code moving down a file is not reported
+  as one call disappearing and another appearing. A symbol neither version has
+  is `SYMBOL_NOT_FOUND`; one matching several functions is `SYMBOL_AMBIGUOUS`
+  with the candidates and the side it was ambiguous on.
+- Both tools answer in two sides: `from` and `to` each carry the version context
+  that side was answered in and the evidence backing it, and the side of a
+  version that does not have the file or the symbol is `null`. No merged context
+  or evidence list is offered beside them — a citation only means anything at
+  the revision it was read at, so one flattened list could not say which version
+  an entry came from.
+- `provider.SourceDiffer`: an optional capability a `SourceProvider` may also
+  implement, and what `compare_code` is answered by. `adapters/git` implements
+  it, comparing two pinned revisions with rename detection off and turning
+  git's unified diff into structured hunks. A source backend without it keeps
+  every other query, `compare_calls` included: the engine type asserts for the
+  capability, so a backend that reads one version at a time fails `compare_code`
+  alone rather than returning an apology shaped like an answer.
+- `SOURCE_DIFF_UNAVAILABLE`, the eleventh error code and the first added since
+  the ten the v0.1.0 specification fixed: this server's source provider cannot
+  compare two versions. It is a fact about the capability rather than about the
+  file, the revisions or the repository — a server built with no source provider
+  at all still reports `REPOSITORY_NOT_FOUND`, and a provider that can compare
+  but fails reports its own error unchanged.
+- `engine.CompareCode` and `engine.CompareCalls` on the embedding API, with
+  `ComparisonSide`, `CodeChange`, `SymbolPresence` and `CallRelation` beside
+  them. The two tools are thin adapters over these, as the other four are over
+  theirs, and a comparison result has no exported fields and no combined context
+  or evidence of its own, so a cross-version answer wearing the clothes of a
+  version-scoped one is not representable.
+
 ## [0.3.1] - 2026-08-15
 
 Supersedes v0.3.0, which shipped no binaries: tagging it surfaced 5 reachable
@@ -127,10 +182,12 @@ cloning, indexing, checking out and writing a configuration file by hand.
 - Per-repository locking, so operations on different repositories run in
   parallel while a sync, a create and a remove on one repository serialise, and
   a data-directory lock a managed server holds for its whole run.
-- `integration/managed_release_gate_test.go`: doc-1 §15's four
-  version-correctness checks re-run against contexts the management plane built,
-  plus the lifecycle gate — a remote branch that moves after a context was
-  created must not change what that context answers.
+- `integration/managed_release_gate_test.go`: the four version-correctness
+  checks — that `search_code` and `trace_calls` answer only from a context's
+  own branch and revision, never another version's — re-run against contexts
+  the management plane built, plus the lifecycle gate: a remote branch that
+  moves after a context was created must not change what that context
+  answers.
 
 ### Changed
 

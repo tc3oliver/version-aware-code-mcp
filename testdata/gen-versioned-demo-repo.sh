@@ -7,6 +7,13 @@
 #   release/v1  Process() -> LegacyHandler()   (cut from main)
 #   release/v2  Process() -> NewHandler()      (cut from main)
 #
+# The same two branches are what the comparison tools are tested against, so
+# every outcome they can report is written into this one repository rather than
+# into a repository per scenario. Comparing release/v1 to release/v2 gives:
+# processor.go/handler.go/version.go modified, go.mod/README.md/shared.go
+# unchanged, newonly.go added, oldonly.go removed, Process -> NewHandler added,
+# Process -> LegacyHandler removed, and Keep -> SharedHandler unchanged.
+#
 # The repository is regenerated from scratch on every run. Author and committer
 # identity and dates are pinned so the revisions are identical across runs,
 # which is what makes repeated generation safe for an already indexed fixture.
@@ -78,6 +85,27 @@ EOF
 
 commit 'Add Process delegating to LegacyHandler'
 
+# On main, before either release is cut, so both branches inherit this file and
+# this call byte for byte: Keep -> SharedHandler is the call relation a
+# comparison has to report as unchanged. Every other call in this repository
+# differs between the releases, so without one that does not, "unchanged" could
+# only ever be tested as an empty list.
+cat >"$repo/shared.go" <<'EOF'
+package demo
+
+// SharedHandler serves a request the same way on every release.
+func SharedHandler(req string) string {
+	return "shared: " + req
+}
+
+// Keep delegates to SharedHandler, identically on every release.
+func Keep(req string) string {
+	return SharedHandler(req)
+}
+EOF
+
+commit 'Add Keep delegating to SharedHandler'
+
 git -C "$repo" checkout -q -b release/v1 main
 
 cat >"$repo/version.go" <<'EOF'
@@ -88,6 +116,20 @@ const Version = "v1"
 EOF
 
 commit 'Cut release/v1'
+
+# release/v1 and nowhere else. release/v2 is cut from main rather than from
+# here, so it never sees this commit: comparing v1 to v2 is a file that was
+# removed, and comparing the other way round is one that was added.
+cat >"$repo/oldonly.go" <<'EOF'
+package demo
+
+// OldOnly is written on release/v1 and on no other branch.
+func OldOnly(req string) string {
+	return "old only: " + req
+}
+EOF
+
+commit 'Add OldOnly to release/v1'
 
 git -C "$repo" checkout -q -b release/v2 main
 
@@ -117,5 +159,17 @@ const Version = "v2"
 EOF
 
 commit 'Switch Process to the v2 handler'
+
+# The mirror of oldonly.go: release/v2 and nowhere else.
+cat >"$repo/newonly.go" <<'EOF'
+package demo
+
+// NewOnly is written on release/v2 and on no other branch.
+func NewOnly(req string) string {
+	return "new only: " + req
+}
+EOF
+
+commit 'Add NewOnly to release/v2'
 
 git -C "$repo" checkout -q main

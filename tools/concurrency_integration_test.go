@@ -32,6 +32,10 @@ const concurrencyDeadline = 5 * time.Minute
 // rounds that a leak has more than one chance to appear. Every provider behind
 // the engine is shared: one CBM process serving every trace, one Zoekt server
 // answering every search, one git repository read at two revisions at once.
+//
+// Six engine calls per worker per round — two searches, a trace, a read, and
+// the two comparisons — so 1080 calls in all, of which 360 span both versions
+// at once.
 const (
 	concurrentWorkers = 60
 	concurrentRounds  = 3
@@ -94,6 +98,19 @@ func TestConcurrentEngineCallsStayInTheirOwnVersion(t *testing.T) {
 				concurrentSearch(ctx, t, eng, where, version)
 				concurrentTrace(ctx, t, eng, where, version)
 				concurrentGet(ctx, t, eng, where, version)
+
+				// The same worker then asks a question that spans both versions
+				// at once, beside the single-context calls its neighbours are
+				// making in each of them. A comparison is where a leak has the
+				// most room: it holds two contexts in one call, so it can pick
+				// up the wrong one, hand the wrong one to a provider, or report
+				// one version's answer on the other's side — and the direction
+				// alternates with the round, so neither side is always the
+				// first.
+				other := versions[(worker+round+1)%len(versions)]
+				pair := fmt.Sprintf("worker %d round %d, %s -> %s", worker, round, version.codeCtx.ID, other.codeCtx.ID)
+				concurrentCompareCode(ctx, t, eng, pair, version, other)
+				concurrentCompareCalls(ctx, t, eng, pair, version, other)
 			}
 		}()
 	}
@@ -177,6 +194,115 @@ func concurrentGet(ctx context.Context, t *testing.T, eng *engine.Engine, where 
 		t.Errorf("%s: GetCode returned %q, which is the other version's body: concurrent reads are crossing revisions",
 			where, content)
 	}
+}
+
+// concurrentCompareCode compares the file the two releases differ in, in
+// whichever direction this round runs it.
+//
+// The answer is checked from both ends: each side reports the revision its own
+// context declares, and the hunk takes out the from version's handler and puts
+// in the to version's. Either check alone can pass on a contaminated answer — a
+// diff of one revision against itself still labels its sides correctly, and a
+// diff of the right two revisions reported under the wrong contexts still shows
+// the right lines — so the pair is what says the comparison ran between the two
+// versions this call named.
+func concurrentCompareCode(ctx context.Context, t *testing.T, eng *engine.Engine, where string, from, to concurrentVersion) {
+	compared, err := eng.CompareCode(ctx, engine.CompareCodeRequest{
+		FromContext: from.codeCtx.ID, ToContext: to.codeCtx.ID, Path: "processor.go",
+	})
+	if err != nil {
+		t.Errorf("%s: CompareCode(processor.go) error = %v", where, err)
+		return
+	}
+	if compared.Change() != engine.CodeModified {
+		t.Errorf("%s: CompareCode(processor.go) = %s, want MODIFIED: the two releases delegate to different handlers",
+			where, compared.Change())
+	}
+	assertComparedAt(t, where, "from", compared.From(), from)
+	assertComparedAt(t, where, "to", compared.To(), to)
+
+	hunks := compared.Hunks()
+	if !diffShows(hunks, provider.LineRemoved, from.own) || diffShows(hunks, provider.LineRemoved, to.own) {
+		t.Errorf("%s: the removed lines of processor.go are %+v, want the %s call and not the %s one",
+			where, hunks, from.own, to.own)
+	}
+	if !diffShows(hunks, provider.LineAdded, to.own) || diffShows(hunks, provider.LineAdded, from.own) {
+		t.Errorf("%s: the added lines of processor.go are %+v, want the %s call and not the %s one",
+			where, hunks, to.own, from.own)
+	}
+}
+
+// concurrentCompareCalls compares Process's callees across the same pair.
+//
+// Process calls exactly one handler in each release, so the classification is
+// the whole answer: the from version's call is removed, the to version's is
+// added, and neither is unchanged. A comparison answered from one graph twice
+// reports nothing removed or nothing added; one answered from the wrong pair
+// reports them the wrong way round.
+func concurrentCompareCalls(ctx context.Context, t *testing.T, eng *engine.Engine, where string, from, to concurrentVersion) {
+	compared, err := eng.CompareCalls(ctx, engine.CompareCallsRequest{
+		FromContext: from.codeCtx.ID, ToContext: to.codeCtx.ID,
+		Symbol: "Process", Direction: provider.Callees, Depth: 1,
+	})
+	if err != nil {
+		t.Errorf("%s: CompareCalls(Process) error = %v", where, err)
+		return
+	}
+	if compared.Presence() != engine.PresenceBoth {
+		t.Errorf("%s: CompareCalls(Process) presence = %s, want BOTH: both releases declare Process",
+			where, compared.Presence())
+	}
+	assertComparedAt(t, where, "from", compared.From(), from)
+	assertComparedAt(t, where, "to", compared.To(), to)
+
+	if !relates(compared.Removed(), "Process", from.own) || relates(compared.Removed(), "Process", to.own) {
+		t.Errorf("%s: removed = %+v, want only the %s call the from version makes", where, compared.Removed(), from.own)
+	}
+	if !relates(compared.Added(), "Process", to.own) || relates(compared.Added(), "Process", from.own) {
+		t.Errorf("%s: added = %+v, want only the %s call the to version makes", where, compared.Added(), to.own)
+	}
+	if relates(compared.Unchanged(), "Process", from.own) || relates(compared.Unchanged(), "Process", to.own) {
+		t.Errorf("%s: unchanged = %+v, want neither handler: each release calls only its own", where, compared.Unchanged())
+	}
+}
+
+// assertComparedAt holds one half of a comparison to the version it was supposed
+// to be answered in. An absent side is a failure here rather than an answer:
+// both releases have processor.go and both declare Process, so the only way a
+// side goes missing is a comparison that lost one of the two versions it named.
+func assertComparedAt(t *testing.T, where, which string, side engine.ComparisonSide, want concurrentVersion) {
+	if !side.Present() {
+		t.Errorf("%s: the %s side is absent, want it answered in %s", where, which, want.codeCtx.ID)
+		return
+	}
+	if got := side.Context().ID; got != want.codeCtx.ID {
+		t.Errorf("%s: the %s side was answered in context %q, want %q", where, which, got, want.codeCtx.ID)
+	}
+	if got := side.Context().Revision; got != want.codeCtx.Revision {
+		t.Errorf("%s: the %s side was answered at revision %s, want %s", where, which, got, want.codeCtx.Revision)
+	}
+}
+
+// diffShows reports whether any hunk line of that kind mentions the text.
+func diffShows(hunks []provider.DiffHunk, kind provider.DiffLineKind, text string) bool {
+	for _, h := range hunks {
+		for _, line := range h.Lines {
+			if line.Kind == kind && strings.Contains(line.Content, text) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// relates reports whether one of the classified relations is caller -> callee.
+func relates(list []engine.CallRelation, caller, callee string) bool {
+	for _, rel := range list {
+		if strings.EqualFold(rel.Caller, caller) && strings.EqualFold(rel.Callee, callee) {
+			return true
+		}
+	}
+	return false
 }
 
 // callsOf projects a traversal onto the wire shape calleesOf reads, which is

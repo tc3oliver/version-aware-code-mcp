@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -271,6 +272,302 @@ func parityGetCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSession,
 		vacerr.InvalidArgument)
 }
 
+// TestEngineAndMCPCompareIdentically is the same gate for the two comparison
+// tools, which the test above cannot cover: a comparison is answered in two
+// versions at once, so its result has no single context and no single evidence
+// list to fill a [parityWire] with. It is compared through the two-sided wire
+// shapes compare_code_test.go and compare_calls_test.go already decode into,
+// which is what pins the field names on both halves of the answer.
+//
+// The stakes are higher here than for a single-context tool. A comparison
+// carries two contexts, two evidence lists and a classification derived from
+// both, so an adapter that swapped the sides, merged the citations or dropped
+// the absent one would still return a well-formed result — and only a
+// side-by-side comparison with what the engine decided shows it.
+func TestEngineAndMCPCompareIdentically(t *testing.T) {
+	cfg := parityFixture(t)
+	eng := parityEngine(t, cfg)
+	session := paritySession(t, cfg)
+
+	t.Run("compare_code", func(t *testing.T) { parityCompareCode(t, cfg, eng, session) })
+	t.Run("compare_calls", func(t *testing.T) { parityCompareCalls(t, cfg, eng, session) })
+}
+
+// parityCompareCode compares the two paths through compare_code: one file per
+// outcome the tool can report, and a refusal.
+func parityCompareCode(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession) {
+	t.Helper()
+
+	// No file serves two of these, so two paths that agreed by classifying
+	// everything the same way fail here rather than passing on the one case that
+	// happens to agree. ADDED and REMOVED are the ones where a side is absent,
+	// which is the shape a merged or defaulted side would fill in.
+	tests := map[string]struct {
+		path           string
+		change         string
+		fromHas, toHas bool
+	}{
+		"modified: the handler Process delegates to": {"processor.go", "MODIFIED", true, true},
+		"added: a file only release/v2 ever had":     {"newonly.go", "ADDED", false, true},
+		"removed: a file only release/v1 ever had":   {"oldonly.go", "REMOVED", true, false},
+		"unchanged: a file both releases inherited":  {"shared.go", "UNCHANGED", true, true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := eng.CompareCode(t.Context(), engine.CompareCodeRequest{
+				FromContext: v1, ToContext: v2, Path: tc.path,
+			})
+			if err != nil {
+				t.Fatalf("engine.CompareCode(%s): %v", tc.path, err)
+			}
+			direct := comparedCodeOnTheWire(result)
+			wire, raw := compareCodeCall(t, session, v1, v2, tc.path)
+			if !reflect.DeepEqual(direct, wire) {
+				t.Errorf("compare_code(%s):\n  engine: %+v\n     MCP: %+v", tc.path, direct, wire)
+			}
+
+			// What the two sides agreed on, held to what the fixture really wrote:
+			// agreement on the wrong classification is still agreement.
+			if wire.Change != tc.change || wire.Path != tc.path {
+				t.Errorf("compare_code(%s) = %q at %q, want %s at %s", tc.path, wire.Change, wire.Path, tc.change, tc.path)
+			}
+			assertParitySide(t, "from", wire.From, raw, tc.fromHas, cfg.Contexts[v1])
+			assertParitySide(t, "to", wire.To, raw, tc.toHas, cfg.Contexts[v2])
+			if tc.fromHas {
+				assertScoped(t, result.From().Context(), v1)
+			}
+			if tc.toHas {
+				assertScoped(t, result.To().Context(), v2)
+			}
+			t.Logf("compare_code(%s, %s, %s): both sides answered %s", v1, v2, tc.path, raw)
+		})
+	}
+
+	// A context that does not exist, refused identically. An UNCHANGED result
+	// here would read as "the file is the same in both versions", which is a
+	// claim about a version this server was never given.
+	_, err := eng.CompareCode(t.Context(), engine.CompareCodeRequest{
+		FromContext: v1, ToContext: "demo-v3", Path: "processor.go",
+	})
+	assertCodeParity(t, "compare_code(demo-v3)", directCode(t, err),
+		parityErrorCode(t, session, "compare_code", map[string]any{
+			"from_context": v1, "to_context": "demo-v3", "path": "processor.go",
+		}),
+		vacerr.ContextNotFound)
+}
+
+// parityCompareCalls compares the two paths through compare_calls: the relation
+// classification in both directions of presence, and two refusals.
+func parityCompareCalls(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession) {
+	t.Helper()
+
+	// Every case names the relations it expects in each list, so agreement that
+	// classified everything as added — or as unchanged — fails here.
+	tests := map[string]struct {
+		symbol                    string
+		direction                 provider.Direction
+		presence                  string
+		fromHas, toHas            bool
+		added, removed, unchanged []string
+	}{
+		"an added edge and a removed one": {
+			symbol: "Process", direction: provider.Callees, presence: "BOTH", fromHas: true, toHas: true,
+			added: []string{"Process -> NewHandler"}, removed: []string{"Process -> LegacyHandler"},
+		},
+		"an unchanged edge": {
+			symbol: "Keep", direction: provider.Callees, presence: "BOTH", fromHas: true, toHas: true,
+			unchanged: []string{"Keep -> SharedHandler"},
+		},
+		"a symbol only release/v2 declares": {
+			symbol: "NewHandler", direction: provider.Callers, presence: "TO_ONLY", toHas: true,
+			added: []string{"Process -> NewHandler"},
+		},
+		"a symbol only release/v1 declares": {
+			symbol: "LegacyHandler", direction: provider.Callers, presence: "FROM_ONLY", fromHas: true,
+			removed: []string{"Process -> LegacyHandler"},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := eng.CompareCalls(t.Context(), engine.CompareCallsRequest{
+				FromContext: v1, ToContext: v2, Symbol: tc.symbol, Direction: tc.direction, Depth: 1,
+			})
+			if err != nil {
+				t.Fatalf("engine.CompareCalls(%s): %v", tc.symbol, err)
+			}
+			direct := comparedCallsOnTheWire(result)
+			wire, raw := compareCallsOnFixture(t, session, map[string]any{
+				"from_context": v1, "to_context": v2,
+				"symbol": tc.symbol, "direction": string(tc.direction), "depth": 1,
+			})
+			if !reflect.DeepEqual(direct, wire) {
+				t.Errorf("compare_calls(%s):\n  engine: %+v\n     MCP: %+v", tc.symbol, direct, wire)
+			}
+
+			if wire.Presence != tc.presence || wire.RequestedSymbol != tc.symbol {
+				t.Errorf("compare_calls(%s) = presence %q for requested %q, want %s for %s",
+					tc.symbol, wire.Presence, wire.RequestedSymbol, tc.presence, tc.symbol)
+			}
+			for _, classification := range []struct {
+				name string
+				got  []callRelationWire
+				want []string
+			}{
+				{"added", wire.Added, tc.added},
+				{"removed", wire.Removed, tc.removed},
+				{"unchanged", wire.Unchanged, tc.unchanged},
+			} {
+				if got := classified(classification.got); !slices.Equal(got, classification.want) {
+					t.Errorf("compare_calls(%s) reports %v as %s, want %v", tc.symbol, got, classification.name, classification.want)
+				}
+			}
+			assertParitySide(t, "from", wire.From, raw, tc.fromHas, cfg.Contexts[v1])
+			assertParitySide(t, "to", wire.To, raw, tc.toHas, cfg.Contexts[v2])
+			if tc.fromHas {
+				assertScoped(t, result.From().Context(), v1)
+			}
+			if tc.toHas {
+				assertScoped(t, result.To().Context(), v2)
+			}
+			t.Logf("compare_calls(%s, %s, %s): both sides answered %s", v1, v2, tc.symbol, raw)
+		})
+	}
+
+	// A context that does not exist, and a symbol neither version has. The
+	// second is the comparison-specific one: an empty result would read as "the
+	// symbol is in both versions and nothing about it changed".
+	_, err := eng.CompareCalls(t.Context(), engine.CompareCallsRequest{
+		FromContext: "demo-v3", ToContext: v2, Symbol: "Process", Direction: provider.Callees, Depth: 1,
+	})
+	assertCodeParity(t, "compare_calls(demo-v3)", directCode(t, err),
+		parityErrorCode(t, session, "compare_calls", map[string]any{
+			"from_context": "demo-v3", "to_context": v2, "symbol": "Process", "direction": "callees", "depth": 1,
+		}),
+		vacerr.ContextNotFound)
+
+	_, err = eng.CompareCalls(t.Context(), engine.CompareCallsRequest{
+		FromContext: v1, ToContext: v2, Symbol: "NeverWritten", Direction: provider.Callees, Depth: 1,
+	})
+	assertCodeParity(t, "compare_calls(NeverWritten)", directCode(t, err),
+		parityErrorCode(t, session, "compare_calls", map[string]any{
+			"from_context": v1, "to_context": v2, "symbol": "NeverWritten", "direction": "callees", "depth": 1,
+		}),
+		vacerr.SymbolNotFound)
+}
+
+// assertParitySide holds one half of an agreed comparison to the version it was
+// answered in, or to being absent.
+//
+// It is assertComparedSide's job with the configured revision checked as well,
+// which is the field the two paths could agree on while both being stale: the
+// comparison above proves they read the same revision, and this proves it is
+// the one the context declares.
+func assertParitySide(t *testing.T, which string, side *comparisonSideWire, raw string, present bool, want vacctx.CodeContext) {
+	t.Helper()
+	assertComparedSide(t, which, side, raw, present, want)
+	if present && side != nil && side.Context.Revision != want.Revision {
+		t.Errorf("the %s side was answered at revision %s, want %s", which, side.Context.Revision, want.Revision)
+	}
+}
+
+// comparedCodeOnTheWire is an engine code comparison projected onto the shape a
+// client receives.
+//
+// It is written out here rather than borrowed from compare_code.go's own
+// encoder: a comparison that ran both sides through the encoder under test
+// would agree with itself whatever that encoder did.
+func comparedCodeOnTheWire(result engine.CompareCodeResult) compareCodeWire {
+	hunks := make([]hunkWire, 0, len(result.Hunks()))
+	for _, h := range result.Hunks() {
+		lines := make([]diffLineWire, 0, len(h.Lines))
+		for _, line := range h.Lines {
+			lines = append(lines, diffLineWire{Kind: string(line.Kind), Content: line.Content})
+		}
+		hunks = append(hunks, hunkWire{
+			OldStart: h.OldStart, OldLines: h.OldLines,
+			NewStart: h.NewStart, NewLines: h.NewLines,
+			Lines: lines,
+		})
+	}
+	return compareCodeWire{
+		From:   comparedSideOnTheWire(result.From()),
+		To:     comparedSideOnTheWire(result.To()),
+		Change: string(result.Change()),
+		Path:   result.Path(),
+		Binary: result.Binary(),
+		Hunks:  hunks,
+	}
+}
+
+// comparedCallsOnTheWire is an engine call graph comparison projected onto the
+// shape a client receives, the mirror of [comparedCodeOnTheWire].
+func comparedCallsOnTheWire(result engine.CompareCallsResult) compareCallsWire {
+	return compareCallsWire{
+		From:               comparedSideOnTheWire(result.From()),
+		To:                 comparedSideOnTheWire(result.To()),
+		Presence:           string(result.Presence()),
+		RequestedSymbol:    result.RequestedSymbol(),
+		FromResolvedSymbol: result.FromResolvedSymbol(),
+		ToResolvedSymbol:   result.ToResolvedSymbol(),
+		Added:              relationsOnTheWire(result.Added()),
+		Removed:            relationsOnTheWire(result.Removed()),
+		Unchanged:          relationsOnTheWire(result.Unchanged()),
+	}
+}
+
+// comparedSideOnTheWire is one version's half as MCP publishes it: the four
+// public context fields and that version's own citations, or null where the
+// version had nothing. The graph reference is deliberately absent, exactly as
+// [onTheWire] leaves it out of a single-context result.
+func comparedSideOnTheWire(s engine.ComparisonSide) *comparisonSideWire {
+	if !s.Present() {
+		return nil
+	}
+	side := &comparisonSideWire{Evidence: s.Evidence()}
+	side.Context.ID = s.Context().ID
+	side.Context.Repository = s.Context().Repository
+	side.Context.Branch = s.Context().Branch
+	side.Context.Revision = s.Context().Revision
+	return side
+}
+
+// relationsOnTheWire projects one classification list. A version that does not
+// have the relation cites an empty list rather than a null one, because null and
+// [] are different answers and only one of them survives the round trip as
+// itself.
+func relationsOnTheWire(found []engine.CallRelation) []callRelationWire {
+	wire := make([]callRelationWire, 0, len(found))
+	for _, rel := range found {
+		wire = append(wire, callRelationWire{
+			Caller:       rel.Caller,
+			Callee:       rel.Callee,
+			Path:         rel.Path,
+			FromEvidence: citedOnTheWire(rel.FromEvidence),
+			ToEvidence:   citedOnTheWire(rel.ToEvidence),
+		})
+	}
+	return wire
+}
+
+func citedOnTheWire(cites []evidence.Evidence) []evidence.Evidence {
+	if cites == nil {
+		return []evidence.Evidence{}
+	}
+	return cites
+}
+
+// classified names one relation list as the calls it holds, which is the
+// classification a comparison is judged on. Order is the engine's — from's
+// relations then to's — so comparing with [slices.Equal] holds both sides to
+// reporting the same relations in the same order.
+func classified(list []callRelationWire) []string {
+	named := make([]string, 0, len(list))
+	for _, rel := range list {
+		named = append(named, rel.Caller+" -> "+rel.Callee)
+	}
+	return named
+}
+
 // assertParity is the comparison itself, and returns the agreed result so the
 // caller can go on to check it is not agreement on nothing.
 func assertParity(t *testing.T, what string, direct parityWire, wire parityWire, raw string) parityWire {
@@ -348,10 +645,15 @@ func parityEngine(t *testing.T, cfg *config.Config) *engine.Engine {
 	return eng
 }
 
-// paritySession serves all four tools over a real MCP server on its own engine,
-// and connects a client to it. Its engine is a second one over the same
+// paritySession serves every tool over a real MCP server on its own engine, and
+// connects a client to it. Its engine is a second one over the same
 // configuration rather than the caller's: two stacks agreeing is the claim, and
 // sharing one would leave only the encoding tested.
+//
+// It is the wiring cmd/vacmcp runs, so the comparison tools are registered here
+// too — compare_code_integration_test.go and compare_calls_integration_test.go
+// ask this session for them rather than standing up a second server that would
+// have to be kept the same as this one.
 func paritySession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
 
@@ -361,6 +663,8 @@ func paritySession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	AddSearchCode(srv, eng)
 	AddTraceCalls(srv, eng)
 	AddGetCode(srv, eng)
+	AddCompareCode(srv, eng)
+	AddCompareCalls(srv, eng)
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
