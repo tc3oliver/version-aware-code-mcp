@@ -49,7 +49,7 @@ func TestSearchCodeAnswersInsideTheContextItWasGiven(t *testing.T) {
 
 	found := searchCode(t, session, v2, "NewHandler")
 	if len(found.Matches) == 0 {
-		t.Fatalf("search_code(%s, NewHandler) returned no matches, want the ones on %s", v2, cfg.Contexts[v2].Branch)
+		t.Fatalf("search_code(%s, NewHandler) returned no matches, want the ones on %s", v2, only(cfg, v2).Branch)
 	}
 	if got, want := found.Context, listedContextOf(cfg, v2); got != want {
 		t.Errorf("context = %+v, want %+v", got, want)
@@ -64,7 +64,7 @@ func TestSearchCodeAnswersInsideTheContextItWasGiven(t *testing.T) {
 	// is an empty answer, because that branch does not have the symbol.
 	absent := searchCode(t, session, v1, "NewHandler")
 	if len(absent.Matches) != 0 {
-		t.Errorf("search_code(%s, NewHandler) = %+v, want no matches: %s does not have that symbol", v1, absent.Matches, cfg.Contexts[v1].Branch)
+		t.Errorf("search_code(%s, NewHandler) = %+v, want no matches: %s does not have that symbol", v1, absent.Matches, only(cfg, v1).Branch)
 	}
 	if got, want := absent.Context, listedContextOf(cfg, v1); got != want {
 		t.Errorf("context = %+v, want %+v", got, want)
@@ -74,7 +74,7 @@ func TestSearchCodeAnswersInsideTheContextItWasGiven(t *testing.T) {
 	// answering nothing for everything.
 	legacy := searchCode(t, session, v1, "LegacyHandler")
 	if len(legacy.Matches) == 0 {
-		t.Errorf("search_code(%s, LegacyHandler) returned no matches, want the ones on %s", v1, cfg.Contexts[v1].Branch)
+		t.Errorf("search_code(%s, LegacyHandler) returned no matches, want the ones on %s", v1, only(cfg, v1).Branch)
 	}
 	if leaked := searchCode(t, session, v2, "LegacyHandler"); len(leaked.Matches) != 0 {
 		t.Errorf("search_code(%s, LegacyHandler) = %+v, want no matches", v2, leaked.Matches)
@@ -163,7 +163,7 @@ func TestSearchCodeOutputCarriesContextAndEvidence(t *testing.T) {
 
 	// GraphRef is the CBM project backing the context. It is internal, and a
 	// tool's output is the only place it could leak from.
-	if strings.Contains(raw, cfg.Contexts[v2].GraphRef) || strings.Contains(raw, "graph") {
+	if strings.Contains(raw, only(cfg, v2).GraphRef) || strings.Contains(raw, "graph") {
 		t.Errorf("search_code leaked the graph reference: %s", raw)
 	}
 
@@ -196,7 +196,7 @@ func TestSearchCodeWorksWhenTheGraphProviderIsUnavailable(t *testing.T) {
 	cfg := fixtureConfig(t)
 	cfg.Providers.CBM.Command = filepath.Join(t.TempDir(), "codebase-memory-mcp-that-is-not-installed")
 
-	graph, err := cbmadapter.New(cfg).TraceCalls(t.Context(), cfg.Contexts[v2], provider.TraceRequest{
+	graph, err := cbmadapter.New(cfg).TraceCalls(t.Context(), only(cfg, v2), provider.TraceRequest{
 		Symbol:    "Process",
 		Direction: provider.Callees,
 		Depth:     2,
@@ -214,7 +214,7 @@ func TestSearchCodeWorksWhenTheGraphProviderIsUnavailable(t *testing.T) {
 	// through the graph, so this must still answer.
 	found := searchCode(t, searchSession(t, cfg), v2, "NewHandler")
 	if len(found.Matches) == 0 {
-		t.Fatalf("search_code(%s, NewHandler) returned no matches while CBM is unavailable, want the ones on %s", v2, cfg.Contexts[v2].Branch)
+		t.Fatalf("search_code(%s, NewHandler) returned no matches while CBM is unavailable, want the ones on %s", v2, only(cfg, v2).Branch)
 	}
 	if got, want := found.Context, listedContextOf(cfg, v2); got != want {
 		t.Errorf("context = %+v, want %+v", got, want)
@@ -375,7 +375,7 @@ func callSearchCode(t *testing.T, session *mcp.ClientSession, contextID, query s
 // listedContextOf is the context configuration as it must appear on the wire:
 // the four public fields of the context filed under id, and no graph reference.
 func listedContextOf(cfg *config.Config, id string) listedContext {
-	codeCtx := cfg.Contexts[id]
+	codeCtx := only(cfg, id)
 	return listedContext{
 		ID:         id,
 		Repository: codeCtx.Repository,

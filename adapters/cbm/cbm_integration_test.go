@@ -29,14 +29,19 @@ func fixture(t *testing.T) *config.Config {
 	return cfg
 }
 
-// contextNamed returns the prepared context with that ID.
+// contextNamed returns the prepared context with that ID, which names one
+// repository: this adapter is handed one member at a time, whatever the context
+// it came out of holds.
 func contextNamed(t *testing.T, cfg *config.Config, id string) vacctx.CodeContext {
 	t.Helper()
-	codeCtx, ok := cfg.Contexts[id]
+	workspace, ok := cfg.Contexts[id]
 	if !ok {
 		t.Fatalf("context %q is missing from the fixture configuration", id)
 	}
-	return codeCtx
+	if len(workspace.Members) != 1 {
+		t.Fatalf("context %q names %d repositories, want the one the fixture declares", id, len(workspace.Members))
+	}
+	return workspace.Members[0]
 }
 
 // callees returns the names the graph says symbol calls.

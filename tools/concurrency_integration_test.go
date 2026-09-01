@@ -70,11 +70,13 @@ func TestConcurrentEngineCallsStayInTheirOwnVersion(t *testing.T) {
 
 	versions := make([]concurrentVersion, 0, len(parityVersions))
 	for _, version := range parityVersions {
-		codeCtx, ok := cfg.Contexts[version.id]
+		workspace, ok := cfg.Contexts[version.id]
 		if !ok {
 			t.Fatalf("the fixture configures no context %q", version.id)
 		}
-		versions = append(versions, concurrentVersion{codeCtx: codeCtx, own: version.own, other: version.other})
+		// One repository per fixture context, which is what the tools under test
+		// can be asked about at all.
+		versions = append(versions, concurrentVersion{codeCtx: workspace.Members[0], own: version.own, other: version.other})
 	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), concurrencyDeadline)

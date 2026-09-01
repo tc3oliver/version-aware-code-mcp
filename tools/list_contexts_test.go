@@ -21,9 +21,9 @@ const testVersion = "0.0.0-test"
 
 // twoContexts is doc-1's configuration example: one repository, two versions,
 // filed under IDs that are deliberately not in sorted order.
-var twoContexts = map[string]vacctx.CodeContext{
-	"app-v2": {Repository: "example/backend", Branch: "release/2.x", Revision: "94cb821", GraphRef: "backend-v2"},
-	"app-v1": {Repository: "example/backend", Branch: "release/1.x", Revision: "8af31e2", GraphRef: "backend-v1"},
+var twoContexts = map[string]vacctx.Workspace{
+	"app-v2": single(vacctx.CodeContext{Repository: "example/backend", Branch: "release/2.x", Revision: "94cb821", GraphRef: "backend-v2"}),
+	"app-v1": single(vacctx.CodeContext{Repository: "example/backend", Branch: "release/1.x", Revision: "8af31e2", GraphRef: "backend-v1"}),
 }
 
 // AC #1: list_contexts returns every configured context's id, repository,
@@ -57,7 +57,7 @@ func TestListContextsReturnsEveryConfiguredContext(t *testing.T) {
 // AC #2: a configuration with no contexts is an answer, not a failure. The
 // empty list has to reach the client as [], because null is a different answer.
 func TestListContextsWithNoContextsReturnsAnEmptyList(t *testing.T) {
-	for name, contexts := range map[string]map[string]vacctx.CodeContext{
+	for name, contexts := range map[string]map[string]vacctx.Workspace{
 		"nil map":   nil,
 		"empty map": {},
 	} {
@@ -113,7 +113,7 @@ func TestListContextsIsDiscoverable(t *testing.T) {
 // the client received. It reads the text content rather than the decoded
 // structured content on purpose: the difference between [] and null only
 // survives in the bytes.
-func callListContexts(t *testing.T, contexts map[string]vacctx.CodeContext) string {
+func callListContexts(t *testing.T, contexts map[string]vacctx.Workspace) string {
 	t.Helper()
 
 	res, err := session(t, contexts).CallTool(t.Context(), &mcp.CallToolParams{Name: "list_contexts"})
@@ -139,7 +139,7 @@ func callListContexts(t *testing.T, contexts map[string]vacctx.CodeContext) stri
 //
 // The engine is built with no providers: list_contexts reaches none, and one
 // that tried would fail the test rather than answer from a stub.
-func session(t *testing.T, contexts map[string]vacctx.CodeContext) *mcp.ClientSession {
+func session(t *testing.T, contexts map[string]vacctx.Workspace) *mcp.ClientSession {
 	t.Helper()
 
 	srv := server.New(testVersion)

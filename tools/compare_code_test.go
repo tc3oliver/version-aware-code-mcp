@@ -48,20 +48,29 @@ const comparedPath = "processor.go"
 // compareContexts is an [engine.ContextSource] that is a Go map and nothing
 // else: what a tool test is about is what reaches the wire, and a real resolver
 // would answer that question no differently while making the test need git.
-type compareContexts map[string]vacctx.CodeContext
+//
+// Its values are the workspaces each context is — one repository apiece here,
+// which is what these tools can be asked about — so the member a comparison was
+// answered in is visible in the test rather than manufactured by the fake.
+type compareContexts map[string]vacctx.Workspace
 
-func (c compareContexts) Contexts() []vacctx.CodeContext {
+func (c compareContexts) Contexts(context.Context) ([]vacctx.Workspace, error) {
 	listed := slices.Collect(maps.Values(c))
-	slices.SortFunc(listed, func(a, b vacctx.CodeContext) int { return strings.Compare(a.ID, b.ID) })
-	return listed
+	slices.SortFunc(listed, func(a, b vacctx.Workspace) int { return strings.Compare(a.ID, b.ID) })
+	return listed, nil
 }
 
-func (c compareContexts) Resolve(_ context.Context, id string) (vacctx.CodeContext, error) {
-	codeCtx, ok := c[id]
+func (c compareContexts) Resolve(_ context.Context, id string) (vacctx.Workspace, error) {
+	workspace, ok := c[id]
 	if !ok {
-		return vacctx.CodeContext{}, vacerr.New(vacerr.ContextNotFound, "no context named "+id, map[string]any{"context": id})
+		return vacctx.Workspace{}, vacerr.New(vacerr.ContextNotFound, "no context named "+id, map[string]any{"context": id})
 	}
-	return codeCtx, nil
+	return workspace, nil
+}
+
+// single is the workspace a one-repository context is, filed under its own ID.
+func single(codeCtx vacctx.CodeContext) vacctx.Workspace {
+	return vacctx.Workspace{ID: codeCtx.ID, Members: []vacctx.CodeContext{codeCtx}}
 }
 
 // compareDiffSource is a source backend with the optional
@@ -295,7 +304,7 @@ func TestCompareCodeAbsentSideIsNull(t *testing.T) {
 func TestCompareCodeTypedErrorsRoundTrip(t *testing.T) {
 	diffing := func(source provider.SourceProvider) *engine.Engine {
 		return engine.New(
-			compareContexts{compareV1.ID: compareV1, compareV2.ID: compareV2, compareOther.ID: compareOther},
+			compareContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2), compareOther.ID: single(compareOther)},
 			nil, nil, source,
 		)
 	}
@@ -467,7 +476,7 @@ func comparisonTool(t *testing.T, name string) *mcp.Tool {
 func compareCodeSession(t *testing.T, source provider.SourceProvider) *mcp.ClientSession {
 	t.Helper()
 	return compareSession(t, engine.New(
-		compareContexts{compareV1.ID: compareV1, compareV2.ID: compareV2, compareOther.ID: compareOther},
+		compareContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2), compareOther.ID: single(compareOther)},
 		nil, nil, source,
 	))
 }

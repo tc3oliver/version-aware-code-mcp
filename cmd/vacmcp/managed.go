@@ -79,7 +79,7 @@ func managedConfig(s *store.Store, zoektURL, cbmCommand string) (*config.Config,
 	cfg := config.Config{
 		Providers:    config.Providers{Zoekt: config.Zoekt{URL: zoektURL}, CBM: config.CBM{Command: cbmCommand}},
 		Repositories: map[string]config.Repository{},
-		Contexts:     map[string]vacctx.CodeContext{},
+		Contexts:     map[string]vacctx.Workspace{},
 	}
 	for _, c := range contexts {
 		path, err := s.RepositoryDir(c.Repository)
@@ -92,11 +92,18 @@ func managedConfig(s *store.Store, zoektURL, cbmCommand string) (*config.Config,
 		// URL there would be a credential-adjacent field written into a file for
 		// no reader at all.
 		cfg.Repositories[c.Repository] = config.Repository{Path: path}
-		cfg.Contexts[c.ID] = vacctx.CodeContext{
-			Repository: c.Repository,
-			Branch:     c.Branch,
-			Revision:   c.Revision,
-			GraphRef:   c.GraphRef,
+		// One member, because one record is one repository at one revision. A
+		// managed context is built by indexing a single clone, so there is
+		// nothing here that could name a second one.
+		cfg.Contexts[c.ID] = vacctx.Workspace{
+			ID: c.ID,
+			Members: []vacctx.CodeContext{{
+				ID:         c.ID,
+				Repository: c.Repository,
+				Branch:     c.Branch,
+				Revision:   c.Revision,
+				GraphRef:   c.GraphRef,
+			}},
 		}
 	}
 

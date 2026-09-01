@@ -71,7 +71,7 @@ func TestGetCodeReturnsTheContextsOwnVersion(t *testing.T) {
 	// The whole record doc-1 requires: repository, branch, revision, path and
 	// line range travelling with the content.
 	for id, got := range map[string]getCodeWire{"demo-v1": v1, "demo-v2": v2} {
-		codeCtx := cfg.Contexts[id]
+		codeCtx := only(cfg, id)
 		if got.Context.ID != id {
 			t.Errorf("%s: context.id = %q, want %q", id, got.Context.ID, id)
 		}
@@ -109,13 +109,13 @@ func TestGetCodeReturnsTheContextsOwnVersion(t *testing.T) {
 // the configuration.
 func TestGetCodeReportsTheRevisionItRead(t *testing.T) {
 	cfg := getCodeConfig(t)
-	full := cfg.Contexts["demo-v2"].Revision
-	cfg.Contexts["demo-v2"] = vacctx.CodeContext{
+	full := only(cfg, "demo-v2").Revision
+	cfg.Contexts["demo-v2"] = single(vacctx.CodeContext{
 		Repository: "example/demo",
 		Branch:     demorepo.V2,
 		Revision:   demorepo.V2, // a branch name, which is a legal revision to declare
 		GraphRef:   "demo-v2-graph",
-	}
+	})
 
 	got, raw := getCodeCall(t, getCodeSession(t, cfg), "demo-v2", "processor.go", 4, 6)
 	if got.Context.Revision != full {
@@ -176,8 +176,8 @@ func TestGetCodeSourceMismatchFailsTheRequest(t *testing.T) {
 	repo := getCodeDivergedRepo(t)
 	cfg := &config.Config{
 		Repositories: map[string]config.Repository{"example/demo": {Path: repo.path}},
-		Contexts: map[string]vacctx.CodeContext{
-			"app-v1": {Repository: "example/demo", Branch: "release/1.x", Revision: repo.first, GraphRef: "app-v1-graph"},
+		Contexts: map[string]vacctx.Workspace{
+			"app-v1": single(vacctx.CodeContext{Repository: "example/demo", Branch: "release/1.x", Revision: repo.first, GraphRef: "app-v1-graph"}),
 		},
 	}
 
@@ -293,15 +293,15 @@ func getCodeConfig(t *testing.T) *config.Config {
 	repo := demorepo.Generate(t)
 	cfg := &config.Config{
 		Repositories: map[string]config.Repository{"example/demo": {Path: repo}},
-		Contexts:     map[string]vacctx.CodeContext{},
+		Contexts:     map[string]vacctx.Workspace{},
 	}
 	for id, branch := range map[string]string{"demo-main": demorepo.Main, "demo-v1": demorepo.V1, "demo-v2": demorepo.V2} {
-		cfg.Contexts[id] = vacctx.CodeContext{
+		cfg.Contexts[id] = single(vacctx.CodeContext{
 			Repository: "example/demo",
 			Branch:     branch,
 			Revision:   demorepo.Revision(t, repo, branch),
 			GraphRef:   id + "-graph",
-		}
+		})
 	}
 	return cfg
 }
@@ -456,4 +456,12 @@ func getCodeDivergedRepo(t *testing.T) getCodeDiverged {
 		t.Fatalf("removing %s: %v", object, err)
 	}
 	return r
+}
+
+// only is the one member a configured context in these tests has. Every context
+// here names a single repository, which is what the tools can be asked about,
+// and reading the member rather than the context is what keeps these assertions
+// about the version that answered rather than about the name it answered under.
+func only(cfg *config.Config, id string) vacctx.CodeContext {
+	return cfg.Contexts[id].Members[0]
 }

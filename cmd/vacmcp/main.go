@@ -236,7 +236,9 @@ func validate(args []string, out io.Writer) error {
 	return err
 }
 
-// contexts lists the configured contexts, one per line, sorted by ID.
+// contexts lists the configured contexts, sorted by ID: one line per repository
+// a context names, which for a context naming one — every context this server
+// answers a query in — is one line per context.
 //
 // graph_ref is left out on purpose: it is the CBM project backing the context,
 // an implementation detail no consumer of a context needs.
@@ -246,9 +248,10 @@ func contexts(args []string, out io.Writer) error {
 		return err
 	}
 	for _, id := range slices.Sorted(maps.Keys(cfg.Contexts)) {
-		codeCtx := cfg.Contexts[id]
-		if _, err := fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", codeCtx.ID, codeCtx.Repository, codeCtx.Branch, codeCtx.Revision); err != nil {
-			return err
+		for _, member := range cfg.Contexts[id].Members {
+			if _, err := fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", id, member.Repository, member.Branch, member.Revision); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

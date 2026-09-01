@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -70,13 +71,33 @@ func contextIn(revision string) vacctx.CodeContext {
 	}
 }
 
+// single is the workspace one repository is: exactly one member, which is what
+// every context a configuration could write before this type existed still is.
+func single(codeCtx vacctx.CodeContext) vacctx.Workspace {
+	return vacctx.Workspace{ID: codeCtx.ID, Members: []vacctx.CodeContext{codeCtx}}
+}
+
 // configFor wires r up as the repository behind a single context declaring
 // revision.
 func configFor(r repo, revision string) *config.Config {
 	return &config.Config{
 		Repositories: map[string]config.Repository{"example/backend": {Path: r.path}},
-		Contexts:     map[string]vacctx.CodeContext{"app-v2": contextIn(revision)},
+		Contexts:     map[string]vacctx.Workspace{"app-v2": single(contextIn(revision))},
 	}
+}
+
+// resolveOne resolves id and returns the one member it must have. Anything else
+// is a failure of the test's premise rather than of what it is checking.
+func resolveOne(t *testing.T, res *resolver.Resolver, id string) (vacctx.CodeContext, error) {
+	t.Helper()
+	workspace, err := res.Resolve(t.Context(), id)
+	if err != nil {
+		return vacctx.CodeContext{}, err
+	}
+	if len(workspace.Members) != 1 {
+		t.Fatalf("Resolve(%q) = %d members, want the one it was configured with", id, len(workspace.Members))
+	}
+	return workspace.Members[0], nil
 }
 
 // errorOf fails the test unless err is a *vacerr.Error, and returns it.
@@ -94,7 +115,7 @@ func errorOf(t *testing.T, err error) *vacerr.Error {
 func TestResolveConfiguredContext(t *testing.T) {
 	r := newRepo(t)
 
-	got, err := resolver.New(configFor(r, r.head)).Resolve(t.Context(), "app-v2")
+	got, err := resolveOne(t, resolver.New(configFor(r, r.head)), "app-v2")
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -119,15 +140,15 @@ func TestResolveTwoContextsOverOneRepository(t *testing.T) {
 	// is privileged.
 	cfg := &config.Config{
 		Repositories: map[string]config.Repository{"example/backend": {Path: r.path}},
-		Contexts: map[string]vacctx.CodeContext{
-			"app-v1": {Repository: "example/backend", Branch: "release/1.x", Revision: r.first, GraphRef: "backend-v1"},
-			"app-v2": {Repository: "example/backend", Branch: "release/2.x", Revision: r.head, GraphRef: "backend-v2"},
+		Contexts: map[string]vacctx.Workspace{
+			"app-v1": single(vacctx.CodeContext{Repository: "example/backend", Branch: "release/1.x", Revision: r.first, GraphRef: "backend-v1"}),
+			"app-v2": single(vacctx.CodeContext{Repository: "example/backend", Branch: "release/2.x", Revision: r.head, GraphRef: "backend-v2"}),
 		},
 	}
 	res := resolver.New(cfg)
 
 	for id, wantRevision := range map[string]string{"app-v1": r.first, "app-v2": r.head} {
-		got, err := res.Resolve(t.Context(), id)
+		got, err := resolveOne(t, res, id)
 		if err != nil {
 			t.Fatalf("Resolve(%q) error = %v; both versions of one repository must resolve", id, err)
 		}
@@ -142,7 +163,7 @@ func TestResolveTwoContextsOverOneRepository(t *testing.T) {
 func TestResolveAcceptsAbbreviatedRevision(t *testing.T) {
 	r := newRepo(t)
 
-	got, err := resolver.New(configFor(r, r.head[:7])).Resolve(t.Context(), "app-v2")
+	got, err := resolveOne(t, resolver.New(configFor(r, r.head[:7])), "app-v2")
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -168,8 +189,8 @@ func TestResolveUnknownContextID(t *testing.T) {
 			if code := errorOf(t, err).Code; code != vacerr.ContextNotFound {
 				t.Errorf("code = %q, want CONTEXT_NOT_FOUND", code)
 			}
-			if got != (vacctx.CodeContext{}) {
-				t.Errorf("Resolve(%q) = %+v, want the zero context", id, got)
+			if !reflect.DeepEqual(got, vacctx.Workspace{}) {
+				t.Errorf("Resolve(%q) = %+v, want the zero workspace", id, got)
 			}
 		})
 	}
@@ -286,8 +307,8 @@ func TestResolveUnknownRevision(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Resolve() = %+v, want error", got)
 	}
-	if got != (vacctx.CodeContext{}) {
-		t.Errorf("Resolve() = %+v, want the zero context", got)
+	if !reflect.DeepEqual(got, vacctx.Workspace{}) {
+		t.Errorf("Resolve() = %+v, want the zero workspace", got)
 	}
 	if code := errorOf(t, err).Code; code != vacerr.RevisionNotFound {
 		t.Errorf("code = %q, want REVISION_NOT_FOUND", code)
@@ -310,11 +331,129 @@ func TestResolveFromLoadedConfig(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	got, err := resolver.New(cfg).Resolve(t.Context(), "app-v2")
+	got, err := resolveOne(t, resolver.New(cfg), "app-v2")
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
 	if got.ID != "app-v2" || got.Revision != r.head || got.GraphRef != "backend-v2" {
 		t.Errorf("Resolve() = %+v", got)
+	}
+}
+
+// A context naming two repositories resolves both, and each member keeps the
+// revision it was pinned to: sharing a context is not sharing a version.
+func TestResolveMultiRepositoryContext(t *testing.T) {
+	backend, frontend := newRepo(t), newRepo(t)
+	cfg := &config.Config{
+		Repositories: map[string]config.Repository{
+			"example/backend":  {Path: backend.path},
+			"example/frontend": {Path: frontend.path},
+		},
+		Contexts: map[string]vacctx.Workspace{"release-5": {Members: []vacctx.CodeContext{
+			{Repository: "example/backend", Branch: "release/5.x", Revision: backend.first, GraphRef: "backend-v5"},
+			{Repository: "example/frontend", Branch: "main", Revision: frontend.head, GraphRef: "frontend-v5"},
+		}}},
+	}
+
+	got, err := resolver.New(cfg).Resolve(t.Context(), "release-5")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	want := vacctx.Workspace{ID: "release-5", Members: []vacctx.CodeContext{
+		{ID: "release-5", Repository: "example/backend", Branch: "release/5.x", Revision: backend.first, GraphRef: "backend-v5"},
+		{ID: "release-5", Repository: "example/frontend", Branch: "main", Revision: frontend.head, GraphRef: "frontend-v5"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Resolve() = %+v, want %+v", got, want)
+	}
+}
+
+// One member that cannot be resolved fails the whole context, and nothing
+// usable comes back beside the error.
+//
+// There is deliberately no partial workspace. A context is the scope of one
+// question, so a resolver that dropped the member it could not check would hand
+// back a scope narrower than the one the caller named — and every answer given
+// in it would be missing a repository without saying so.
+func TestResolveFailsTheWholeContextWhenOneMemberDoesNot(t *testing.T) {
+	backend, frontend := newRepo(t), newRepo(t)
+	repositories := map[string]config.Repository{
+		"example/backend":  {Path: backend.path},
+		"example/frontend": {Path: frontend.path},
+	}
+	// The good member is first, so a resolver that stopped at the first failure
+	// has already succeeded at something by the time it reaches the bad one.
+	good := vacctx.CodeContext{Repository: "example/backend", Branch: "release/5.x", Revision: backend.head, GraphRef: "backend-v5"}
+
+	for name, tc := range map[string]struct {
+		member vacctx.CodeContext
+		want   vacerr.Code
+	}{
+		"a revision that repository does not have": {
+			vacctx.CodeContext{Repository: "example/frontend", Branch: "main", Revision: "0123456789abcdef0123456789abcdef01234567", GraphRef: "frontend-v5"},
+			vacerr.RevisionNotFound,
+		},
+		"a repository that is not configured": {
+			vacctx.CodeContext{Repository: "example/mobile", Branch: "main", Revision: frontend.head, GraphRef: "mobile-v5"},
+			vacerr.RepositoryNotFound,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{
+				Repositories: repositories,
+				Contexts:     map[string]vacctx.Workspace{"release-5": {Members: []vacctx.CodeContext{good, tc.member}}},
+			}
+
+			got, err := resolver.New(cfg).Resolve(t.Context(), "release-5")
+			if err == nil {
+				t.Fatalf("Resolve() = %+v, want error", got)
+			}
+			if code := errorOf(t, err).Code; code != tc.want {
+				t.Errorf("code = %q, want %q", code, tc.want)
+			}
+			if !reflect.DeepEqual(got, vacctx.Workspace{}) {
+				t.Errorf("Resolve() = %+v, want the zero workspace: half a scope is not a scope", got)
+			}
+		})
+	}
+}
+
+// Contexts reports what is configured, with every member filed under the key its
+// context is written at. The IDs are the key's and not the file's, because a
+// hand-built configuration may not have filled them in and a member without an
+// ID cannot be cited.
+func TestContextsFilesEveryMemberUnderItsContextID(t *testing.T) {
+	backend, frontend := newRepo(t), newRepo(t)
+	cfg := &config.Config{
+		Repositories: map[string]config.Repository{
+			"example/backend":  {Path: backend.path},
+			"example/frontend": {Path: frontend.path},
+		},
+		Contexts: map[string]vacctx.Workspace{"release-5": {Members: []vacctx.CodeContext{
+			{Repository: "example/backend", Branch: "release/5.x", Revision: backend.first, GraphRef: "backend-v5"},
+			{Repository: "example/frontend", Branch: "main", Revision: frontend.head, GraphRef: "frontend-v5"},
+		}}},
+	}
+
+	listed, err := resolver.New(cfg).Contexts(t.Context())
+	if err != nil {
+		t.Fatalf("Contexts() error = %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != "release-5" || len(listed[0].Members) != 2 {
+		t.Fatalf("Contexts() = %+v, want the one context with both its members", listed)
+	}
+	for _, member := range listed[0].Members {
+		if member.ID != "release-5" {
+			t.Errorf("member %+v is filed under %q, want its context's ID", member, member.ID)
+		}
+	}
+
+	// The configuration is not the Resolver's to rewrite: a caller that found
+	// the IDs written back into it would be reading a file that no longer says
+	// what it says on disk.
+	for _, member := range cfg.Contexts["release-5"].Members {
+		if member.ID != "" {
+			t.Errorf("Contexts() wrote %q back into the configuration", member.ID)
+		}
 	}
 }

@@ -37,8 +37,8 @@ func TestCompareCallsReportsAddedAndRemovedEdges(t *testing.T) {
 		t.Errorf("requested %q, resolved %q and %q, want both versions to have resolved it",
 			got.RequestedSymbol, got.FromResolvedSymbol, got.ToResolvedSymbol)
 	}
-	assertComparedSide(t, "from", got.From, raw, true, cfg.Contexts[v1])
-	assertComparedSide(t, "to", got.To, raw, true, cfg.Contexts[v2])
+	assertComparedSide(t, "from", got.From, raw, true, only(cfg, v1))
+	assertComparedSide(t, "to", got.To, raw, true, only(cfg, v2))
 
 	// The v2 call, which only the to version makes.
 	added := relationIn(t, got.Added, "added", "Process", "NewHandler")
@@ -83,8 +83,8 @@ func TestCompareCallsReportsAnUnchangedEdge(t *testing.T) {
 	if got.Presence != "BOTH" {
 		t.Errorf("presence = %q, want BOTH: both releases declare Keep", got.Presence)
 	}
-	assertComparedSide(t, "from", got.From, raw, true, cfg.Contexts[v1])
-	assertComparedSide(t, "to", got.To, raw, true, cfg.Contexts[v2])
+	assertComparedSide(t, "from", got.From, raw, true, only(cfg, v1))
+	assertComparedSide(t, "to", got.To, raw, true, only(cfg, v2))
 
 	unchanged := relationIn(t, got.Unchanged, "unchanged", "Keep", "SharedHandler")
 	if unchanged.Path != "shared.go" {
@@ -125,8 +125,8 @@ func TestCompareCallsReportsASymbolOnlyOneVersionHas(t *testing.T) {
 			if got.Presence != tc.presence {
 				t.Errorf("presence = %q, want %s", got.Presence, tc.presence)
 			}
-			assertComparedSide(t, "from", got.From, raw, tc.from, cfg.Contexts[v1])
-			assertComparedSide(t, "to", got.To, raw, tc.to, cfg.Contexts[v2])
+			assertComparedSide(t, "from", got.From, raw, tc.from, only(cfg, v1))
+			assertComparedSide(t, "to", got.To, raw, tc.to, only(cfg, v2))
 
 			// The version without the symbol resolved nothing, and says so with an
 			// empty string rather than by echoing the request back.

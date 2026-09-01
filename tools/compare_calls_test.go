@@ -230,7 +230,7 @@ func TestCompareCallsAbsentSideIsNull(t *testing.T) {
 // AC #4: every typed error reaches the client as the error model's own envelope,
 // with the code intact and no half-answer beside it.
 func TestCompareCallsTypedErrorsRoundTrip(t *testing.T) {
-	contexts := compareContexts{compareV1.ID: compareV1, compareV2.ID: compareV2, compareOther.ID: compareOther}
+	contexts := compareContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2), compareOther.ID: single(compareOther)}
 	graphs := compareGraph{compareV1.ID: compareFromGraph, compareV2.ID: compareToGraph, compareOther.ID: compareToGraph}
 
 	for name, tc := range map[string]struct {
@@ -286,7 +286,7 @@ func TestCompareCallsTypedErrorsRoundTrip(t *testing.T) {
 func compareCallsSession(t *testing.T, graphs compareGraph) *mcp.ClientSession {
 	t.Helper()
 	return compareSession(t, engine.New(
-		compareContexts{compareV1.ID: compareV1, compareV2.ID: compareV2, compareOther.ID: compareOther},
+		compareContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2), compareOther.ID: single(compareOther)},
 		nil, graphs, nil,
 	))
 }
