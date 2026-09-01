@@ -45,8 +45,8 @@ type compareCodeInput struct {
 //
 // An absent side — the version that does not have the compared file or symbol —
 // is nil, and marshals to JSON null. It is null rather than a {"present": false}
-// object because an absent side has nothing to report: [evidence.New] refuses to
-// build an output without a complete context, by design, so an object here could
+// object because an absent side has nothing to report: [evidence.NewWorkspace]
+// refuses to build an output without a complete context, so an object here could
 // only be a hollow one, and a "present" field beside it would be a second thing
 // that can disagree with the first. null is one value a client cannot mistake
 // for a side that has something to say, and both comparison tools emit it.
@@ -54,7 +54,10 @@ func side(s engine.ComparisonSide) (*evidence.Output, error) {
 	if !s.Present() {
 		return nil, nil
 	}
-	out, err := evidence.New(s.Context(), s.Evidence()...)
+	// A present side is one version, which is a workspace of one member — a
+	// comparison refuses a context naming several — so this marshals to the flat
+	// context block a single-context tool emits.
+	out, err := evidence.NewWorkspace(s.Context(), s.Evidence()...)
 	if err != nil {
 		return nil, err
 	}

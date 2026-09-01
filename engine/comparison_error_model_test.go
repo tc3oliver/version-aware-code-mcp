@@ -189,7 +189,7 @@ func TestEveryComparisonAnswersWhenOnlyOneVersionHasIt(t *testing.T) {
 // absent side carries none and cites nothing.
 func assertOneSidedAnswer(t *testing.T, absent, present engine.ComparisonSide, presentIn vacctx.CodeContext) {
 	t.Helper()
-	if !present.Present() || present.Context() != presentIn {
+	if !present.Present() || answeredIn(t, present) != presentIn {
 		t.Fatalf("the surviving side reports context %+v and Present %v, want the version that has it",
 			present.Context(), present.Present())
 	}

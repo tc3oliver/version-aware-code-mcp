@@ -80,7 +80,13 @@ func AddSearchCode(srv *mcp.Server, eng *engine.Engine) {
 			matches = append(matches, searchMatch{Path: match.Path, Line: match.Line, Snippet: match.Snippet})
 		}
 
-		out, err := evidence.New(result.Context(), result.Evidence()...)
+		// NewWorkspace rather than New, because a search is answered in the whole
+		// workspace it ran in: the citations are passed on grouped exactly as the
+		// engine grouped them, so each one goes out attributed to the member it
+		// was found in and no attribution is decided here. A workspace of one
+		// member — every context this tool could answer before — marshals to the
+		// same bytes New produced for it.
+		out, err := evidence.NewWorkspace(result.Context(), result.Evidence()...)
 		if err != nil {
 			// The engine only returns a result it could scope, so this is a bug
 			// rather than a caller's mistake. It is still reported instead of

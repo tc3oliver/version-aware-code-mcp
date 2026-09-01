@@ -21,8 +21,8 @@ func TestASideBuiltHereKeepsItsOwnVersionAndCitations(t *testing.T) {
 	fromCite := evidence.At("handler.go", 42, 44, "")
 	toCite := evidence.At("handler.go", 51, 55, "")
 
-	from := ComparisonSide{answer{fromCtx, []evidence.Evidence{fromCite}}}
-	to := ComparisonSide{answer{toCtx, []evidence.Evidence{toCite}}}
+	from := ComparisonSide{inOneMember(fromCtx, []evidence.Evidence{fromCite})}
+	to := ComparisonSide{inOneMember(toCtx, []evidence.Evidence{toCite})}
 
 	for _, side := range []struct {
 		name    string
@@ -36,11 +36,15 @@ func TestASideBuiltHereKeepsItsOwnVersionAndCitations(t *testing.T) {
 		if !side.side.Present() {
 			t.Errorf("the %s side was built with a version and reports Present false", side.name)
 		}
-		if got := side.side.Context(); got != side.codeCtx {
-			t.Errorf("the %s side reports context %+v, want %+v", side.name, got, side.codeCtx)
+		// One member, and it is this side's own version: a side is a workspace
+		// like every other answer here, and the one it is answered in has the
+		// version it was built with and nothing of the other side's.
+		if got := side.side.Context(); got.ID != side.codeCtx.ID ||
+			len(got.Members) != 1 || got.Members[0] != side.codeCtx {
+			t.Errorf("the %s side reports context %+v, want a workspace of only %+v", side.name, got, side.codeCtx)
 		}
 		got := side.side.Evidence()
-		if len(got) != 1 || got[0] != side.cite {
+		if len(got) != 1 || len(got[0]) != 1 || got[0][0] != side.cite {
 			t.Errorf("the %s side cites %+v, want only %+v: a side cites its own version and no other",
 				side.name, got, side.cite)
 		}

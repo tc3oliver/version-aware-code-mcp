@@ -257,7 +257,7 @@ func TestCompareCodeReportsAFileFoundInOnlyOneVersion(t *testing.T) {
 			if tc.change == engine.CodeAdded {
 				side, absent = out.To(), out.From()
 			}
-			if !side.Present() || side.Context() != tc.present {
+			if !side.Present() || answeredIn(t, side) != tc.present {
 				t.Fatalf("the surviving side reports context %+v and Present %v, want the version that has the file",
 					side.Context(), side.Present())
 			}
@@ -270,7 +270,7 @@ func TestCompareCodeReportsAFileFoundInOnlyOneVersion(t *testing.T) {
 			// Present with nothing worth citing is not absent: a whole file's
 			// diff has no one line to point at, and an empty list says so where
 			// nil would say "this is not an answer".
-			if side.Evidence() == nil {
+			if citedIn(t, side) == nil {
 				t.Error("the surviving side cites nil, want an empty list: it is present, not absent")
 			}
 			if out.Path() != comparedPath {
@@ -362,7 +362,7 @@ func TestCompareCodeOfOneVersionWithItselfReportsNoChange(t *testing.T) {
 	if len(out.Hunks()) != 0 {
 		t.Errorf("comparing a version with itself reported hunks %+v", out.Hunks())
 	}
-	if out.From().Context() != compareV1 || out.To().Context() != compareV1 {
+	if answeredIn(t, out.From()) != compareV1 || answeredIn(t, out.To()) != compareV1 {
 		t.Fatalf("the sides report from=%+v to=%+v, want both in the one version compared",
 			out.From().Context(), out.To().Context())
 	}
@@ -456,7 +456,7 @@ func TestCompareCodeNeedsOnlyContextsAndASourceThatCanDiff(t *testing.T) {
 	if out.Change() != engine.CodeModified {
 		t.Fatalf("change is %q, want %q", out.Change(), engine.CodeModified)
 	}
-	if out.From().Context() != compareV1 || out.To().Context() != compareV2 {
+	if answeredIn(t, out.From()) != compareV1 || answeredIn(t, out.To()) != compareV2 {
 		t.Fatalf("the sides report from=%+v to=%+v, want the two versions compared", out.From().Context(), out.To().Context())
 	}
 	assertBothSidesPresent(t, out)
@@ -470,7 +470,7 @@ func assertBothSidesPresent(t *testing.T, out engine.CompareCodeResult) {
 	if !out.From().Present() || !out.To().Present() {
 		t.Fatalf("a file both versions have reports Present from=%v to=%v", out.From().Present(), out.To().Present())
 	}
-	if out.From().Evidence() == nil || out.To().Evidence() == nil {
+	if citedIn(t, out.From()) == nil || citedIn(t, out.To()) == nil {
 		t.Errorf("a present side cites nil, want an empty list: from=%+v to=%+v", out.From().Evidence(), out.To().Evidence())
 	}
 }

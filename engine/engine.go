@@ -7,10 +7,12 @@
 // call needs no server, no transport and no wire schema, so a test of "this
 // query ran in that version and no other" is a function call.
 //
-// Every request type names its scope with a context ID and nothing else. There
-// is deliberately no repository, branch or revision field on any of them: the
-// scope comes from the configuration the context ID names, so a caller cannot
-// widen or redirect the version it is answered in.
+// Every request type names its scope with a context ID. There is deliberately
+// no branch or revision field on any of them: the scope comes from the
+// configuration the context ID names, so a caller cannot widen or redirect the
+// version it is answered in. A repository field, where a request has one, picks
+// one of the repositories that context already names and can reach no further —
+// see [selectMembers].
 //
 // Every result type answers the same way round: it has no exported fields, so
 // the only ones that exist outside this package came out of a method here, and
@@ -153,8 +155,8 @@ func require(id, name, value string) error {
 	)
 }
 
-// resolve returns the one member of the workspace id names, once every member
-// of it is complete enough to scope a query with.
+// resolve returns the whole workspace id names, once every member of it is
+// complete enough to scope a query with.
 //
 // The fields are re-checked here, after the [ContextSource] has already had its
 // say, because [ContextSource] is an interface: whichever implementation is
@@ -163,30 +165,27 @@ func require(id, name, value string) error {
 // handed an empty revision reads whatever the checkout happens to be on, which
 // is the cross-version answer this server exists to refuse. The ID is checked
 // with them because it is what every result and every citation is scoped by:
-// without it [evidence.New] refuses the answer downstream, with an error that
-// is not a *[vacerr.Error] and names no context.
+// without it [evidence.NewWorkspace] refuses the answer downstream, with an
+// error that is not a *[vacerr.Error] and names no context.
 //
-// Every member is checked and not only the one that will be used, because the
-// workspace is what the caller named: a member this query happens not to reach
-// is still part of the scope it asked about, and one that is unusable makes the
-// scope unusable rather than smaller.
+// Every member is checked and not only the ones a given query will reach,
+// because the workspace is what the caller named: a member this query happens
+// not to reach is still part of the scope it asked about, and one that is
+// unusable makes the scope unusable rather than smaller.
 //
 // GraphRef is not checked here, because only [Engine.TraceCalls] reads a graph:
 // requiring it of all three would leave a caller with no graph backend at all
 // unable to search, which is the independent failure of the providers given up
 // at the [ContextSource]. It is checked where it is used.
 //
-// The single member is where this server currently stops. A context naming
-// several repositories parses, resolves and lists, and then every query refuses
-// it with the error [severalRepositories] builds, because expanding a query over
-// several members is not implemented here yet. Answering in the first member
-// would be the one thing worse than refusing: a whole repository's worth of code
-// silently outside the scope of an answer that names the context the caller
-// asked for.
-func (e *Engine) resolve(ctx context.Context, id string) (vacctx.CodeContext, error) {
+// It hands back the workspace rather than a member of it, because how many
+// members a query answers in is the query's own to decide: [Engine.SearchCode]
+// answers in all of them, and the queries that can still only answer in one say
+// so by calling [Engine.resolveMember].
+func (e *Engine) resolve(ctx context.Context, id string) (vacctx.Workspace, error) {
 	workspace, err := e.contexts.Resolve(ctx, id)
 	if err != nil {
-		return vacctx.CodeContext{}, err
+		return vacctx.Workspace{}, err
 	}
 	for _, member := range workspace.Members {
 		for _, field := range []struct{ name, value string }{
@@ -196,14 +195,86 @@ func (e *Engine) resolve(ctx context.Context, id string) (vacctx.CodeContext, er
 			{"revision", member.Revision},
 		} {
 			if err := require(id, field.name, field.value); err != nil {
-				return vacctx.CodeContext{}, err
+				return vacctx.Workspace{}, err
 			}
 		}
 	}
-	if len(workspace.Members) != 1 {
+	return workspace, nil
+}
+
+// selectMembers returns the members of workspace a request's repository
+// argument selects: the one member naming that repository, or every member when
+// it is blank. id is the context the request named, for the errors.
+//
+// This is the only way a request may say anything about a repository, and it
+// only ever narrows: the candidates are the members the context already names,
+// so a repository outside the workspace selects nothing rather than reaching a
+// repository the configuration never granted. That refusal is
+// [vacerr.InvalidArgument] and carries the repositories that *are* selectable,
+// because a caller cannot see the configuration and, told only "no", cannot tell
+// whether it misspelled a name or asked about the wrong context.
+//
+// The two failures it rules out are the ones that look like an answer. An empty
+// result would read as "this version has no such code", which is a claim about
+// code this server was never asked about. Falling back to some member — the
+// first, or the only one there happens to be — would answer in a version the
+// caller named nothing of, under the name of the one it did.
+//
+// A blank repository selects every member rather than defaulting to one, because
+// a context is what the caller asked in and every repository in it is part of
+// that question. A workspace with no member at all selects nothing and is
+// refused before either branch: there is no version to answer in, which is what
+// [severalRepositories] says for it.
+//
+// The first member naming the repository wins, and there is never a second: the
+// configuration refuses one repository declared twice in one workspace, because
+// two entries pin two revisions of it and a name is not enough to say which was
+// meant.
+func selectMembers(id, repository string, workspace vacctx.Workspace) ([]vacctx.CodeContext, error) {
+	if len(workspace.Members) == 0 {
+		return nil, severalRepositories(id, workspace)
+	}
+	if strings.TrimSpace(repository) == "" {
+		return workspace.Members, nil
+	}
+
+	selectable := make([]string, 0, len(workspace.Members))
+	for _, member := range workspace.Members {
+		if member.Repository == repository {
+			return []vacctx.CodeContext{member}, nil
+		}
+		selectable = append(selectable, member.Repository)
+	}
+	return nil, vacerr.New(
+		vacerr.InvalidArgument,
+		fmt.Sprintf("context %q does not name repository %q; it names %s",
+			id, repository, strings.Join(selectable, ", ")),
+		map[string]any{"context": id, "repository": repository, "repositories": selectable},
+	)
+}
+
+// resolveMember resolves id and picks the single member of it that repository
+// selects, for a query that can only be answered in one repository.
+//
+// A blank repository is only usable here when the workspace has exactly one
+// member; anything else is [severalRepositories], because a query that answers
+// in one version cannot be handed a context naming several and pick. Answering
+// in the first would be the one thing worse than refusing: a whole repository's
+// worth of code silently outside the scope of an answer that names the context
+// the caller asked for.
+func (e *Engine) resolveMember(ctx context.Context, id, repository string) (vacctx.CodeContext, error) {
+	workspace, err := e.resolve(ctx, id)
+	if err != nil {
+		return vacctx.CodeContext{}, err
+	}
+	members, err := selectMembers(id, repository, workspace)
+	if err != nil {
+		return vacctx.CodeContext{}, err
+	}
+	if len(members) != 1 {
 		return vacctx.CodeContext{}, severalRepositories(id, workspace)
 	}
-	return workspace.Members[0], nil
+	return members[0], nil
 }
 
 // severalRepositories refuses a workspace this server cannot answer a question
@@ -246,35 +317,96 @@ func severalRepositories(id string, workspace vacctx.Workspace) error {
 // checkable at its source. It is embedded in all three result types so that
 // half is written once and cannot be forgotten by one of them.
 //
+// It is shaped like [evidence.NewWorkspace] and for the same reason: a
+// workspace, plus one list of citations per member of it, in the same order.
+// A citation's provenance is therefore its position, so there is no repository
+// name for anything above to write down and no way to leave a citation
+// unattributed. A query answered in one repository is a workspace of one
+// member, which is not a special case with a second code path but the general
+// shape at length one — and, by the rule [evidence.Output] keeps, the one that
+// still marshals to exactly the bytes v0.4.0 emitted.
+//
 // Its fields are unexported and so is the type, which is what makes the
 // contract structural: no code outside this package can name the field to fill
 // it in, so the only results carrying a context are the ones a method here
 // built.
 type answer struct {
-	codeCtx   vacctx.CodeContext
-	citations []evidence.Evidence
+	workspace vacctx.Workspace
+	cited     [][]evidence.Evidence
 }
 
-// Context reports the version the query was answered in — the same context the
-// provider was handed, except that [Engine.GetCode] reports the revision the
-// bytes actually came from.
-func (a answer) Context() vacctx.CodeContext { return a.codeCtx }
+// inOneMember is the answer of a query that ran in exactly one repository: the
+// workspace it was answered in has that member and no other, and every citation
+// belongs to it. It is what [Engine.GetCode], [Engine.TraceCalls] and each side
+// of a comparison build, so the one-member shape is written once rather than
+// spelled out at every call site where it could be spelled wrong.
+func inOneMember(codeCtx vacctx.CodeContext, citations []evidence.Evidence) answer {
+	return answer{
+		workspace: vacctx.Workspace{ID: codeCtx.ID, Members: []vacctx.CodeContext{codeCtx}},
+		cited:     [][]evidence.Evidence{citations},
+	}
+}
 
-// Evidence reports where the answer can be checked. On a successful result it
-// is non-nil, and empty only when there was nothing to cite.
+// Context reports the version the query was answered in: the workspace, whose
+// members are the contexts the providers were handed — except that
+// [Engine.GetCode] reports the revision the bytes actually came from.
+//
+// It is the whole workspace rather than one member of it because that is what
+// the caller asked in. A query narrowed to one repository is answered in a
+// workspace of that one member, so what comes back is the scope of the answer
+// and never the scope of the question it was cut out of.
+func (a answer) Context() vacctx.Workspace { return a.workspace }
+
+// Evidence reports where the answer can be checked, as one list per member of
+// [answer.Context], in the same order: Evidence()[i] was found in
+// Context().Members[i]. That pairing is what [evidence.NewWorkspace] takes, and
+// passing it on unchanged is all a caller has to do to keep every citation
+// attributed to the repository it came from.
+//
+// On a successful result it is non-nil and has one list per member; a member
+// that found nothing has an empty list of its own, which says "checked, found
+// none" rather than leaving the count to be guessed at.
 //
 // nil is the zero value, and so is what every failed call reports: the error
 // paths of [Engine.SearchCode], [Engine.TraceCalls] and [Engine.GetCode] all
 // return the zero result beside the error. nil therefore means "this is not an
 // answer" — a result nobody built, or one that was not reached — and never "an
 // answer that cited nothing", which is the empty list.
-func (a answer) Evidence() []evidence.Evidence { return a.citations }
+func (a answer) Evidence() [][]evidence.Evidence { return a.cited }
 
-// SearchCodeRequest is a search inside one version context. Where to search is
-// the context's to say, which is why there is no repository or branch here.
+// SearchCodeRequest is a search inside one version context.
+//
+// Repository narrows the search to the one repository of the context that names
+// it, and is the only thing a request may say about where to look. Left blank —
+// which is what a context over a single repository never needs to fill in — the
+// search covers every repository the context names. It selects, it does not
+// scope: a repository the context does not name is refused rather than searched,
+// so the answer is bounded by the configuration either way. See [selectMembers].
 type SearchCodeRequest struct {
-	Context string
-	Query   string
+	Context    string
+	Repository string
+	Query      string
+}
+
+// Match is one search hit, with the repository and revision it was found in.
+//
+// Its fields are exported because it carries no claim of its own: it is a leaf
+// of a result, in the way [CallRelation] is, and the version claim around it
+// lives on the [SearchCodeResult] that no caller outside this package can forge.
+//
+// Repository and Revision are the searched member's own and are copied off the
+// context that was handed to the provider, never read back out of what the
+// provider returned. A search backend that indexes several branches of a
+// repository into one shard has a version of its own to report per file, and it
+// has been measured naming the default branch's commit for a file matched on
+// another branch — so a match's version is decided by which member was asked
+// rather than by what came back from asking.
+type Match struct {
+	Repository string
+	Revision   string
+	Path       string
+	Line       int
+	Snippet    string
 }
 
 // SearchCodeResult is the matches with the version they were found in and one
@@ -282,12 +414,21 @@ type SearchCodeRequest struct {
 // purpose: for a search the match is its own citation.
 type SearchCodeResult struct {
 	answer
-	matches []provider.SearchResult
+	matches []Match
 }
 
-// Matches reports the matches in the provider's ranked order. It is empty, not
-// an error, when nothing in this version matched.
-func (r SearchCodeResult) Matches() []provider.SearchResult { return r.matches }
+// Matches reports the matches grouped by the member they were found in, in the
+// order [answer.Context] lists those members, and inside a group in that
+// provider's ranked order.
+//
+// There is deliberately no ranking across the groups. Each member is a separate
+// query to the search backend, and the scores two of them come back with are not
+// comparable, so one merged ranking could only be invented — and an invented
+// order changes with the input rather than with the code, which is the kind of
+// answer that cannot be reproduced.
+//
+// It is empty, not an error, when nothing in any of those versions matched.
+func (r SearchCodeResult) Matches() []Match { return r.matches }
 
 // TraceCallsRequest is a walk of the call graph around one symbol, inside one
 // version context.
@@ -357,7 +498,8 @@ func (e *Engine) ListContexts(ctx context.Context) ([]vacctx.Workspace, error) {
 	return listed, nil
 }
 
-// SearchCode searches the code of the context req names.
+// SearchCode searches the code of the context req names, in every repository it
+// names or in the one req.Repository picks out of them.
 //
 // The context is resolved before anything else: an ID that names no configured
 // version has no search to run, and guessing one would answer from a version
@@ -366,10 +508,27 @@ func (e *Engine) ListContexts(ctx context.Context) ([]vacctx.Workspace, error) {
 // [vacerr.ContextNotFound] and never an empty result, which would read as "this
 // version has no such code".
 //
+// A workspace of several repositories is one query per member, each handed that
+// member's own [vacctx.CodeContext]. That is why aggregating happens here and
+// [provider.SearchProvider] is untouched: a search backend confines a query to
+// the repository and branch it was given, and running it once per member applies
+// that confinement once per member rather than asking a backend to understand a
+// set of versions it would then have to keep apart itself.
+//
+// One member failing fails the whole search, with that member's error and no
+// matches beside it. Reporting the members that did answer would be the worst
+// available answer: a caller comparing versions would read the gap as "this
+// repository has none of this code", and a failure that reads as a finding is
+// the mistake this server exists to prevent.
+//
 // It reaches no graph provider, which is doc-1 §23's eighth success criterion
 // held in the code: search answers whether or not CBM is present.
 func (e *Engine) SearchCode(ctx context.Context, req SearchCodeRequest) (SearchCodeResult, error) {
-	codeCtx, err := e.resolve(ctx, req.Context)
+	workspace, err := e.resolve(ctx, req.Context)
+	if err != nil {
+		return SearchCodeResult{}, err
+	}
+	members, err := selectMembers(req.Context, req.Repository, workspace)
 	if err != nil {
 		return SearchCodeResult{}, err
 	}
@@ -387,19 +546,39 @@ func (e *Engine) SearchCode(ctx context.Context, req SearchCodeRequest) (SearchC
 		)
 	}
 
-	matches, err := e.search.Search(ctx, codeCtx, provider.SearchQuery{Query: req.Query})
-	if err != nil {
-		return SearchCodeResult{}, err
+	// In the members' own order, one after another: separate members are
+	// separate queries, so the order they are asked in is the only order the
+	// results have, and it has to be one the caller can reproduce.
+	var matches []Match
+	cited := make([][]evidence.Evidence, 0, len(members))
+	for _, member := range members {
+		found, err := e.search.Search(ctx, member, provider.SearchQuery{Query: req.Query})
+		if err != nil {
+			return SearchCodeResult{}, err
+		}
+
+		// Built empty rather than nil so a member that matched nothing still
+		// carries evidence: "this version has no such code" is an answer with an
+		// empty citation list, not an answer with no citation list.
+		citations := make([]evidence.Evidence, 0, len(found))
+		for _, match := range found {
+			matches = append(matches, Match{
+				Repository: member.Repository,
+				Revision:   member.Revision,
+				Path:       match.Path,
+				Line:       match.Line,
+				Snippet:    match.Snippet,
+			})
+			citations = append(citations, evidence.At(match.Path, match.Line, match.Line, match.Snippet))
+		}
+		cited = append(cited, citations)
 	}
 
-	// Built empty rather than nil so a result that cited nothing is still a
-	// result that carries evidence: "this version has no such code" is an answer
-	// with an empty citation list, not an answer with no citation list.
-	citations := make([]evidence.Evidence, 0, len(matches))
-	for _, match := range matches {
-		citations = append(citations, evidence.At(match.Path, match.Line, match.Line, match.Snippet))
-	}
-	return SearchCodeResult{answer{codeCtx, citations}, matches}, nil
+	// The members that were searched, not the whole workspace: a search narrowed
+	// to one repository is answered in that one, and reporting the context's
+	// other members beside it would claim they were looked in.
+	searched := vacctx.Workspace{ID: workspace.ID, Members: members}
+	return SearchCodeResult{answer{searched, cited}, matches}, nil
 }
 
 // TraceCalls walks the call graph around req.Symbol in the graph the context
@@ -420,7 +599,9 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 		)
 	}
 
-	codeCtx, err := e.resolve(ctx, req.Context)
+	// One member, because a walk is answered in one graph: a context naming
+	// several repositories is refused here rather than walked in one of them.
+	codeCtx, err := e.resolveMember(ctx, req.Context, "")
 	if err != nil {
 		return TraceCallsResult{}, err
 	}
@@ -461,7 +642,7 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 			citations = append(citations, at)
 		}
 	}
-	return TraceCallsResult{answer{codeCtx, citations}, *graph}, nil
+	return TraceCallsResult{inOneMember(codeCtx, citations), *graph}, nil
 }
 
 // GetCode reads lines [req.StartLine, req.EndLine] of req.Path as they are at
@@ -489,7 +670,9 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 // there is no repository this server can read. The asymmetry is the compromise,
 // and it is here rather than in the taxonomy.
 func (e *Engine) GetCode(ctx context.Context, req GetCodeRequest) (GetCodeResult, error) {
-	codeCtx, err := e.resolve(ctx, req.Context)
+	// One member, because a read is answered in one file: a context naming
+	// several repositories is refused here rather than read in one of them.
+	codeCtx, err := e.resolveMember(ctx, req.Context, "")
 	if err != nil {
 		return GetCodeResult{}, err
 	}
@@ -518,5 +701,5 @@ func (e *Engine) GetCode(ctx context.Context, req GetCodeRequest) (GetCodeResult
 	// at. No snippet: the content is the result, and repeating it as evidence
 	// would cite the answer with itself.
 	citations := []evidence.Evidence{evidence.At(src.Path, src.StartLine, src.EndLine, "")}
-	return GetCodeResult{answer{codeCtx, citations}, *src}, nil
+	return GetCodeResult{inOneMember(codeCtx, citations), *src}, nil
 }

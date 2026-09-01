@@ -118,11 +118,11 @@ func (e *Engine) CompareCode(ctx context.Context, req CompareCodeRequest) (Compa
 	// for: an ID naming no configured version has no file to read, and a
 	// comparison that read one side first would report the other's failure after
 	// doing work in a version the caller may not have meant.
-	fromCtx, err := e.resolve(ctx, req.FromContext)
+	fromCtx, err := e.resolveMember(ctx, req.FromContext, "")
 	if err != nil {
 		return CompareCodeResult{}, err
 	}
-	toCtx, err := e.resolve(ctx, req.ToContext)
+	toCtx, err := e.resolveMember(ctx, req.ToContext, "")
 	if err != nil {
 		return CompareCodeResult{}, err
 	}
@@ -202,10 +202,10 @@ func (e *Engine) CompareCode(ctx context.Context, req CompareCodeRequest) (Compa
 	// whole file's diff has no one line to point at, and "present with nothing
 	// worth citing" is not the same as "absent".
 	if change != CodeAdded {
-		result.from = ComparisonSide{answer{fromCtx, []evidence.Evidence{}}}
+		result.from = ComparisonSide{inOneMember(fromCtx, []evidence.Evidence{})}
 	}
 	if change != CodeRemoved {
-		result.to = ComparisonSide{answer{toCtx, []evidence.Evidence{}}}
+		result.to = ComparisonSide{inOneMember(toCtx, []evidence.Evidence{})}
 	}
 	return result, nil
 }
