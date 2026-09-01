@@ -117,6 +117,42 @@ func (d declaredContext) workspace(id string) (vacctx.Workspace, error) {
 	return vacctx.Workspace{ID: id, Members: members}, nil
 }
 
+// Marshal renders cfg as a configuration file, writing every context in the
+// spelling its member count decides: a context over one repository as that
+// repository's fields, a context over several as a members list.
+//
+// It is the inverse of [Load] and lives beside it so the two spellings are
+// decided in one file. What it produces is a file Load parses back into the
+// same configuration — which is what the managed server relies on, since it
+// generates a file and then serves what Load makes of it rather than what was
+// built here.
+func Marshal(cfg *Config) ([]byte, error) {
+	// The contexts are `any` because the two spellings are two shapes. They
+	// cannot be one struct here the way [declaredContext] is one on the way in:
+	// an embedded [vacctx.CodeContext] would write its four empty fields beside
+	// the members list, and Load refuses a context that uses both spellings —
+	// including one that only appears to.
+	contexts := make(map[string]any, len(cfg.Contexts))
+	for id, workspace := range cfg.Contexts {
+		if len(workspace.Members) == 1 {
+			contexts[id] = workspace.Members[0]
+			continue
+		}
+		contexts[id] = map[string]any{"members": workspace.Members}
+	}
+
+	body, err := yaml.Marshal(struct {
+		Server       Server                `yaml:"server"`
+		Providers    Providers             `yaml:"providers"`
+		Repositories map[string]Repository `yaml:"repositories"`
+		Contexts     map[string]any        `yaml:"contexts"`
+	}{cfg.Server, cfg.Providers, cfg.Repositories, contexts})
+	if err != nil {
+		return nil, invalid(fmt.Sprintf("config: cannot render the configuration: %v", err), nil)
+	}
+	return body, nil
+}
+
 // Load reads, parses and validates the configuration file at path. The returned
 // contexts, and every member of them, have their ID filled in from the key they
 // are filed under.

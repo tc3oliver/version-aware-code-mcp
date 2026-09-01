@@ -30,8 +30,8 @@ const indexer = "zoekt-git-index"
 // the branches it is asked to index, which is what makes it the branch the
 // query plane later filters on. Writing it again with the same revision is what
 // git does anyway, so this is safe to repeat.
-func putSearchRef(ctx context.Context, repoDir string, c store.Context) error {
-	return runGit(ctx, "-C", repoDir, "update-ref", "--end-of-options", "refs/heads/"+c.Branch, c.Revision)
+func putSearchRef(ctx context.Context, repoDir string, m store.ContextMember) error {
+	return runGit(ctx, "-C", repoDir, "update-ref", "--end-of-options", "refs/heads/"+m.Branch, m.Revision)
 }
 
 // dropSearchRef removes a context's search ref.
@@ -39,11 +39,11 @@ func putSearchRef(ctx context.Context, repoDir string, c store.Context) error {
 // Deleting a ref that is not there succeeds, and a clone that is not there is
 // treated the same way, because both are the same situation: a context still
 // has to be removable when the artifacts it owns are already gone.
-func dropSearchRef(ctx context.Context, repoDir string, c store.Context) error {
+func dropSearchRef(ctx context.Context, repoDir string, m store.ContextMember) error {
 	if _, err := os.Stat(repoDir); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	return runGit(ctx, "-C", repoDir, "update-ref", "-d", "--end-of-options", "refs/heads/"+c.Branch)
+	return runGit(ctx, "-C", repoDir, "update-ref", "-d", "--end-of-options", "refs/heads/"+m.Branch)
 }
 
 // indexRepository makes one repository's search refs and its index agree with
@@ -89,22 +89,28 @@ func indexRepository(ctx context.Context, s *store.Store, repository string) err
 
 	var refs []string
 	for _, c := range contexts {
-		// A record that has not been given a search ref yet names nothing to
-		// index, and naming a ref that does not exist fails the whole run.
-		//
-		// A record being removed is skipped for the opposite reason: its ref is
-		// one this rebuild would re-create out of the record, which is the whole
-		// point everywhere else and here would put back the source a removal
-		// has just taken out — the removal's own rebuild, and any create of the
-		// same repository that lands between an interrupted removal and the run
-		// that finishes it.
-		if c.Repository != repository || c.Branch == "" || c.State == ContextRemoving {
+		// A record being removed is skipped whole: its refs are ones this
+		// rebuild would re-create out of the record, which is the whole point
+		// everywhere else and here would put back the source a removal has just
+		// taken out — the removal's own rebuild, and any create of the same
+		// repository that lands between an interrupted removal and the run that
+		// finishes it.
+		if c.State == ContextRemoving {
 			continue
 		}
-		if err := putSearchRef(ctx, repoDir, c); err != nil {
-			return err
+		// One context can reach this repository through any of its members, and
+		// only the members that are in it name a ref of this clone. A member
+		// that has not been given a search ref yet names nothing to index, and
+		// naming a ref that does not exist fails the whole run.
+		for _, m := range c.Members {
+			if m.Repository != repository || m.Branch == "" {
+				continue
+			}
+			if err := putSearchRef(ctx, repoDir, m); err != nil {
+				return err
+			}
+			refs = append(refs, m.Branch)
 		}
-		refs = append(refs, c.Branch)
 	}
 	if len(refs) == 0 {
 		return dropShards(s.ZoektDir(), repository)
@@ -181,29 +187,29 @@ func dropShards(indexDir, repository string) error {
 // zoekt-webserver: a context is created and verified on the management plane,
 // where no server need be running yet, and requiring one would make a context
 // created before the server unable to ever become READY.
-func verifySearchRef(ctx context.Context, repoDir, indexDir string, c store.Context) error {
-	found, err := gitOutput(ctx, "-C", repoDir, "rev-parse", "--verify", "--end-of-options", "refs/heads/"+c.Branch)
+func verifySearchRef(ctx context.Context, repoDir, indexDir, id string, m store.ContextMember) error {
+	found, err := gitOutput(ctx, "-C", repoDir, "rev-parse", "--verify", "--end-of-options", "refs/heads/"+m.Branch)
 	if err != nil {
-		return searchUnavailable(c, fmt.Sprintf("its search ref %q is not in the clone of repository %q: %v", c.Branch, c.Repository, err))
+		return searchUnavailable(id, m, fmt.Sprintf("its search ref %q is not in the clone of repository %q: %v", m.Branch, m.Repository, err))
 	}
-	if found != c.Revision {
-		return vacerr.NewSourceMismatch(c.Revision, found, map[string]any{"context": c.ID, "repository": c.Repository, "branch": c.Branch})
+	if found != m.Revision {
+		return vacerr.NewSourceMismatch(m.Revision, found, map[string]any{"context": id, "repository": m.Repository, "branch": m.Branch})
 	}
 
-	shards, err := repositoryShards(indexDir, c.Repository)
+	shards, err := repositoryShards(indexDir, m.Repository)
 	if err != nil {
 		return err
 	}
 	if len(shards) == 0 {
-		return searchUnavailable(c, fmt.Sprintf("repository %q has no search index in %s", c.Repository, indexDir))
+		return searchUnavailable(id, m, fmt.Sprintf("repository %q has no search index in %s", m.Repository, indexDir))
 	}
 	return nil
 }
 
-func searchUnavailable(c store.Context, reason string) error {
+func searchUnavailable(id string, m store.ContextMember, reason string) error {
 	return vacerr.New(
 		vacerr.SearchProviderUnavailable,
-		fmt.Sprintf("context %q: %s", c.ID, reason),
-		map[string]any{"context": c.ID, "repository": c.Repository},
+		fmt.Sprintf("context %q: %s", id, reason),
+		map[string]any{"context": id, "repository": m.Repository},
 	)
 }

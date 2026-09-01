@@ -242,6 +242,22 @@ you already have keep answering out of the revisions they were created with. To
 serve a newer commit, create another context — a context is immutable, so a
 second version is a second name, never an edit of the first.
 
+A context can name several repositories, one `--repo`/`--ref` pair each, and
+each of them is pinned to its own commit:
+
+```bash
+vacmcp context create stack-v1 --repo backend --ref release/1.x \
+                               --repo frontend --ref release/3.x
+```
+
+The nth `--ref` belongs to the nth `--repo`. Such a context is built and removed
+as one thing: it reaches `READY` only when every repository in it has been
+checked out, indexed, given its graph and verified, and one that fails anywhere
+is `FAILED` whole rather than half servable. Note that the query tools do not
+answer in a context over several repositories yet — they refuse it with
+`INVALID_ARGUMENT` naming the repositories, rather than answering out of the
+first one and leaving the rest silently outside the scope.
+
 Everything lives under `~/.vacmcp` unless `--data-dir` says otherwise, including
 the search index. Start Zoekt over it, check the installation, and serve:
 
@@ -253,9 +269,14 @@ vacmcp serve --managed
 
 ```text
 $ vacmcp context list
-backend-v1    backend    8af31e2c8d0a4f1b6e5d3c2a90b7f4e1d6c8a3b5    READY
-backend-v2    backend    94cb821f7a6e5d4c3b2a1908f7e6d5c4b3a29187    READY
+backend-v1    backend     8af31e2c8d0a4f1b6e5d3c2a90b7f4e1d6c8a3b5    READY
+backend-v2    backend     94cb821f7a6e5d4c3b2a1908f7e6d5c4b3a29187    READY
+stack-v1      backend     8af31e2c8d0a4f1b6e5d3c2a90b7f4e1d6c8a3b5    READY
+stack-v1      frontend    1d0c9b8a7f6e5d4c3b2a19087f6e5d4c3b2a1908    READY
 ```
+
+One row per repository a context names, so a context over one reads as it always
+has and one over several says which commit each of its repositories is pinned to.
 
 The commands, in full:
 
@@ -265,7 +286,7 @@ The commands, in full:
 | `vacmcp repo list` / `status NAME` | report the managed repositories |
 | `vacmcp repo sync NAME` / `--all` | fetch remote refs, moving no pinned revision |
 | `vacmcp repo remove NAME` | forget a repository and delete its clone |
-| `vacmcp context create NAME --repo REPO --ref REF` | pin a ref to a commit and build its index and graph |
+| `vacmcp context create NAME --repo REPO --ref REF [--repo REPO --ref REF ...]` | pin one ref per repository to a commit and build its index and graph |
 | `vacmcp context list` / `status NAME` | report the managed contexts and their state |
 | `vacmcp context verify NAME` | re-run the readiness checks, changing nothing |
 | `vacmcp context retry NAME` | rebuild a context that did not reach `READY` |

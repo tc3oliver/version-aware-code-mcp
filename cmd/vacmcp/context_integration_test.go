@@ -16,6 +16,7 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
+	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
@@ -46,6 +47,23 @@ func contextRecord(t *testing.T, dataDir, id string) store.Context {
 		t.Fatalf("Context(%s): %v", id, err)
 	}
 	return c
+}
+
+// only is the member of a record that names one repository, which is what the
+// contexts these tests create are. A record with several is a mistake in the
+// test rather than something to pick a member out of, so it stops the test.
+func only(t *testing.T, c store.Context) store.ContextMember {
+	t.Helper()
+	if len(c.Members) != 1 {
+		t.Fatalf("context %s names %d repositories, want the one this test created", c.ID, len(c.Members))
+	}
+	return c.Members[0]
+}
+
+// scope is the version scope the query plane resolves one member into, which is
+// what the v0.1.0 adapters take.
+func scope(id string, m store.ContextMember) vacctx.CodeContext {
+	return vacctx.CodeContext{ID: id, Repository: m.Repository, Branch: m.Branch, Revision: m.Revision, GraphRef: m.GraphRef}
 }
 
 // served reports whether the query plane's registry has id: the READY records
@@ -124,20 +142,23 @@ func TestContextCreatePinsEveryKindOfRefToTheSameFullSHA(t *testing.T) {
 		if err != nil {
 			t.Fatalf("context create %s --ref %s: %v", tc.id, tc.ref, err)
 		}
-		if want := tc.id + "\t" + managed.ContextReady + "\t" + tc.want + "\n"; out != want {
+		// One row per repository the context names, which for a context over
+		// one is the row this command has always printed.
+		if want := tc.id + "\t" + managed.ContextReady + "\tdemo\t" + tc.want + "\n"; out != want {
 			t.Errorf("context create printed %q, want %q", out, want)
 		}
 
 		c := contextRecord(t, data, tc.id)
-		if c.Revision != tc.want {
-			t.Errorf("--ref %s pinned %q, want %q", tc.ref, c.Revision, tc.want)
+		member := only(t, c)
+		if member.Revision != tc.want {
+			t.Errorf("--ref %s pinned %q, want %q", tc.ref, member.Revision, tc.want)
 		}
 		// The stored revision is a full commit SHA and nothing that could move:
 		// the ref that was typed must not survive into the record.
-		if len(c.Revision) != fullSHA || strings.TrimLeft(c.Revision, "0123456789abcdef") != "" {
-			t.Errorf("--ref %s pinned %q, want %d hexadecimal digits", tc.ref, c.Revision, fullSHA)
+		if len(member.Revision) != fullSHA || strings.TrimLeft(member.Revision, "0123456789abcdef") != "" {
+			t.Errorf("--ref %s pinned %q, want %d hexadecimal digits", tc.ref, member.Revision, fullSHA)
 		}
-		if c.Repository != "demo" || c.State != managed.ContextReady {
+		if member.Repository != "demo" || c.State != managed.ContextReady {
 			t.Errorf("record = %+v, want repository demo in state %s", c, managed.ContextReady)
 		}
 	}
@@ -223,13 +244,13 @@ func TestContextCreateRefusesToReplaceAManagedContext(t *testing.T) {
 	}
 
 	after := contextRecord(t, data, "app")
-	if after != before {
+	if !sameContext(after, before) {
 		t.Errorf("the record changed across a refused create:\n before %+v\n  after %+v", before, after)
 	}
-	if after.Revision != mainSHA {
-		t.Errorf("revision = %q, want the original %q", after.Revision, mainSHA)
+	if got := only(t, after).Revision; got != mainSHA {
+		t.Errorf("revision = %q, want the original %q", got, mainSHA)
 	}
-	if after.Revision == branchSHA {
+	if only(t, after).Revision == branchSHA {
 		t.Error("the refused create repinned the context to the other revision")
 	}
 }
@@ -249,7 +270,7 @@ func TestContextRecordIsNeverRewritten(t *testing.T) {
 		if _, err := contextRun(t, data, args...); err != nil {
 			t.Fatalf("context %s: %v", strings.Join(args, " "), err)
 		}
-		if after := contextRecord(t, data, "app"); after != before {
+		if after := contextRecord(t, data, "app"); !sameContext(after, before) {
 			t.Errorf("context %s rewrote the record:\n before %+v\n  after %+v", strings.Join(args, " "), before, after)
 		}
 	}
@@ -265,11 +286,11 @@ func TestContextRecordIsNeverRewritten(t *testing.T) {
 		t.Fatalf("context verify after sync: %v", err)
 	}
 	after := contextRecord(t, data, "app")
-	if after != before {
+	if !sameContext(after, before) {
 		t.Errorf("the record changed across a sync and a verify:\n before %+v\n  after %+v", before, after)
 	}
-	if after.Revision != mainSHA || after.Revision == moved {
-		t.Errorf("revision = %q, want it still pinned to %q and not to %q", after.Revision, mainSHA, moved)
+	if got := only(t, after).Revision; got != mainSHA || got == moved {
+		t.Errorf("revision = %q, want it still pinned to %q and not to %q", got, mainSHA, moved)
 	}
 }
 
@@ -282,7 +303,10 @@ func TestContextCreateGeneratesTheInternalNames(t *testing.T) {
 
 	// The two contexts of the shared installation that pin one revision, so
 	// nothing but the name they were given differs between the records below.
-	first, second := contextRecord(t, data, preparedModern), contextRecord(t, data, preparedTwin)
+	first := only(t, contextRecord(t, data, preparedModern))
+	second := only(t, contextRecord(t, data, preparedTwin))
+	// A context over one repository keeps generating exactly the names v0.4.0
+	// generated, which is what lets a data directory it built be verified here.
 	if first.Branch != "vacmcp/"+preparedModern+"-"+revision[:shortSHA] {
 		t.Errorf("search ref = %q, want it derived from the context name and the short SHA", first.Branch)
 	}
@@ -323,7 +347,7 @@ func TestContextVerifyReportsWhetherTheRevisionIsStillThere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("context verify: %v", err)
 	}
-	if want := "app\tOK\t" + mainSHA + "\n"; out != want {
+	if want := "app\tOK\tdemo\t" + mainSHA + "\n"; out != want {
 		t.Errorf("context verify printed %q, want %q", out, want)
 	}
 
@@ -337,7 +361,7 @@ func TestContextVerifyReportsWhetherTheRevisionIsStillThere(t *testing.T) {
 	if got := codeFor(t, err); got != vacerr.RevisionNotFound {
 		t.Errorf("context verify without the clone code = %q, want %q", got, vacerr.RevisionNotFound)
 	}
-	if after := contextRecord(t, data, "app"); after != before {
+	if after := contextRecord(t, data, "app"); !sameContext(after, before) {
 		t.Errorf("a failed verify rewrote the record:\n before %+v\n  after %+v", before, after)
 	}
 
@@ -387,7 +411,7 @@ func TestContextRemoveOnlyAffectsItsOwnContext(t *testing.T) {
 		t.Errorf("the worktree of drop is still there (err = %v)", err)
 	}
 
-	if after := contextRecord(t, data, "keep"); after != before {
+	if after := contextRecord(t, data, "keep"); !sameContext(after, before) {
 		t.Errorf("removing drop changed keep:\n before %+v\n  after %+v", before, after)
 	}
 	if body, err := os.ReadFile(filepath.Join(worktrees["keep"], "file.txt")); err != nil || string(body) != "keep" {
@@ -460,11 +484,12 @@ func TestContextCreateReachesReadyOnlyWithEveryArtifactVerified(t *testing.T) {
 	if err != nil {
 		t.Fatalf("context create: %v", err)
 	}
-	if want := "app\t" + managed.ContextReady + "\t" + mainSHA + "\n"; out != want {
+	if want := "app\t" + managed.ContextReady + "\tdemo\t" + mainSHA + "\n"; out != want {
 		t.Errorf("context create printed %q, want %q", out, want)
 	}
 
 	c := contextRecord(t, data, "app")
+	member := only(t, c)
 	if c.State != managed.ContextReady {
 		t.Fatalf("state = %q, want %s", c.State, managed.ContextReady)
 	}
@@ -483,30 +508,30 @@ func TestContextCreateReachesReadyOnlyWithEveryArtifactVerified(t *testing.T) {
 	if head := gitOut(t, "-C", filepath.Join(data, "worktrees", "demo", "app"), "rev-parse", "HEAD"); head != mainSHA {
 		t.Errorf("worktree HEAD = %q, want the pinned %q", head, mainSHA)
 	}
-	if ref := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+c.Branch); ref != mainSHA {
+	if ref := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+member.Branch); ref != mainSHA {
 		t.Errorf("search ref = %q, want the pinned %q", ref, mainSHA)
 	}
-	if err := graphExists(t.Context(), c); err != nil {
+	if err := graphExists(t.Context(), c.ID, member); err != nil {
 		t.Errorf("the graph of a READY context: %v", err)
 	}
 
 	// A search ref moved onto another commit is the wrong-version answer this
 	// server refuses to give, whatever the record still says.
-	mustGit(t, "-C", clone, "update-ref", "refs/heads/"+c.Branch, branchSHA)
+	mustGit(t, "-C", clone, "update-ref", "refs/heads/"+member.Branch, branchSHA)
 	_, err = contextRun(t, data, "verify", "app")
 	if got := codeFor(t, err); got != vacerr.SourceMismatch {
 		t.Errorf("verify with the search ref on another commit: code = %q, want %q", got, vacerr.SourceMismatch)
 	}
 
 	// A search ref that is gone is a context that cannot be searched.
-	mustGit(t, "-C", clone, "update-ref", "-d", "refs/heads/"+c.Branch)
+	mustGit(t, "-C", clone, "update-ref", "-d", "refs/heads/"+member.Branch)
 	_, err = contextRun(t, data, "verify", "app")
 	if got := codeFor(t, err); got != vacerr.SearchProviderUnavailable {
 		t.Errorf("verify without the search ref: code = %q, want %q", got, vacerr.SearchProviderUnavailable)
 	}
 
 	// And so is an index that was deleted after it was built.
-	mustGit(t, "-C", clone, "update-ref", "refs/heads/"+c.Branch, mainSHA)
+	mustGit(t, "-C", clone, "update-ref", "refs/heads/"+member.Branch, mainSHA)
 	built, _ := shards(t, data, "demo")
 	if len(built) == 0 {
 		t.Fatal("demo has no shard, want the one the create built")
@@ -526,7 +551,7 @@ func TestContextCreateReachesReadyOnlyWithEveryArtifactVerified(t *testing.T) {
 
 	// None of that verification wrote anything: READY was granted by the
 	// lifecycle and is not something verify grants or withdraws.
-	if after := contextRecord(t, data, "app"); after != c {
+	if after := contextRecord(t, data, "app"); !sameContext(after, c) {
 		t.Errorf("verification rewrote the record:\n before %+v\n  after %+v", c, after)
 	}
 }
@@ -547,11 +572,12 @@ func TestContextCreateLandsInFailedWhenTheGraphCannotBeBuilt(t *testing.T) {
 	}
 
 	c := contextRecord(t, data, "app")
+	member := only(t, c)
 	if c.State != managed.ContextFailed {
 		t.Errorf("state = %q, want %s", c.State, managed.ContextFailed)
 	}
-	if c.Revision != mainSHA {
-		t.Errorf("revision = %q, want the pinned %q", c.Revision, mainSHA)
+	if member.Revision != mainSHA {
+		t.Errorf("revision = %q, want the pinned %q", member.Revision, mainSHA)
 	}
 
 	// The stages before the graph ran, in order: the checkout and the search
@@ -561,7 +587,7 @@ func TestContextCreateLandsInFailedWhenTheGraphCannotBeBuilt(t *testing.T) {
 		t.Errorf("worktree HEAD = %q, want the pinned %q from PREPARING_SOURCE", head, mainSHA)
 	}
 	clone := filepath.Join(data, "repos", "demo")
-	if ref := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+c.Branch); ref != mainSHA {
+	if ref := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+member.Branch); ref != mainSHA {
 		t.Errorf("search ref = %q, want the pinned %q from INDEXING_SEARCH", ref, mainSHA)
 	}
 
@@ -625,7 +651,7 @@ func TestContextRetryRebuildsAFailedContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("context retry: %v", err)
 	}
-	if want := "app\t" + managed.ContextReady + "\t" + mainSHA + "\n"; out != want {
+	if want := "app\t" + managed.ContextReady + "\tdemo\t" + mainSHA + "\n"; out != want {
 		t.Errorf("context retry printed %q, want %q", out, want)
 	}
 
@@ -633,8 +659,9 @@ func TestContextRetryRebuildsAFailedContext(t *testing.T) {
 	// context: the revision and both generated names are the ones the failed
 	// create wrote.
 	c := contextRecord(t, data, "app")
-	if c.Revision != failed.Revision || c.Branch != failed.Branch || c.GraphRef != failed.GraphRef {
-		t.Errorf("the retry changed what the context pins:\n before %+v\n  after %+v", failed, c)
+	member := only(t, c)
+	if member != only(t, failed) {
+		t.Errorf("the retry changed what the context pins:\n before %+v\n  after %+v", only(t, failed), member)
 	}
 	if c.State != managed.ContextReady {
 		t.Errorf("state after a retry = %q, want %s", c.State, managed.ContextReady)
@@ -651,7 +678,7 @@ func TestContextRetryRebuildsAFailedContext(t *testing.T) {
 	if head := gitOut(t, "-C", filepath.Join(data, "worktrees", "demo", "app"), "rev-parse", "HEAD"); head != mainSHA {
 		t.Errorf("worktree HEAD after a retry = %q, want the pinned %q", head, mainSHA)
 	}
-	if err := graphExists(t.Context(), c); err != nil {
+	if err := graphExists(t.Context(), c.ID, member); err != nil {
 		t.Errorf("the graph a retry built: %v", err)
 	}
 }
@@ -701,7 +728,7 @@ func TestContextRetryRecoversAContextKilledMidLifecycle(t *testing.T) {
 	if _, err := contextRun(t, data, "create", "app", "--repo", "demo", "--ref", "release/2.x"); codeFor(t, err) != vacerr.InvalidArgument {
 		t.Errorf("context create over a stuck context = %v, want %q", err, vacerr.InvalidArgument)
 	}
-	if after := contextRecord(t, data, "app"); after != before {
+	if after := contextRecord(t, data, "app"); !sameContext(after, before) {
 		t.Errorf("a refused create changed the stuck record:\n before %+v\n  after %+v", before, after)
 	}
 
@@ -709,7 +736,7 @@ func TestContextRetryRecoversAContextKilledMidLifecycle(t *testing.T) {
 		t.Fatalf("context retry of a context killed mid-lifecycle: %v", err)
 	}
 	c := contextRecord(t, data, "app")
-	if c.State != managed.ContextReady || c.Revision != mainSHA {
+	if c.State != managed.ContextReady || only(t, c).Revision != mainSHA {
 		t.Errorf("record after a retry = %+v, want %s pinned to %s", c, managed.ContextReady, mainSHA)
 	}
 	if _, err := contextRun(t, data, "verify", "app"); err != nil {
@@ -733,7 +760,7 @@ func TestContextRetryRefusesWhatItMustNotRebuild(t *testing.T) {
 	if _, err := contextRun(t, data, "retry", "app"); codeFor(t, err) != vacerr.InvalidArgument {
 		t.Errorf("context retry of a READY context = %v, want %q", err, vacerr.InvalidArgument)
 	}
-	if after := contextRecord(t, data, "app"); after != before {
+	if after := contextRecord(t, data, "app"); !sameContext(after, before) {
 		t.Errorf("a refused retry changed the record:\n before %+v\n  after %+v", before, after)
 	}
 
@@ -784,8 +811,8 @@ func TestConcurrentLifecycleOnOneRepositoryStaysConsistent(t *testing.T) {
 	}
 	// The sync ran beside them and moved neither: each context pins the
 	// revision of the ref it asked for.
-	if alpha.Revision != mainSHA || beta.Revision != branchSHA {
-		t.Errorf("revisions = %q and %q, want %q and %q", alpha.Revision, beta.Revision, mainSHA, branchSHA)
+	if only(t, alpha).Revision != mainSHA || only(t, beta).Revision != branchSHA {
+		t.Errorf("revisions = %q and %q, want %q and %q", only(t, alpha).Revision, only(t, beta).Revision, mainSHA, branchSHA)
 	}
 	for _, c := range []store.Context{alpha, beta} {
 		if _, err := contextRun(t, data, "verify", c.ID); err != nil {
@@ -797,12 +824,13 @@ func TestConcurrentLifecycleOnOneRepositoryStaysConsistent(t *testing.T) {
 	// records that claim it should.
 	url := demorepo.StartZoekt(t, filepath.Join(data, "zoekt"))
 	for _, c := range []store.Context{alpha, beta} {
-		indexed, err := searchRefIndexed(t.Context(), url, c)
+		member := only(t, c)
+		indexed, err := searchRefIndexed(t.Context(), url, member)
 		if err != nil {
 			t.Fatalf("searchRefIndexed(%s): %v", c.ID, err)
 		}
 		if !indexed {
-			t.Errorf("%s is READY but its search ref %q is not in the index a concurrent create rebuilt", c.ID, c.Branch)
+			t.Errorf("%s is READY but its search ref %q is not in the index a concurrent create rebuilt", c.ID, member.Branch)
 		}
 	}
 }
@@ -821,7 +849,7 @@ func TestContextRemovePersistsRemovingBeforeItTouchesAnArtifact(t *testing.T) {
 	if _, err := contextRun(t, data, "create", "app", "--repo", "demo", "--ref", "main"); err != nil {
 		t.Fatalf("context create: %v", err)
 	}
-	ready := contextRecord(t, data, "app")
+	ready := only(t, contextRecord(t, data, "app"))
 
 	working := os.Getenv("PATH")
 	t.Setenv("PATH", brokenCBM(t)+string(os.PathListSeparator)+working)
@@ -967,8 +995,9 @@ func TestContextRemoveResumesAfterACrashAtAnyStep(t *testing.T) {
 // resumable. Here they are all present by construction.
 func crashRemoval(t *testing.T, data string, c, kept store.Context, steps int) {
 	t.Helper()
-	clone := filepath.Join(data, "repos", c.Repository)
-	worktree := filepath.Join(data, "worktrees", c.Repository, c.ID)
+	member, keptMember := only(t, c), only(t, kept)
+	clone := filepath.Join(data, "repos", member.Repository)
+	worktree := filepath.Join(data, "worktrees", member.Repository, c.ID)
 
 	// The state first, as the command writes it first. A crash before this is
 	// not a state of the removal at all: nothing had happened yet.
@@ -979,14 +1008,16 @@ func crashRemoval(t *testing.T, data string, c, kept store.Context, steps int) {
 
 	for i, step := range []func(){
 		func() {
-			mustRun(t, managed.CBMCommand, "cli", "delete_project", "--project", c.GraphRef)
+			mustRun(t, managed.CBMCommand, "cli", "delete_project", "--project", member.GraphRef)
 			if err := os.RemoveAll(worktree); err != nil {
 				t.Fatalf("RemoveAll(%s): %v", worktree, err)
 			}
 			mustGit(t, "-C", clone, "worktree", "prune")
 		},
-		func() { mustGit(t, "-C", clone, "update-ref", "-d", "refs/heads/"+c.Branch) },
-		func() { mustRun(t, indexer, "-index", filepath.Join(data, "zoekt"), "-branches", kept.Branch, clone) },
+		func() { mustGit(t, "-C", clone, "update-ref", "-d", "refs/heads/"+member.Branch) },
+		func() {
+			mustRun(t, indexer, "-index", filepath.Join(data, "zoekt"), "-branches", keptMember.Branch, clone)
+		},
 	} {
 		if i >= steps {
 			return
@@ -1007,10 +1038,11 @@ func mustRun(t *testing.T, name string, args ...string) {
 // assertNoSearchRef fails when the clone still has the context's search ref.
 func assertNoSearchRef(t *testing.T, data string, c store.Context) {
 	t.Helper()
-	clone := filepath.Join(data, "repos", c.Repository)
-	out, err := exec.Command("git", "-C", clone, "rev-parse", "--verify", "refs/heads/"+c.Branch).CombinedOutput()
+	member := only(t, c)
+	clone := filepath.Join(data, "repos", member.Repository)
+	out, err := exec.Command("git", "-C", clone, "rev-parse", "--verify", "refs/heads/"+member.Branch).CombinedOutput()
 	if err == nil {
-		t.Errorf("refs/heads/%s is in the clone as %s, want the removal to have taken it out", c.Branch, strings.TrimSpace(string(out)))
+		t.Errorf("refs/heads/%s is in the clone as %s, want the removal to have taken it out", member.Branch, strings.TrimSpace(string(out)))
 	}
 }
 
@@ -1021,10 +1053,11 @@ func assertNoSearchRef(t *testing.T, data string, c store.Context) {
 func assertRemoved(t *testing.T, data string, removed, kept store.Context) {
 	t.Helper()
 	s := openStore(t, data)
+	member, keptMember := only(t, removed), only(t, kept)
 	if _, err := s.Context(removed.ID); codeFor(t, err) != vacerr.ContextNotFound {
 		t.Errorf("the record of %s after the removal = %v, want %q", removed.ID, err, vacerr.ContextNotFound)
 	}
-	worktree, err := s.WorktreeDir(removed.Repository, removed.ID)
+	worktree, err := s.WorktreeDir(member.Repository, removed.ID)
 	if err != nil {
 		t.Fatalf("WorktreeDir: %v", err)
 	}
@@ -1032,26 +1065,26 @@ func assertRemoved(t *testing.T, data string, removed, kept store.Context) {
 		t.Errorf("the worktree of %s is still at %s (err = %v)", removed.ID, worktree, err)
 	}
 	assertNoSearchRef(t, data, removed)
-	if err := graphExists(t.Context(), removed); err == nil {
-		t.Errorf("codebase-memory-mcp still holds the graph %q of the removed context", removed.GraphRef)
+	if err := graphExists(t.Context(), removed.ID, member); err == nil {
+		t.Errorf("codebase-memory-mcp still holds the graph %q of the removed context", member.GraphRef)
 	}
 
 	url := demorepo.StartZoekt(t, filepath.Join(data, "zoekt"))
-	indexed, err := searchRefIndexed(t.Context(), url, removed)
+	indexed, err := searchRefIndexed(t.Context(), url, member)
 	if err != nil {
 		t.Fatalf("searchRefIndexed(%s): %v", removed.ID, err)
 	}
 	if indexed {
-		t.Errorf("%s: search ref %q is still in the index after the removal finished", removed.ID, removed.Branch)
+		t.Errorf("%s: search ref %q is still in the index after the removal finished", removed.ID, member.Branch)
 	}
-	if searchable(t, url, removed, alphaToken) {
+	if searchable(t, url, removed.ID, member, alphaToken) {
 		t.Errorf("%s: %s is still searchable after the removal finished", removed.ID, alphaToken)
 	}
 
-	if got := contextRecord(t, data, kept.ID); got != kept {
+	if got := contextRecord(t, data, kept.ID); !sameContext(got, kept) {
 		t.Errorf("the removal changed the other context:\n before %+v\n  after %+v", kept, got)
 	}
-	if !searchable(t, url, kept, betaToken) {
+	if !searchable(t, url, kept.ID, keptMember, betaToken) {
 		t.Errorf("%s can no longer find %s after the other context was removed", kept.ID, betaToken)
 	}
 }

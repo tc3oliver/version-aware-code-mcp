@@ -233,7 +233,15 @@ func checkManagedContexts(ctx context.Context, s *store.Store, cfg *config.Confi
 			if record.State == managed.ContextFailed {
 				status = statusFail
 			}
-			rows = append(rows, check{record.ID, status, fmt.Sprintf("%s %s", record.State, record.Revision)})
+			// The revisions the record already pins, one per repository it
+			// names: a context that is not served is the first thing an operator
+			// comes here for, and which versions it was going to be is part of
+			// what they came to see.
+			pinned := make([]string, 0, len(record.Members))
+			for _, member := range record.Members {
+				pinned = append(pinned, fmt.Sprintf("%s %s", member.Repository, member.Revision))
+			}
+			rows = append(rows, check{record.ID, status, fmt.Sprintf("%s %s", record.State, strings.Join(pinned, ", "))})
 			continue
 		}
 		workspace, err := contexts.Resolve(ctx, record.ID)

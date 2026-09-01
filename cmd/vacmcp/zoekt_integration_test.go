@@ -17,7 +17,6 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
-	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
 // The index lifecycle is tested against the real zoekt-git-index and a real
@@ -32,21 +31,21 @@ import (
 // the way an interrupted removal leaves one.
 const indexer = "zoekt-git-index"
 
-// searchRefIndexed reports whether the Zoekt server at zoektURL has c's search
-// ref in the index it serves.
+// searchRefIndexed reports whether the Zoekt server at zoektURL has the
+// member's search ref in the index it serves.
 //
 // It asks the server rather than reading the shard because a context is only
 // searchable once the engine answering the queries has loaded it: a shard on
 // disk that nothing has picked up yet answers nothing. Asking also keeps the
 // shard format out of these tests — it goes through the same client, with the
 // same timeout, that the search adapter queries with.
-func searchRefIndexed(ctx context.Context, zoektURL string, c store.Context) (bool, error) {
+func searchRefIndexed(ctx context.Context, zoektURL string, m store.ContextMember) (bool, error) {
 	cfg := &config.Config{Providers: config.Providers{Zoekt: config.Zoekt{URL: zoektURL}}}
-	branches, err := zoekt.New(cfg).IndexedBranches(ctx, c.Repository)
+	branches, err := zoekt.New(cfg).IndexedBranches(ctx, m.Repository)
 	if err != nil {
 		return false, err
 	}
-	return slices.Contains(branches, c.Branch), nil
+	return slices.Contains(branches, m.Branch), nil
 }
 
 // requireIndexer skips when the indexing binary is not installed. Every skip in
@@ -114,21 +113,16 @@ func shards(t *testing.T, data, repository string) (own, other []string) {
 	return own, other
 }
 
-// searchable reports whether the token is findable in c through the v0.1.0
-// search adapter, which is the path a search_code call takes: the same repo:
-// and branch: filters, against a real server over the index vacmcp built.
-func searchable(t *testing.T, url string, c store.Context, token string) bool {
+// searchable reports whether the token is findable in one member of a context
+// through the v0.1.0 search adapter, which is the path a search_code call
+// takes: the same repo: and branch: filters, against a real server over the
+// index vacmcp built.
+func searchable(t *testing.T, url, id string, m store.ContextMember, token string) bool {
 	t.Helper()
 	cfg := &config.Config{Providers: config.Providers{Zoekt: config.Zoekt{URL: url}}}
-	results, err := zoekt.New(cfg).Search(t.Context(), vacctx.CodeContext{
-		ID:         c.ID,
-		Repository: c.Repository,
-		Branch:     c.Branch,
-		Revision:   c.Revision,
-		GraphRef:   c.GraphRef,
-	}, provider.SearchQuery{Query: token})
+	results, err := zoekt.New(cfg).Search(t.Context(), scope(id, m), provider.SearchQuery{Query: token})
 	if err != nil {
-		t.Fatalf("Search(%s, %s): %v", c.ID, token, err)
+		t.Fatalf("Search(%s, %s): %v", id, token, err)
 	}
 	return len(results) > 0
 }
@@ -141,14 +135,15 @@ func TestContextCreateIndexesEverySearchRefIntoOneShard(t *testing.T) {
 	// defines betaToken, which is what tells an index holding both refs from one
 	// answering out of the wrong version.
 	data := preparedManaged(t).data
-	alpha, beta := contextRecord(t, data, preparedLegacy), contextRecord(t, data, preparedModern)
+	alpha := only(t, contextRecord(t, data, preparedLegacy))
+	beta := only(t, contextRecord(t, data, preparedModern))
 	clone := filepath.Join(data, "repos", "demo")
 
 	// AC #1, in git: the ref the record names is in the clone and points at the
 	// commit the context pinned, which is what the index was built from.
-	for _, c := range []store.Context{alpha, beta} {
-		if got := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+c.Branch); got != c.Revision {
-			t.Errorf("%s: refs/heads/%s = %s, want the pinned revision %s", c.ID, c.Branch, got, c.Revision)
+	for id, m := range map[string]store.ContextMember{preparedLegacy: alpha, preparedModern: beta} {
+		if got := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+m.Branch); got != m.Revision {
+			t.Errorf("%s: refs/heads/%s = %s, want the pinned revision %s", id, m.Branch, got, m.Revision)
 		}
 	}
 	if alpha.Revision == beta.Revision {
@@ -168,26 +163,26 @@ func TestContextCreateIndexesEverySearchRefIntoOneShard(t *testing.T) {
 	url := demorepo.StartZoekt(t, filepath.Join(data, "zoekt"))
 
 	// AC #1, in the index: Zoekt itself reports both refs, in that one shard.
-	for _, c := range []store.Context{alpha, beta} {
-		indexed, err := searchRefIndexed(t.Context(), url, c)
+	for id, m := range map[string]store.ContextMember{preparedLegacy: alpha, preparedModern: beta} {
+		indexed, err := searchRefIndexed(t.Context(), url, m)
 		if err != nil {
-			t.Fatalf("searchRefIndexed(%s): %v", c.ID, err)
+			t.Fatalf("searchRefIndexed(%s): %v", id, err)
 		}
 		if !indexed {
-			t.Errorf("%s: search ref %q is not in the index", c.ID, c.Branch)
+			t.Errorf("%s: search ref %q is not in the index", id, m.Branch)
 		}
 	}
 
 	// And the shared index is still version isolated: each context finds its
 	// own branch's token and not the other's.
-	if !searchable(t, url, alpha, alphaToken) {
-		t.Errorf("%s cannot find %s, which its own revision defines", alpha.ID, alphaToken)
+	if !searchable(t, url, preparedLegacy, alpha, alphaToken) {
+		t.Errorf("%s cannot find %s, which its own revision defines", preparedLegacy, alphaToken)
 	}
-	if !searchable(t, url, beta, betaToken) {
-		t.Errorf("%s cannot find %s, which its own revision defines", beta.ID, betaToken)
+	if !searchable(t, url, preparedModern, beta, betaToken) {
+		t.Errorf("%s cannot find %s, which its own revision defines", preparedModern, betaToken)
 	}
-	if searchable(t, url, beta, alphaToken) {
-		t.Errorf("%s finds %s, which only exists on the other context's revision", beta.ID, alphaToken)
+	if searchable(t, url, preparedModern, beta, alphaToken) {
+		t.Errorf("%s finds %s, which only exists on the other context's revision", preparedModern, alphaToken)
 	}
 }
 
@@ -196,17 +191,18 @@ func TestContextCreateIndexesEverySearchRefIntoOneShard(t *testing.T) {
 // longer searchable, and the context that shared the index is untouched.
 func TestContextRemoveTakesOnlyItsOwnRefOutOfTheIndex(t *testing.T) {
 	data, alpha, beta := indexedRepository(t)
+	alphaMember, betaMember := only(t, alpha), only(t, beta)
 	clone := filepath.Join(data, "repos", "demo")
 
 	if _, err := contextRun(t, data, "remove", alpha.ID); err != nil {
 		t.Fatalf("context remove %s: %v", alpha.ID, err)
 	}
 
-	if out, err := exec.Command("git", "-C", clone, "rev-parse", "--verify", "refs/heads/"+alpha.Branch).CombinedOutput(); err == nil {
-		t.Errorf("refs/heads/%s survived the removal as %s", alpha.Branch, strings.TrimSpace(string(out)))
+	if out, err := exec.Command("git", "-C", clone, "rev-parse", "--verify", "refs/heads/"+alphaMember.Branch).CombinedOutput(); err == nil {
+		t.Errorf("refs/heads/%s survived the removal as %s", alphaMember.Branch, strings.TrimSpace(string(out)))
 	}
-	if got := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+beta.Branch); got != beta.Revision {
-		t.Errorf("%s: refs/heads/%s = %s, want the removal to have left it at %s", beta.ID, beta.Branch, got, beta.Revision)
+	if got := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+betaMember.Branch); got != betaMember.Revision {
+		t.Errorf("%s: refs/heads/%s = %s, want the removal to have left it at %s", beta.ID, betaMember.Branch, got, betaMember.Revision)
 	}
 	if own, _ := shards(t, data, "demo"); len(own) != 1 {
 		t.Errorf("shards of demo = %v, want the surviving context's index to still be there", own)
@@ -214,27 +210,27 @@ func TestContextRemoveTakesOnlyItsOwnRefOutOfTheIndex(t *testing.T) {
 
 	url := demorepo.StartZoekt(t, filepath.Join(data, "zoekt"))
 
-	indexed, err := searchRefIndexed(t.Context(), url, alpha)
+	indexed, err := searchRefIndexed(t.Context(), url, alphaMember)
 	if err != nil {
 		t.Fatalf("searchRefIndexed(%s): %v", alpha.ID, err)
 	}
 	if indexed {
-		t.Errorf("%s: search ref %q is still in the index after the context was removed", alpha.ID, alpha.Branch)
+		t.Errorf("%s: search ref %q is still in the index after the context was removed", alpha.ID, alphaMember.Branch)
 	}
-	if searchable(t, url, alpha, alphaToken) {
+	if searchable(t, url, alpha.ID, alphaMember, alphaToken) {
 		t.Errorf("%s: %s is still searchable after the context was removed", alpha.ID, alphaToken)
 	}
 
 	// The other context is unaffected: still indexed, still finds its own
 	// token.
-	indexed, err = searchRefIndexed(t.Context(), url, beta)
+	indexed, err = searchRefIndexed(t.Context(), url, betaMember)
 	if err != nil {
 		t.Fatalf("searchRefIndexed(%s): %v", beta.ID, err)
 	}
 	if !indexed {
-		t.Errorf("%s: removing the other context took this one's search ref %q out of the index", beta.ID, beta.Branch)
+		t.Errorf("%s: removing the other context took this one's search ref %q out of the index", beta.ID, betaMember.Branch)
 	}
-	if !searchable(t, url, beta, betaToken) {
+	if !searchable(t, url, beta.ID, betaMember, betaToken) {
 		t.Errorf("%s can no longer find %s after the other context was removed", beta.ID, betaToken)
 	}
 }
@@ -251,17 +247,18 @@ func TestContextRemoveTakesOnlyItsOwnRefOutOfTheIndex(t *testing.T) {
 // forbids: a removed context whose source is still in the served shard.
 func TestIndexingRestoresAContextRecordWhoseRefIsMissing(t *testing.T) {
 	data, alpha, beta := indexedRepository(t)
+	alphaMember := only(t, alpha)
 	clone := filepath.Join(data, "repos", "demo")
 
-	mustGit(t, "-C", clone, "update-ref", "-d", "refs/heads/"+alpha.Branch)
+	mustGit(t, "-C", clone, "update-ref", "-d", "refs/heads/"+alphaMember.Branch)
 
 	// The remove path first, because it is the one whose failure would leave
 	// beta's source in the index with no record of it.
 	if _, err := contextRun(t, data, "remove", beta.ID); err != nil {
 		t.Fatalf("context remove %s with a dangling record present: %v", beta.ID, err)
 	}
-	if got := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+alpha.Branch); got != alpha.Revision {
-		t.Errorf("%s: refs/heads/%s = %s, want the indexing to have restored %s", alpha.ID, alpha.Branch, got, alpha.Revision)
+	if got := gitOut(t, "-C", clone, "rev-parse", "--verify", "refs/heads/"+alphaMember.Branch); got != alphaMember.Revision {
+		t.Errorf("%s: refs/heads/%s = %s, want the indexing to have restored %s", alpha.ID, alphaMember.Branch, got, alphaMember.Revision)
 	}
 
 	// And the create path, on the same repository.
@@ -271,15 +268,16 @@ func TestIndexingRestoresAContextRecordWhoseRefIsMissing(t *testing.T) {
 
 	url := demorepo.StartZoekt(t, filepath.Join(data, "zoekt"))
 	for _, c := range []store.Context{alpha, contextRecord(t, data, "ctx-gamma")} {
-		indexed, err := searchRefIndexed(t.Context(), url, c)
+		member := only(t, c)
+		indexed, err := searchRefIndexed(t.Context(), url, member)
 		if err != nil {
 			t.Fatalf("searchRefIndexed(%s): %v", c.ID, err)
 		}
 		if !indexed {
-			t.Errorf("%s: search ref %q is not in the index", c.ID, c.Branch)
+			t.Errorf("%s: search ref %q is not in the index", c.ID, member.Branch)
 		}
 	}
-	if !searchable(t, url, alpha, alphaToken) {
+	if !searchable(t, url, alpha.ID, alphaMember, alphaToken) {
 		t.Errorf("%s cannot find %s after its ref was restored", alpha.ID, alphaToken)
 	}
 }

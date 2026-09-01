@@ -46,14 +46,14 @@ const CBMCommand = "codebase-memory-mcp"
 // The record is written before this runs, so a failure anywhere below leaves a
 // context that is still managed and still removable rather than a checkout
 // nothing knows about.
-func prepareSource(ctx context.Context, repoDir, worktree string, c store.Context) error {
+func prepareSource(ctx context.Context, repoDir, worktree, id string, m store.ContextMember) error {
 	// A worktree of the repository's clone, not a clone of its own: every
 	// context of one repository reads the same object database, so a second
 	// version of it costs a checkout instead of a second copy of the history.
 	// --detach because the revision is a commit and nothing here may create or
 	// move a branch in the clone.
-	if err := runGit(ctx, "-C", repoDir, "worktree", "add", "--detach", worktree, c.Revision); err != nil {
-		return fmt.Errorf("context create: cannot check revision %s of repository %q out at %s: %w", c.Revision, c.Repository, worktree, err)
+	if err := runGit(ctx, "-C", repoDir, "worktree", "add", "--detach", worktree, m.Revision); err != nil {
+		return fmt.Errorf("context create: cannot check revision %s of repository %q out at %s: %w", m.Revision, m.Repository, worktree, err)
 	}
 	// Before anything is indexed, never after: the search index and the graph
 	// are both built from whatever is in the worktree, so a checkout that is
@@ -61,7 +61,7 @@ func prepareSource(ctx context.Context, repoDir, worktree string, c store.Contex
 	// the context's life. The lifecycle asks again once the indexing is done,
 	// which is what makes the pair of checks say the source did not move
 	// underneath it.
-	return verifySource(ctx, worktree, c)
+	return verifySource(ctx, worktree, id, m)
 }
 
 // discardSource deletes the graph and the checkout of one context.
@@ -70,12 +70,12 @@ func prepareSource(ctx context.Context, repoDir, worktree string, c store.Contex
 // this data directory, and it is the one artifact that would otherwise survive
 // the record that names it; a worktree left behind is a directory in the data
 // directory, which the next removal attempt can still take.
-func discardSource(ctx context.Context, repoDir, worktree string, c store.Context) error {
-	if err := deleteGraph(ctx, c); err != nil {
+func discardSource(ctx context.Context, repoDir, worktree, id string, m store.ContextMember) error {
+	if err := deleteGraph(ctx, id, m); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(worktree); err != nil {
-		return fmt.Errorf("context remove: cannot delete the worktree of %q at %s: %w", c.ID, worktree, err)
+		return fmt.Errorf("context remove: cannot delete the worktree of %q at %s: %w", id, worktree, err)
 	}
 	// Removing the directory leaves the clone still administering a worktree
 	// that is not there, and git refuses to add another one at that path until
@@ -94,13 +94,13 @@ func discardSource(ctx context.Context, repoDir, worktree string, c store.Contex
 // SOURCE_MISMATCH and nothing carries on with it, because a context whose
 // source is not what its record says is exactly the wrong-version answer this
 // server exists to prevent.
-func verifySource(ctx context.Context, worktree string, c store.Context) error {
+func verifySource(ctx context.Context, worktree, id string, m store.ContextMember) error {
 	head, err := gitOutput(ctx, "-C", worktree, "rev-parse", "HEAD")
 	if err != nil {
-		return fmt.Errorf("context %q: cannot read the HEAD of its worktree at %s: %w", c.ID, worktree, err)
+		return fmt.Errorf("context %q: cannot read the HEAD of its worktree of repository %q at %s: %w", id, m.Repository, worktree, err)
 	}
-	if head != c.Revision {
-		return vacerr.NewSourceMismatch(c.Revision, head, map[string]any{"context": c.ID, "repository": c.Repository})
+	if head != m.Revision {
+		return vacerr.NewSourceMismatch(m.Revision, head, map[string]any{"context": id, "repository": m.Repository})
 	}
 	return nil
 }
@@ -109,14 +109,14 @@ func verifySource(ctx context.Context, worktree string, c store.Context) error {
 // names. It asks CBM what it has rather than trusting that an index that once
 // succeeded is still there: a graph can be deleted out from under a context by
 // anything else driving the same CBM store.
-func verifyGraph(ctx context.Context, c store.Context) error {
+func verifyGraph(ctx context.Context, id string, m store.ContextMember) error {
 	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "list_projects")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	out, err := cmd.Output()
 	if err != nil {
-		return graphUnavailable(c, fmt.Sprintf("cannot list the graphs it holds: %v: %s", err, lastLine(stderr.Bytes())))
+		return graphUnavailable(id, m, fmt.Sprintf("cannot list the graphs it holds: %v: %s", err, lastLine(stderr.Bytes())))
 	}
 
 	var body struct {
@@ -125,14 +125,14 @@ func verifyGraph(ctx context.Context, c store.Context) error {
 		} `json:"projects"`
 	}
 	if err := json.Unmarshal(out, &body); err != nil {
-		return graphUnavailable(c, fmt.Sprintf("list_projects did not answer with the JSON it promises: %v", err))
+		return graphUnavailable(id, m, fmt.Sprintf("list_projects did not answer with the JSON it promises: %v", err))
 	}
 	for _, project := range body.Projects {
-		if project.Name == c.GraphRef {
+		if project.Name == m.GraphRef {
 			return nil
 		}
 	}
-	return graphUnavailable(c, "it holds no graph of that name")
+	return graphUnavailable(id, m, "it holds no graph of that name")
 }
 
 // indexGraph builds the context's graph out of its checkout.
@@ -141,24 +141,24 @@ func verifyGraph(ctx context.Context, c store.Context) error {
 // status alone is not the whole answer: a run that indexed nothing would exit 0
 // too. The status field is therefore read, so a context only carries on with a
 // graph CBM said it indexed.
-func indexGraph(ctx context.Context, worktree string, c store.Context) error {
-	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "index_repository", "--repo-path", worktree, "--name", c.GraphRef)
+func indexGraph(ctx context.Context, worktree, id string, m store.ContextMember) error {
+	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "index_repository", "--repo-path", worktree, "--name", m.GraphRef)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
 	out, err := cmd.Output()
 	if err != nil {
-		return graphUnavailable(c, fmt.Sprintf("cannot index %s: %v: %s", worktree, err, lastLine(stderr.Bytes())))
+		return graphUnavailable(id, m, fmt.Sprintf("cannot index %s: %v: %s", worktree, err, lastLine(stderr.Bytes())))
 	}
 
 	var body struct {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(out, &body); err != nil {
-		return graphUnavailable(c, fmt.Sprintf("index_repository did not answer with the JSON it promises: %v", err))
+		return graphUnavailable(id, m, fmt.Sprintf("index_repository did not answer with the JSON it promises: %v", err))
 	}
 	if body.Status != "indexed" {
-		return graphUnavailable(c, fmt.Sprintf("index_repository reported %q rather than an indexed graph", body.Status))
+		return graphUnavailable(id, m, fmt.Sprintf("index_repository reported %q rather than an indexed graph", body.Status))
 	}
 	return nil
 }
@@ -169,12 +169,12 @@ func indexGraph(ctx context.Context, worktree string, c store.Context) error {
 // a context whose indexing never finished, or whose graph was already deleted,
 // still has to be removable. A context that never got as far as a generated
 // name has no graph to delete at all.
-func deleteGraph(ctx context.Context, c store.Context) error {
-	if c.GraphRef == "" {
+func deleteGraph(ctx context.Context, id string, m store.ContextMember) error {
+	if m.GraphRef == "" {
 		return nil
 	}
 
-	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "delete_project", "--project", c.GraphRef)
+	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "delete_project", "--project", m.GraphRef)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -183,7 +183,7 @@ func deleteGraph(ctx context.Context, c store.Context) error {
 		if strings.Contains(reason, "not_found") {
 			return nil
 		}
-		return graphUnavailable(c, fmt.Sprintf("cannot delete the graph: %v: %s", err, reason))
+		return graphUnavailable(id, m, fmt.Sprintf("cannot delete the graph: %v: %s", err, reason))
 	}
 	return nil
 }
@@ -200,10 +200,10 @@ func lastLine(out []byte) string {
 	return strings.TrimSpace(lines[len(lines)-1])
 }
 
-func graphUnavailable(c store.Context, reason string) error {
+func graphUnavailable(id string, m store.ContextMember, reason string) error {
 	return vacerr.New(
 		vacerr.GraphProviderUnavailable,
-		fmt.Sprintf("context %q: codebase-memory-mcp: %s", c.ID, reason),
-		map[string]any{"context": c.ID, "repository": c.Repository},
+		fmt.Sprintf("context %q: repository %q: codebase-memory-mcp: %s", id, m.Repository, reason),
+		map[string]any{"context": id, "repository": m.Repository},
 	)
 }

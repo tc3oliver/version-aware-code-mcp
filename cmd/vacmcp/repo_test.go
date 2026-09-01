@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -85,6 +86,13 @@ func openStore(t *testing.T, dataDir string) *store.Store {
 		t.Fatalf("store.Open(%s): %v", dataDir, err)
 	}
 	return s
+}
+
+// sameContext compares two records. A record carries a member list, so it is
+// not one == away, and the assertions that hold a record to be untouched are
+// the point of several tests here.
+func sameContext(a, b store.Context) bool {
+	return a.ID == b.ID && a.State == b.State && a.UpdatedAt.Equal(b.UpdatedAt) && slices.Equal(a.Members, b.Members)
 }
 
 // codeFor returns the vacerr code err carries.
@@ -215,7 +223,9 @@ func TestRepoSyncFetchesWithoutMovingAPinnedRevision(t *testing.T) {
 	// The context a later version of vacmcp would create. Only its record
 	// matters here: it is the only place a pinned revision is written down.
 	if err := s.PutContext(store.Context{
-		ID: "demo-v1", Repository: "demo", Branch: "main", Revision: pinned, GraphRef: "demo-v1", State: "READY",
+		ID:      "demo-v1",
+		Members: []store.ContextMember{{Repository: "demo", Branch: "main", Revision: pinned, GraphRef: "demo-v1"}},
+		State:   "READY",
 	}); err != nil {
 		t.Fatalf("PutContext: %v", err)
 	}
@@ -245,11 +255,11 @@ func TestRepoSyncFetchesWithoutMovingAPinnedRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Context(demo-v1) after sync: %v", err)
 	}
-	if after != before {
+	if !sameContext(after, before) {
 		t.Errorf("the context record changed across sync:\n before %+v\n  after %+v", before, after)
 	}
-	if after.Revision != pinned {
-		t.Errorf("pinned revision = %q after sync, want %q", after.Revision, pinned)
+	if after.Members[0].Revision != pinned {
+		t.Errorf("pinned revision = %q after sync, want %q", after.Members[0].Revision, pinned)
 	}
 
 	r, err := s.Repository("demo")
@@ -329,12 +339,12 @@ func TestRepoRemoveRefusesWhileAContextDependsOnIt(t *testing.T) {
 
 	s := openStore(t, data)
 	for _, id := range []string{"demo-v1", "demo-v2"} {
-		if err := s.PutContext(store.Context{ID: id, Repository: "demo", State: "READY"}); err != nil {
+		if err := s.PutContext(store.Context{ID: id, Members: []store.ContextMember{{Repository: "demo"}}, State: "READY"}); err != nil {
 			t.Fatalf("PutContext(%s): %v", id, err)
 		}
 	}
 	// A context of another repository must not block this one.
-	if err := s.PutContext(store.Context{ID: "other-v1", Repository: "other", State: "READY"}); err != nil {
+	if err := s.PutContext(store.Context{ID: "other-v1", Members: []store.ContextMember{{Repository: "other"}}, State: "READY"}); err != nil {
 		t.Fatalf("PutContext(other-v1): %v", err)
 	}
 
@@ -417,7 +427,7 @@ func TestRepoStatusReportsThePathAndTheDependingContexts(t *testing.T) {
 	if _, err := repoRun(t, data, "add", "demo", "--url", source); err != nil {
 		t.Fatalf("repo add: %v", err)
 	}
-	if err := openStore(t, data).PutContext(store.Context{ID: "demo-v1", Repository: "demo", State: "READY"}); err != nil {
+	if err := openStore(t, data).PutContext(store.Context{ID: "demo-v1", Members: []store.ContextMember{{Repository: "demo"}}, State: "READY"}); err != nil {
 		t.Fatalf("PutContext: %v", err)
 	}
 

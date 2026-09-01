@@ -3,6 +3,7 @@ package managed
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/tc3oliver/version-aware-code-mcp/store"
@@ -66,6 +67,34 @@ func withRepositoryLock(s *store.Store, repository string, fn func() error) erro
 		return fmt.Errorf("cannot lock repository %q at %s: %w", repository, path, err)
 	}
 	return fn()
+}
+
+// withRepositoryLocks runs fn as the only operation on every one of the named
+// repositories, which is what one operation on a context spanning several of
+// them is.
+//
+// Sorted and deduplicated, and both matter. Sorted, because two callers that
+// take the same two locks in opposite orders each hold what the other is
+// waiting for — and this is the only lock in the package taken more than one at
+// a time, so a total order over the names is the whole of the deadlock
+// argument. Deduplicated, because [withRepositoryLock] is not re-entrant:
+// taking one lock twice in one goroutine blocks on a mutex this goroutine
+// itself holds, and while a context may not name one repository twice, a lock
+// must not deadlock on being asked to.
+//
+// The names are taken one inside the next rather than all at once, so every one
+// of them is released on the way out however fn ends.
+func withRepositoryLocks(s *store.Store, repositories []string, fn func() error) error {
+	names := slices.Compact(slices.Sorted(slices.Values(repositories)))
+
+	var take func(int) error
+	take = func(i int) error {
+		if i == len(names) {
+			return fn()
+		}
+		return withRepositoryLock(s, names[i], func() error { return take(i + 1) })
+	}
+	return take(0)
 }
 
 // The server lock decision-6 calls for, which is a different lock from the one
