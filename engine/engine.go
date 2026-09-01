@@ -452,11 +452,20 @@ func (r TraceCallsResult) Graph() provider.CallGraph { return r.graph }
 
 // GetCodeRequest is a read of one line range, at the revision a context
 // declares.
+//
+// Repository picks the one repository of the context the lines are read from,
+// and is the only thing a request may say about where they come from. Left
+// blank — which is what a context over a single repository never needs to fill
+// in — a context naming several is refused rather than read in one of them: two
+// members can both have a src/main.c, and nothing else in the request says which
+// was meant. It selects, it does not scope: a repository the context does not
+// name is refused rather than read. See [selectMembers].
 type GetCodeRequest struct {
-	Context   string
-	Path      string
-	StartLine int
-	EndLine   int
+	Context    string
+	Repository string
+	Path       string
+	StartLine  int
+	EndLine    int
 }
 
 // GetCodeResult is the content with the version it was read at, cited at the
@@ -646,7 +655,8 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 }
 
 // GetCode reads lines [req.StartLine, req.EndLine] of req.Path as they are at
-// the revision the context declares.
+// the revision the context declares, in the repository req.Repository picks out
+// of it or in its only one.
 //
 // The returned context reports the revision the provider actually read at. A
 // context may declare a branch name or a short SHA; reporting the commit the
@@ -670,12 +680,41 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 // there is no repository this server can read. The asymmetry is the compromise,
 // and it is here rather than in the taxonomy.
 func (e *Engine) GetCode(ctx context.Context, req GetCodeRequest) (GetCodeResult, error) {
-	// One member, because a read is answered in one file: a context naming
-	// several repositories is refused here rather than read in one of them.
-	codeCtx, err := e.resolveMember(ctx, req.Context, "")
+	workspace, err := e.resolve(ctx, req.Context)
 	if err != nil {
 		return GetCodeResult{}, err
 	}
+	members, err := selectMembers(req.Context, req.Repository, workspace)
+	if err != nil {
+		return GetCodeResult{}, err
+	}
+
+	// One member, because a read is answered in one file. With req.Repository
+	// left out, a context naming several is refused here rather than read in one
+	// of them — including when only one of them has the path today. Falling back
+	// to that one would make the same request mean something else the moment a
+	// second member with a src/main.c is configured: an answer that changes
+	// version with the configuration around it, under a request that did not
+	// change. It is the rule selectMembers already keeps for a repository outside
+	// the workspace, on the argument's other failure.
+	if len(members) != 1 {
+		// severalRepositories says the same of a workspace, but for the query
+		// that has no repository argument to be told about; here the caller has
+		// one and left it out, and an error that did not say so would leave it
+		// with nothing to fix. The repositories travel with it for the reason
+		// they do there: the caller cannot see the configuration.
+		repositories := make([]string, 0, len(members))
+		for _, member := range members {
+			repositories = append(repositories, member.Repository)
+		}
+		return GetCodeResult{}, vacerr.New(
+			vacerr.InvalidArgument,
+			fmt.Sprintf("context %q names %d repositories (%s), so get_code needs a repository to say which one to read",
+				req.Context, len(repositories), strings.Join(repositories, ", ")),
+			map[string]any{"context": req.Context, "path": req.Path, "repositories": repositories},
+		)
+	}
+	codeCtx := members[0]
 
 	// There is no SOURCE_PROVIDER_UNAVAILABLE in the v0.1.0 code set, and a new
 	// code would be a change to the public tool API for a case the existing
