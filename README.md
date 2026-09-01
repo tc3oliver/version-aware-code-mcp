@@ -418,6 +418,85 @@ vacmcp validate --config vacmcp.yaml    # vacmcp.yaml: ok, 2 contexts
 vacmcp contexts --config vacmcp.yaml    # id, repository, branch, revision
 ```
 
+## Multi-Repo Context
+
+A context can name one repository or several. One naming several is a
+*workspace*: each repository it lists — a *member* — is pinned to its own
+revision, exactly as a single-repository context pins one. A context over one
+repository is a workspace with exactly one member, and answers exactly as it
+did before this feature existed: same arguments, same wire shape, same error
+codes. Nothing about that case changes; multi-repo is what a context does once
+it names a second repository.
+
+```yaml
+contexts:
+  stack-v1:
+    members:
+      - repository: example/backend
+        branch: release/1.x
+        revision: 8af31e2
+        graph_ref: backend-v1
+      - repository: example/frontend
+        branch: release/3.x
+        revision: 1a2b3c4
+        graph_ref: frontend-v3
+```
+
+`config/example.yaml` has this alongside the single-repository contexts above
+it, and `vacmcp validate` loads both the same way. Managed Mode builds the same
+shape from the CLI, with one `--repo`/`--ref` pair per member:
+
+```bash
+vacmcp context create stack-v1 --repo backend --ref release/1.x \
+                               --repo frontend --ref release/3.x
+```
+
+`list_contexts` reports `stack-v1` as `{"id": "stack-v1", "members": [...]}`
+instead of the flat `repository`/`branch`/`revision` a single-member context
+carries — the wire shape follows the member count, one member emitting exactly
+what v0.4.0 did and several emitting the array instead, never both at once.
+Every result's `context` block and every citation follow the same rule: a
+single-member answer's evidence carries no `repository` or `revision` of its
+own, as before, and a several-member answer's evidence — and `search_code`'s
+matches — each carry the repository and revision they were found in. The
+[Tools](#tools) examples below show both shapes.
+
+`repository` is the one argument a request may use to say which member it
+means, and it only narrows what the context already names — a repository the
+context does not have is refused, never reached:
+
+| Tool | One member | Several members |
+| --- | --- | --- |
+| `search_code` | unchanged | searches every member unless `repository` narrows it to one |
+| `get_code` | unchanged | `repository` required — two members could both have the path, so nothing else says which one was meant |
+| `trace_calls` | unchanged | `repository` required — a call graph is one repository's own, so there is no walk without it |
+| `compare_code` / `compare_calls` | unchanged | `repository` required on both sides, and it must name a repository both contexts have |
+
+Nothing is inferred even when only one member happens to have a match today:
+the same request would silently change meaning the day a second member
+acquired the same path or symbol, which is the ambiguity this server always
+refuses rather than guesses at.
+
+### Limitations
+
+v0.5.0 does not:
+
+- **Build, infer or claim a call edge between two repositories.** `trace_calls`
+  walks the one member's graph `repository` names and nothing else — there is
+  no attempt to connect a caller in one repository to a callee in another.
+- **Compare a whole workspace to another.** `compare_code` and `compare_calls`
+  compare one repository at a time, picked out by `repository` on both sides;
+  there is no member-added/member-removed report and no workspace-level diff.
+- **Deduplicate artifacts two workspaces share.** Two Managed Mode workspaces
+  naming the same repository at the same revision each get their own index and
+  graph.
+- **Detect a rename or move.** Unchanged since v0.4.0: a comparison matches
+  paths literally, in a multi-repo workspace exactly as in a single-repository
+  one.
+- **Resolve symbol identity semantically.** Unchanged since v0.4.0: a
+  comparison matches the symbol name that was asked for, textually, one
+  repository at a time.
+
 ## Tools
 
 | Tool | Arguments | Returns |
@@ -549,8 +628,12 @@ a failure, while a symbol neither version has is `SYMBOL_NOT_FOUND`. Identity
 here is textual, not semantic or AST-aware, so a comparison is not an impact
 analysis. Comparison also stays inside one repository: two repositories have no
 shared history, and their call graphs are not two versions of one, so two
-contexts naming different repositories are `INVALID_ARGUMENT`. Comparing across
-repositories waits for the multi-repo contexts in the [Roadmap](#roadmap).
+contexts naming different repositories are `INVALID_ARGUMENT`. In a multi-repo
+workspace this is `repository`'s job to prevent — it picks one repository on
+both sides of a comparison, so two repositories are never compared against
+each other there either. `search_code` is the one tool that does span every
+member of a workspace; see [Multi-Repo Context](#multi-repo-context) and its
+[Limitations](#limitations).
 
 A failure is one shape too, with a code to branch on:
 
@@ -644,8 +727,8 @@ if err != nil {
     return errors.Join(err, eng.Close())
 }
 
-result.Context()   // the version it was answered in
-result.Evidence()  // where the answer can be checked
+result.Context()   // the vacctx.Workspace it was answered in — one member here
+result.Evidence()  // where the answer can be checked, one list per member
 result.Matches()   // the payload
 ```
 
@@ -663,11 +746,15 @@ again, `SOURCE_DIFF_UNAVAILABLE`, and the next section is where that capability
 is implemented.
 
 A request names its scope with context ids: no request type has a branch or
-revision field, and the one repository field there is —
-`SearchCodeRequest.Repository` — narrows a search to one of the repositories its
-context already names rather than reaching outside them. Every successful result
-carries the version it was answered in together with its evidence, because the
-result types have no exported fields and only a method on the engine builds one. The
+revision field, and the `Repository` field some of them have —
+`SearchCodeRequest.Repository`, and its equivalent on `TraceCallsRequest`,
+`GetCodeRequest`, `CompareCodeRequest` and `CompareCallsRequest` — narrows a
+query to one of the repositories its context already names rather than
+reaching outside them; a context naming one repository never needs it, and a
+context naming several has no query without it except `SearchCode`, which
+spans every member unless narrowed. Every successful result carries the
+version it was answered in together with its evidence, because the result
+types have no exported fields and only a method on the engine builds one. The
 version guarantee is inherited by embedding rather than re-implemented.
 
 **Lifecycle.** `Close` releases the dependencies that can be released: one
@@ -705,25 +792,30 @@ Anything under `internal/` is not part of this and may change in any release.
 Four interfaces are the whole required extension surface. Implement them and the
 engine answers out of your backend — an SCIP index, another graph service,
 something in-house — with no fork of anything here. `SearchProvider`,
-`GraphProvider` and `SourceProvider` are each handed the version scope
-(`vacctx.CodeContext`) alongside a cancellation `context.Context`: an
-implementation that ignores the scope answers from the wrong version, which is
-the one thing this project is for. `ContextSource` is where those scopes come
-from rather than something handed one — `Contexts()` lists the versions that
-exist and takes no arguments, and `Resolve(ctx, id)` turns an id into the one it
-names.
+`GraphProvider` and `SourceProvider` are each handed one member's version scope
+(`vacctx.CodeContext`) alongside a cancellation `context.Context`, whether the
+context it came from names one repository or several: an implementation that
+ignores the scope answers from the wrong version, which is the one thing this
+project is for. `ContextSource` is where those scopes come from rather than
+something handed one, and answers with a `vacctx.Workspace` — the set of
+repositories a context id names, one member for a single-repository context and
+several for a multi-repo one, with no separate method or type for either.
+`Contexts(ctx)` lists the workspaces that exist, and `Resolve(ctx, id)` turns
+an id into the one it names; both take a `context.Context` now, so an
+implementation reaching a backend of its own to answer either has somewhere to
+carry cancellation and a deadline.
 
 | Interface | Package | Responsible for |
 | --- | --- | --- |
-| `ContextSource` | `engine` | which versions exist, and resolving an id to one |
-| `SearchProvider` | `provider` | matches confined to that context's repository and branch |
-| `GraphProvider` | `provider` | a traversal of the graph the context's `graph_ref` names, and no other |
-| `SourceProvider` | `provider` | the lines of a file as they are at that context's revision |
+| `ContextSource` | `engine` | which workspaces exist, and resolving an id to one |
+| `SearchProvider` | `provider` | matches confined to one member's repository and branch |
+| `GraphProvider` | `provider` | a traversal of the graph one member's `graph_ref` names, and no other |
+| `SourceProvider` | `provider` | the lines of a file as they are at one member's revision |
 
 ```go
 type ContextSource interface {
-    Contexts() []vacctx.CodeContext
-    Resolve(ctx context.Context, id string) (vacctx.CodeContext, error)
+    Contexts(ctx context.Context) ([]vacctx.Workspace, error)
+    Resolve(ctx context.Context, id string) (vacctx.Workspace, error)
 }
 type SearchProvider interface {
     Search(ctx context.Context, codeCtx vacctx.CodeContext, query SearchQuery) ([]SearchResult, error)
@@ -735,6 +827,18 @@ type SourceProvider interface {
     Read(ctx context.Context, codeCtx vacctx.CodeContext, path string, start, end int) (*SourceContent, error)
 }
 ```
+
+`ContextSource` is a compile-breaking change from the interface v0.4.0 shipped:
+both methods returned `vacctx.CodeContext` then, and `Contexts` took no
+argument. A single-repository implementation needs no new logic to catch up —
+wrap each existing `vacctx.CodeContext` in a one-member
+`vacctx.Workspace{ID: id, Members: []vacctx.CodeContext{c}}` and add the
+`context.Context` parameter — but every implementation has to be touched
+before it compiles again, which is deliberate: the alternative, adding a
+`Members` field to `CodeContext` instead of changing the return type, would
+let an unfixed implementation keep compiling while its `Repository` field
+silently stayed empty — a wrong version served rather than a build caught
+before it ships.
 
 **Optional: comparing two versions.** A `SourceProvider` may additionally
 implement `provider.SourceDiffer`, and that is what `compare_code` is answered
@@ -817,15 +921,18 @@ that puts a repository behind them without anyone assembling one by hand. v0.3.0
 is the same query plane as a Go package, so a program of your own can call it
 directly instead of running this server and talking MCP to it. v0.4.0 is the
 other two tools, the first queries that name two versions and answer in both.
-Ahead of those:
+v0.5.0 is multi-repo contexts: one context id can name several repositories, a
+search spans all of them, and the graph and the comparisons stay scoped to one
+repository at a time — see [Multi-Repo Context](#multi-repo-context). Ahead of
+those:
 
 | Version | Direction |
 | --- | --- |
 | v0.1.0 | version-aware query plane: the four tools, context isolation, evidence — done |
 | v0.2.0 | managed repository and context lifecycle: `repo` and `context` commands, automatic Zoekt and graph provisioning, readiness verification — done |
 | v0.3.0 | embeddable core / extension API: a supported, documented Go API to embed this core in your own gateway, not yet under a compatibility guarantee — done |
-| v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff within one repository — this release |
-| v0.5.0 | multi-repo contexts, cross-repo search and graph |
+| v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff within one repository — done |
+| v0.5.0 | multi-repo contexts: a workspace of several repositories under one context id, search spanning every member, and multi-repo graph query — each member keeps its own revision-scoped graph, so there is no cross-repository call edge — this release |
 | v0.6.0 | operations: metrics, OpenTelemetry, garbage collection, scheduled sync primitives |
 | v1.0.0 | stable public API and compatibility contract |
 

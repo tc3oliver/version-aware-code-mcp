@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Multi-repo contexts: a context id can now name several repositories instead of
+one, each still pinned to its own revision. A context naming one repository —
+every context before this release — answers exactly as it did in v0.4.0: same
+arguments, same wire shape, same error codes. A context naming several is a
+*workspace*; `search_code` is the only tool that spans it by default, and the
+other five narrow to one repository, required by a new `repository` argument
+once a context names more than one.
+
+v0.5.0 does not:
+
+- build, infer or claim a call edge between two repositories;
+- compare a whole workspace to another (no member-added/member-removed report,
+  no workspace-level diff);
+- deduplicate artifacts two workspaces share the same repository and revision;
+- detect a rename or move, in a comparison;
+- resolve symbol identity semantically, in a comparison.
+
+### Added
+
+- `vacctx.Workspace`: a context id now resolves to a set of members — one
+  `vacctx.CodeContext` per repository — instead of a single one. A
+  single-repository context is a workspace of one member, so the engine has
+  one code path through it rather than a single- and a multi-repository one to
+  keep in step with each other.
+- `repository` argument on `search_code`, `get_code`, `trace_calls`,
+  `compare_code` and `compare_calls`: it selects one of the repositories a
+  context names, and is refused with `INVALID_ARGUMENT` — naming the
+  repositories that are selectable — when it names none of them. `search_code`
+  searches every member of the context without it; the other four require it
+  once the context names more than one, rather than answering out of the first
+  member and leaving the rest silently outside the scope.
+- `config`: a context may declare a `members` list instead of the
+  single-repository fields, loaded into the same `vacctx.Workspace` either
+  way. The two spellings are mutually exclusive — declaring both is refused —
+  and a `graph_ref` collision is now checked across every member of every
+  context, not only within one.
+- `vacmcp context create NAME --repo REPO --ref REF [--repo REPO --ref REF ...]`:
+  repeatable `--repo`/`--ref` pairs pin one revision per repository into a
+  single managed context. It is built and torn down as one unit: it reaches
+  `READY` only once every member has been checked out, indexed, given its
+  graph and verified, and one that fails anywhere is `FAILED` whole rather
+  than half servable.
+- Wire shape follows member count, on every tool: a workspace of one member
+  marshals to exactly the bytes v0.4.0 emitted; a workspace of several carries
+  its context as `{id, members: [...]}` instead of the flat fields, and every
+  match and every citation carries its own `repository` and `revision`.
+
+### Changed
+
+- **Breaking (embedding API):** `engine.ContextSource` now returns
+  `vacctx.Workspace` from both methods, and `Contexts` takes a
+  `context.Context`:
+  ```go
+  type ContextSource interface {
+      Contexts(ctx context.Context) ([]vacctx.Workspace, error)
+      Resolve(ctx context.Context, id string) (vacctx.Workspace, error)
+  }
+  ```
+  A single-repository implementation wraps its existing `vacctx.CodeContext`
+  in a one-member `vacctx.Workspace{ID: id, Members: []vacctx.CodeContext{c}}`
+  and needs no other change. The four provider interfaces —
+  `SearchProvider`, `GraphProvider`, `SourceProvider`, `SourceDiffer` — still
+  take one `vacctx.CodeContext` per call and are unaffected. The break is
+  deliberate: the alternative, adding a `Members` field to `CodeContext`
+  instead, would let an existing third-party `ContextSource` keep compiling
+  while answering with an empty `Repository` — a wrong version served
+  silently, rather than a build failure caught before it ships.
+- `search_code` no longer declares an `outputSchema` in `tools/list`. Its
+  context block already changes shape with member count, and a schema
+  inferred from the old flat shape rejected a valid several-member result as a
+  protocol error rather than an answer; the wire shape is decided by the
+  response actually sent, as `get_code`, `trace_calls`, `compare_code` and
+  `compare_calls` already did. This is a visible change for a client that
+  reads `tools/list` to validate results ahead of time — the schema is gone —
+  but `structuredContent` on a call result is unaffected.
+
 ## [0.4.0] - 2026-08-16
 
 Version intelligence: a query can name two versions instead of one, and the
@@ -18,8 +94,10 @@ a symbol renamed between versions is not recognised as the same symbol, since
 each side resolves the name that was asked for on its own and identity here is
 textual rather than semantic or AST-aware; and two contexts naming different
 repositories are `INVALID_ARGUMENT`, because two repositories have no shared
-history and their call graphs are not two versions of one. Comparing across
-repositories waits for multi-repo contexts.
+history and their call graphs are not two versions of one. *(Still true as of
+v0.5.0's multi-repo contexts, below: `repository` selects one repository on
+both sides of a comparison, so two repositories are never compared against
+each other there — only `search_code` spans a whole workspace.)*
 
 ### Added
 
