@@ -41,7 +41,7 @@ func TestManagedSnapshotIsFixedForTheLifeOfTheServer(t *testing.T) {
 	remote := remoteRepository(t)
 
 	vacmcpRun(t, binary, data, "repo", "add", managedRepository, "--url", remote)
-	pinned := createContext(t, binary, data, v1, demorepo.V1)
+	pinned := createContext(t, binary, data, v1, managedPin{managedRepository, demorepo.V1})
 
 	served, stop := startManaged(t, binary, data)
 
@@ -79,7 +79,7 @@ func TestManagedSnapshotIsFixedForTheLifeOfTheServer(t *testing.T) {
 	// Stopped, the same commands go through.
 	stop()
 	vacmcpRun(t, binary, data, "context", "remove", v1)
-	moved := createContext(t, binary, data, v2, demorepo.V2)
+	moved := createContext(t, binary, data, v2, managedPin{managedRepository, demorepo.V2})
 	if moved == pinned {
 		t.Fatalf("context %s pinned %s, the same commit as %s: the two contexts below would not differ", v2, moved, v1)
 	}
@@ -135,7 +135,7 @@ func TestRepoSyncRunsBesideARunningManagedServer(t *testing.T) {
 	remote := remoteRepository(t)
 
 	vacmcpRun(t, binary, data, "repo", "add", managedRepository, "--url", remote)
-	pinned := createContext(t, binary, data, v1, demorepo.V1)
+	pinned := createContext(t, binary, data, v1, managedPin{managedRepository, demorepo.V1})
 
 	moved := advanceRemote(t, remote, demorepo.V1)
 	if moved == pinned {

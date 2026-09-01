@@ -103,7 +103,7 @@ func TestRevisionResolvesADistinctCommitPerBranch(t *testing.T) {
 // test.
 func TestRegeneratingKeepsTheRevisions(t *testing.T) {
 	repo := demorepo.Generate(t)
-	rebuilt := regenerateElsewhere(t)
+	rebuilt := regenerateElsewhere(t, "gen-versioned-demo-repo.sh", "versioned-demo-repo")
 
 	for _, branch := range []string{demorepo.Main, demorepo.V1, demorepo.V2} {
 		want := demorepo.Revision(t, repo, branch)
@@ -113,28 +113,42 @@ func TestRegeneratingKeepsTheRevisions(t *testing.T) {
 	}
 }
 
-// regenerateElsewhere runs a copy of the generator in a temporary root and
-// returns the repository it produced there.
-func regenerateElsewhere(t *testing.T) string {
+// TestRegeneratingKeepsTheSecondRepositorysRevision is
+// [TestRegeneratingKeepsTheRevisions] for the second repository: its generator
+// pins the same identity and dates, and a rebuild has to land on the same
+// commit for the same reason — an already indexed fixture must stay valid.
+func TestRegeneratingKeepsTheSecondRepositorysRevision(t *testing.T) {
+	repo := demorepo.GenerateSecond(t)
+	rebuilt := regenerateElsewhere(t, "gen-second-demo-repo.sh", demorepo.Repo2)
+
+	want := demorepo.Revision(t, repo, demorepo.Repo2Main)
+	if got := demorepo.Revision(t, rebuilt, demorepo.Repo2Main); got != want {
+		t.Fatalf("%s revision = %s after regeneration, want %s", demorepo.Repo2Main, got, want)
+	}
+}
+
+// regenerateElsewhere runs a copy of the named generator script in a
+// temporary root and returns the repository named name it produced there.
+func regenerateElsewhere(t *testing.T, script, name string) string {
 	t.Helper()
 	root := t.TempDir()
 
 	// The generator finds everything from its own path, so a copy in the same
 	// place relative to a different root builds that root's fixture.
-	src, err := os.ReadFile(filepath.Join("..", "..", "testdata", "gen-versioned-demo-repo.sh"))
+	src, err := os.ReadFile(filepath.Join("..", "..", "testdata", script))
 	if err != nil {
 		t.Fatalf("read generator: %v", err)
 	}
 	if err := os.Mkdir(filepath.Join(root, "testdata"), 0o750); err != nil {
 		t.Fatalf("mkdir testdata: %v", err)
 	}
-	script := filepath.Join(root, "testdata", "gen-versioned-demo-repo.sh")
-	if err := os.WriteFile(script, src, 0o700); err != nil {
+	copied := filepath.Join(root, "testdata", script)
+	if err := os.WriteFile(copied, src, 0o700); err != nil {
 		t.Fatalf("write generator: %v", err)
 	}
 
-	if out, err := exec.Command(script).CombinedOutput(); err != nil {
+	if out, err := exec.Command(copied).CombinedOutput(); err != nil {
 		t.Fatalf("generator failed: %v\n%s", err, out)
 	}
-	return filepath.Join(root, "testdata", "versioned-demo-repo")
+	return filepath.Join(root, "testdata", name)
 }

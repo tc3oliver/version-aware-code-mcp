@@ -48,8 +48,8 @@ func TestManagedLifecycleReleaseGate(t *testing.T) {
 	remote := remoteRepository(t)
 
 	vacmcpRun(t, binary, data, "repo", "add", managedRepository, "--url", remote)
-	createContext(t, binary, data, v1, demorepo.V1)
-	createContext(t, binary, data, v2, demorepo.V2)
+	createContext(t, binary, data, v1, managedPin{managedRepository, demorepo.V1})
+	createContext(t, binary, data, v2, managedPin{managedRepository, demorepo.V2})
 
 	assertVersionIsolation(t, serveManaged(t, binary, data), v1, v2)
 }
@@ -74,7 +74,7 @@ func TestManagedContextSurvivesTheRemoteMoving(t *testing.T) {
 	vacmcpRun(t, binary, data, "repo", "add", managedRepository, "--url", remote)
 
 	const before, after = "v1-before", "v1-after"
-	pinned := createContext(t, binary, data, before, demorepo.V1)
+	pinned := createContext(t, binary, data, before, managedPin{managedRepository, demorepo.V1})
 	// demorepo.Revision addresses the fixture's own layout, and the remote here
 	// is a bare repository, so the branch is read straight out of it.
 	if want := gitOut(t, "-C", remote, "rev-parse", "refs/heads/"+demorepo.V1); pinned != want {
@@ -113,7 +113,7 @@ func TestManagedContextSurvivesTheRemoteMoving(t *testing.T) {
 	// The new revision is reachable the only way decision-4 allows: as another
 	// context. Both are then READY over one repository and one branch,
 	// separated by nothing but the commit each pinned.
-	if got := createContext(t, binary, data, after, demorepo.V1); got != moved {
+	if got := createContext(t, binary, data, after, managedPin{managedRepository, demorepo.V1}); got != moved {
 		t.Fatalf("context %s pinned %s, want the moved commit %s", after, got, moved)
 	}
 
@@ -295,20 +295,41 @@ func advanceRemote(t *testing.T, remote, branch string) string {
 	return gitOut(t, "-C", work, "rev-parse", "HEAD")
 }
 
-// createContext runs `vacmcp context create` and returns the revision it
-// pinned, having reached READY.
-func createContext(t *testing.T, binary, data, id, ref string) string {
-	t.Helper()
-	out := vacmcpRun(t, binary, data, "context", "create", id, "--repo", managedRepository, "--ref", ref)
+// managedPin is one repository/ref pair `context create` pins, positional the
+// way the CLI's --repo/--ref flags are.
+type managedPin struct{ repo, ref string }
 
-	fields := strings.Split(strings.TrimSpace(out), "\t")
-	if len(fields) != 3 || fields[0] != id {
-		t.Fatalf("context create %s printed %q, want the id, state and revision", id, out)
+// createContext runs `vacmcp context create` with one --repo/--ref pair per
+// pin and returns the first line's revision, having reached READY.
+//
+// It takes pins rather than a single repository baked in, because a managed
+// context is not always over one: `context create` accepts --repo/--ref
+// repeated for a context over several (cmd/vacmcp's multirepo_integration_test.go
+// is where that path is driven end to end). Every caller in this package
+// still asks for one repository — managedRepository, this file's own — and
+// reads back the one line createContext(t, binary, data, id, managedPin{managedRepository, ref})
+// prints for it; a caller pinning more than one repository would read the
+// rest itself with contextRecord.
+func createContext(t *testing.T, binary, data, id string, pins ...managedPin) string {
+	t.Helper()
+	args := []string{"context", "create", id}
+	for _, p := range pins {
+		args = append(args, "--repo", p.repo, "--ref", p.ref)
+	}
+	out := vacmcpRun(t, binary, data, args...)
+
+	// One row per repository the context names (printMembers), so a
+	// single-repository create — every caller in this file — is the first and
+	// only line: id, state, repository, revision.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	fields := strings.Split(lines[0], "\t")
+	if len(fields) != 4 || fields[0] != id {
+		t.Fatalf("context create %s printed %q, want the id, state, repository and revision", id, out)
 	}
 	if fields[1] != "READY" {
 		t.Fatalf("context create %s left it in state %s, want READY: a context the query plane will not serve", id, fields[1])
 	}
-	return fields[2]
+	return fields[3]
 }
 
 // contextRevision reads back the revision `vacmcp context status` reports, which

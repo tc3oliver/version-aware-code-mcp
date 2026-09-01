@@ -152,7 +152,11 @@ if tools:
 contexts = structured("list_contexts")
 if contexts:
     got = sorted(c["id"] for c in contexts["contexts"])
-    check("list_contexts", got == ["demo-v1", "demo-v2"], f"contexts are {got}")
+    check(
+        "list_contexts",
+        got == ["demo-multi", "demo-v1", "demo-v2"],
+        f"contexts are {got}",
+    )
 
 search = structured("search_code")
 if search:

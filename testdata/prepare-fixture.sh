@@ -2,14 +2,21 @@
 # Makes the versioned demo repository queryable: one branch-aware Zoekt index,
 # one CBM graph per release, and the configuration naming both.
 #
-#   testdata/fixture/zoekt-index   main + release/v1 + release/v2 in one index
-#   testdata/fixture/worktrees/    a checkout per release, what CBM indexes
-#   testdata/fixture/cbm-data/     the three graphs, CBM's own store
+#   testdata/fixture/zoekt-index   both repositories, every branch, one index
+#   testdata/fixture/worktrees/    a checkout per graph, what CBM indexes
+#   testdata/fixture/cbm-data/     the graphs below, CBM's own store
 #   testdata/fixture/config.yaml   repositories + contexts for the integration tests
 #
 # Each release gets its own CBM project, named after its graph_ref. Sharing one
 # project across versions would trace calls against the other version's graph,
 # which is the cross-version contamination this server exists to prevent.
+#
+# A second repository stands beside the first: same Zoekt index directory,
+# indexed separately so Zoekt derives a repository name of its own from its
+# directory (decision-11 §1), colliding with the first on purpose — same path,
+# same symbol name, different content — so multi-repository search, read and
+# trace can be proven against a real collision. See
+# testdata/gen-second-demo-repo.sh.
 #
 # Everything here is a build artifact: the whole fixture directory is wiped and
 # rebuilt on every run, so repeated runs and CI runs land on the same indexes.
@@ -19,6 +26,7 @@ set -euo pipefail
 
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 repo="$root/testdata/versioned-demo-repo"
+repo2="$root/testdata/second-demo-repo"
 fixture="$root/testdata/fixture"
 
 # codebase-memory-mcp is not installed system-wide everywhere; CI points CBM_BIN
@@ -44,22 +52,30 @@ done
 
 rm -rf "$fixture"
 "$root/testdata/gen-versioned-demo-repo.sh"
+"$root/testdata/gen-second-demo-repo.sh"
 
-# Zoekt indexes several branches of one git repository into one shard, so the
-# repo is read once and a query picks its version with branch:.
+# Zoekt indexes several branches of one git repository into one shard, so each
+# repo is read once and a query picks its version with branch:. Two directories
+# indexed into the same -index directory is all it takes for Zoekt to serve two
+# repository names out of it (decision-11 §1) — no other mechanism is needed.
 zoekt-git-index -index "$fixture/zoekt-index" \
 	-branches "main,release/v1,release/v2" "$repo"
+zoekt-git-index -index "$fixture/zoekt-index" \
+	-branches "main" "$repo2"
 
-# CBM indexes a directory, not a revision, so each release needs a real checkout.
+# CBM indexes a directory, not a revision, so each release needs a real
+# checkout. repo_path is a parameter, not just repo, because the second
+# repository's graph is built the same way as the first's.
 graph() {
-	local branch=$1 graph_ref=$2
+	local repo_path=$1 branch=$2 graph_ref=$3
 	local tree="$fixture/worktrees/$graph_ref"
-	git -C "$repo" worktree add --detach -q "$tree" "refs/heads/$branch"
+	git -C "$repo_path" worktree add --detach -q "$tree" "refs/heads/$branch"
 	"$cbm" cli index_repository --repo-path "$tree" --name "$graph_ref"
 }
 
-graph release/v1 vacmcp-demo-v1
-graph release/v2 vacmcp-demo-v2
+graph "$repo" release/v1 vacmcp-demo-v1
+graph "$repo" release/v2 vacmcp-demo-v2
+graph "$repo2" main vacmcp-demo2
 
 # One more graph, and not a version of the demo repository: two packages
 # declaring one function name, which is the ambiguity trace_calls has to report
@@ -92,6 +108,8 @@ providers:
 repositories:
   versioned-demo-repo:
     path: $repo
+  second-demo-repo:
+    path: $repo2
 
 contexts:
   demo-v1:
@@ -104,6 +122,21 @@ contexts:
     branch: release/v2
     revision: $(git -C "$repo" rev-parse refs/heads/release/v2)
     graph_ref: vacmcp-demo-v2
+  # A multi-member context, on top of the two single-repository ones above:
+  # versioned-demo-repo's release/v1 (reusing demo-v1's own graph_ref, since it
+  # is the same repository at the same revision) paired with second-demo-repo.
+  # Both declare a handler.go with a LegacyHandler of their own, which is the
+  # collision cross-repository search, read and trace are proven against.
+  demo-multi:
+    members:
+      - repository: versioned-demo-repo
+        branch: release/v1
+        revision: $(git -C "$repo" rev-parse refs/heads/release/v1)
+        graph_ref: vacmcp-demo-v1
+      - repository: second-demo-repo
+        branch: main
+        revision: $(git -C "$repo2" rev-parse refs/heads/main)
+        graph_ref: vacmcp-demo2
 EOF
 
 echo "prepare-fixture: ready at $fixture"

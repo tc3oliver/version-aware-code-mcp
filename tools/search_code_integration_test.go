@@ -280,22 +280,20 @@ func TestSearchCodeIsDiscoverable(t *testing.T) {
 		}
 	}
 
-	out, err := json.Marshal(tool.OutputSchema)
-	if err != nil {
-		t.Fatalf("marshal output schema: %v", err)
-	}
-	for _, field := range []string{`"context"`, `"evidence"`, `"matches"`} {
-		if !strings.Contains(string(out), field) {
-			t.Errorf("output schema does not describe %s: %s", field, out)
+	// No output schema, deliberately: see AddSearchCode. The shape on the wire
+	// is evidence.Output's to define, and an inferred schema here previously
+	// went stale under it — a several-member context's context block carries
+	// members instead of the flat four fields a struct-inferred schema assumed,
+	// and the SDK enforces a declared schema against the result, so the stale
+	// one rejected a valid answer as a protocol error rather than reporting it.
+	if tool.OutputSchema != nil {
+		out, err := json.Marshal(tool.OutputSchema)
+		if err != nil {
+			t.Fatalf("marshal output schema: %v", err)
 		}
-	}
-	// The lists are never absent, only empty, for the same reason list_contexts
-	// says so: an agent reads this before it sees a result.
-	if strings.Contains(string(out), "null") {
-		t.Errorf("output schema admits null: %s", out)
+		t.Fatalf("search_code declares an output schema %s, want none declared", out)
 	}
 	t.Logf("search_code input schema = %s", in)
-	t.Logf("search_code output schema = %s", out)
 }
 
 // fixtureConfig loads the prepared fixture's configuration, with Zoekt pointed

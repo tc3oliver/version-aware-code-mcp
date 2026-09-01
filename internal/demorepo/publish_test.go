@@ -45,7 +45,7 @@ func TestCompleteNeverReportsAFixtureThatIsStillBeingBuilt(t *testing.T) {
 
 	var caught string
 	for {
-		if caught == "" && complete(repo) {
+		if caught == "" && complete(repo, []string{Main, V1, V2}) {
 			caught = unfinished(repo)
 		}
 		select {
@@ -56,7 +56,7 @@ func TestCompleteNeverReportsAFixtureThatIsStillBeingBuilt(t *testing.T) {
 			if caught != "" {
 				t.Fatalf("complete() reported a fixture that was still being built: %s", caught)
 			}
-			if !complete(repo) {
+			if !complete(repo, []string{Main, V1, V2}) {
 				t.Fatalf("complete() is false after a successful generation of %s\n%s", repo, out.String())
 			}
 			if bad := unfinished(repo); bad != "" {

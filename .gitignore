@@ -4,11 +4,14 @@
 
 # Test fixtures generated at test/CI setup time (see CONTRIBUTING.md)
 /testdata/versioned-demo-repo/
-# The generator's staging and swap-aside directories, present only while it runs.
+/testdata/second-demo-repo/
+# Each generator's staging and swap-aside directories, present only while it runs.
 /testdata/versioned-demo-repo.building/
 /testdata/versioned-demo-repo.stale/
+/testdata/second-demo-repo.building/
+/testdata/second-demo-repo.stale/
 /testdata/fixture/
-/testdata/.demorepo-lock/
+/testdata/.demorepo-lock-*/
 
 # Local configuration
 *.local.yaml
