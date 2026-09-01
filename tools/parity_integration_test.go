@@ -5,6 +5,7 @@ package tools
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/engine"
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
+	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
@@ -45,10 +47,17 @@ import (
 // both sides of the comparison, so one type serves for all of them rather than
 // three near-identical ones. Decoding into it is also what pins the field names:
 // a wrong json tag leaves the field it should have filled empty.
+//
+// Context and Evidence are each wide enough for both member-count shapes
+// rather than the flat one alone: [listedContext] already carries the members
+// array decision-11 §5 adds, and [parityEvidence] is evidence.wireEvidence's
+// two extra fields decoded, so a search across demo-multi's members compares
+// on the repository and revision each citation and match carries and not only
+// on the fields every single-repository answer already had.
 type parityWire struct {
 	// doc-1's Tool Contract half, on every successful result.
-	Context  listedContext       `json:"context"`
-	Evidence []evidence.Evidence `json:"evidence"`
+	Context  listedContext    `json:"context"`
+	Evidence []parityEvidence `json:"evidence"`
 
 	// search_code's payload.
 	Matches []searchMatch `json:"matches"`
@@ -64,6 +73,51 @@ type parityWire struct {
 	StartLine int    `json:"start_line"`
 	EndLine   int    `json:"end_line"`
 	Content   string `json:"content"`
+}
+
+// parityEvidence is one citation as a client receives it, in whichever of
+// evidence.Output's two shapes the answer's member count produced: Repository
+// and Revision stay at their zero value when the context named one repository
+// — that fact already lives in the context block once — and carry the member
+// each citation was found in when it named several. The old plain
+// []evidence.Evidence this field used to be had nowhere to put those two: a
+// wrong or absent json tag on them would leave both sides of the comparison
+// having silently dropped the same fact, agreeing with each other about
+// nothing.
+type parityEvidence struct {
+	Location   evidence.Location `json:"location"`
+	Snippet    string            `json:"snippet,omitempty"`
+	Repository string            `json:"repository,omitempty"`
+	Revision   string            `json:"revision,omitempty"`
+}
+
+// evidenceOnTheWire projects the engine's citations — one list per member of
+// workspace, in [engine.answer.Evidence]'s own pairing — onto the flat,
+// attributed list [evidence.Output] emits: unattributed when workspace names
+// one member, exactly as [evidence.Evidence] always was, and carrying that
+// member's own repository and revision on every item when it names several.
+//
+// It is written out here rather than read off evidence.Output's own
+// projection (unexported, and the encoder under test) for the reason this
+// file's own doc comment gives for the rest of it: an encoder cannot also be
+// the source of the expectation it is compared to.
+func evidenceOnTheWire(t *testing.T, workspace vacctx.Workspace, cited [][]evidence.Evidence) []parityEvidence {
+	t.Helper()
+	if len(cited) != len(workspace.Members) {
+		t.Fatalf("the engine cited %d repositories for %d members", len(cited), len(workspace.Members))
+	}
+	attributed := len(workspace.Members) > 1
+	items := make([]parityEvidence, 0)
+	for i, member := range workspace.Members {
+		for _, item := range cited[i] {
+			found := parityEvidence{Location: item.Location, Snippet: item.Snippet}
+			if attributed {
+				found.Repository, found.Revision = member.Repository, member.Revision
+			}
+			items = append(items, found)
+		}
+	}
+	return items
 }
 
 // The two versions of the demo repository, and the handler that exists in each.
@@ -121,16 +175,16 @@ func TestEngineAndMCPAnswerIdentically(t *testing.T) {
 
 	for _, version := range parityVersions {
 		t.Run(version.id, func(t *testing.T) {
-			t.Run("search_code", func(t *testing.T) { paritySearchCode(t, eng, session, version.id, version.own, version.other) })
-			t.Run("trace_calls", func(t *testing.T) { parityTraceCalls(t, eng, session, version.id, version.own, version.other) })
-			t.Run("get_code", func(t *testing.T) { parityGetCode(t, eng, session, version.id, version.own, version.other) })
+			t.Run("search_code", func(t *testing.T) { paritySearchCode(t, cfg, eng, session, version.id, version.own, version.other) })
+			t.Run("trace_calls", func(t *testing.T) { parityTraceCalls(t, cfg, eng, session, version.id, version.own, version.other) })
+			t.Run("get_code", func(t *testing.T) { parityGetCode(t, cfg, eng, session, version.id, version.own, version.other) })
 		})
 	}
 }
 
 // paritySearchCode compares the two paths through search_code: an answer, the
 // empty answer that is version isolation, and a refusal.
-func paritySearchCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSession, contextID, own, other string) {
+func paritySearchCode(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession, contextID, own, other string) {
 	t.Helper()
 
 	search := func(query string) parityWire {
@@ -147,10 +201,10 @@ func paritySearchCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSessi
 		}
 		direct := parityWire{
 			Context:  onTheWire(t, result.Context()),
-			Evidence: citations(t, result.Evidence()),
+			Evidence: evidenceOnTheWire(t, result.Context(), result.Evidence()),
 			Matches:  matches,
 		}
-		wire, raw := parityResult(t, session, "search_code", map[string]any{"context": contextID, "query": query})
+		wire, raw := parityResult(t, cfg, session, "search_code", map[string]any{"context": contextID, "query": query})
 		return assertParity(t, "search_code("+contextID+", "+query+")", direct, wire, raw)
 	}
 
@@ -180,7 +234,7 @@ func paritySearchCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSessi
 // refusal that is version isolation — the other version's symbol is not in this
 // version's graph, so tracing it is SYMBOL_NOT_FOUND on both sides rather than
 // a reach across to the graph that has it.
-func parityTraceCalls(t *testing.T, eng *engine.Engine, session *mcp.ClientSession, contextID, own, other string) {
+func parityTraceCalls(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession, contextID, own, other string) {
 	t.Helper()
 
 	args := map[string]any{"context": contextID, "symbol": "Process", "direction": "callees", "depth": 3}
@@ -199,11 +253,11 @@ func parityTraceCalls(t *testing.T, eng *engine.Engine, session *mcp.ClientSessi
 	}
 	direct := parityWire{
 		Context:  onTheWire(t, result.Context()),
-		Evidence: citations(t, result.Evidence()),
+		Evidence: evidenceOnTheWire(t, result.Context(), result.Evidence()),
 		Symbol:   graph.Symbol,
 		Calls:    calls,
 	}
-	wire, raw := parityResult(t, session, "trace_calls", args)
+	wire, raw := parityResult(t, cfg, session, "trace_calls", args)
 	traced := assertParity(t, "trace_calls("+contextID+", Process)", direct, wire, raw)
 
 	// Agreement is only worth something if both sides walked a real graph, and
@@ -230,7 +284,7 @@ func parityTraceCalls(t *testing.T, eng *engine.Engine, session *mcp.ClientSessi
 
 // parityGetCode compares the two paths through get_code: the same file read at
 // each version's revision, and a path no revision has.
-func parityGetCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSession, contextID, own, other string) {
+func parityGetCode(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession, contextID, own, other string) {
 	t.Helper()
 
 	// processor.go lines 4 to 6 are the body of Process() on every branch, which
@@ -249,13 +303,13 @@ func parityGetCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSession,
 	src := result.Source()
 	direct := parityWire{
 		Context:   onTheWire(t, result.Context()),
-		Evidence:  citations(t, result.Evidence()),
+		Evidence:  evidenceOnTheWire(t, result.Context(), result.Evidence()),
 		Path:      src.Path,
 		StartLine: src.StartLine,
 		EndLine:   src.EndLine,
 		Content:   src.Content,
 	}
-	wire, raw := parityResult(t, session, "get_code", args)
+	wire, raw := parityResult(t, cfg, session, "get_code", args)
 	read := assertParity(t, "get_code("+contextID+", "+path+")", direct, wire, raw)
 
 	// The bytes both sides agreed on are this version's bytes. Without this the
@@ -274,6 +328,393 @@ func parityGetCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSession,
 			"context": contextID, "path": "does/not/exist.go", "start_line": 1, "end_line": 1,
 		}),
 		vacerr.InvalidArgument)
+}
+
+// TestEngineAndMCPAnswerIdenticallyOverAMultiMemberWorkspace is AC #1, #2 and
+// #9's harness: decision-8's release gate held over demo-multi, the fixture's
+// workspace of two repositories, rather than only over the single-repository
+// contexts [TestEngineAndMCPAnswerIdentically] compares.
+//
+// list_contexts already proves this for every configured context — demo-multi
+// included — because that test's own list_contexts subtest compares the whole
+// list [engine.Engine.ListContexts] and the tool return, and demo-multi is one
+// of the entries in it. What that subtest cannot reach is a query that runs
+// *inside* demo-multi, so this is the rest of decision-11 §5's boundary: a
+// search left unnarrowed answers with the members shape [parityEvidence] and
+// [searchMatch] carry their extra fields for, and every other tool answers
+// narrowed to the one member repository picks out — the same flat shape
+// single-repository parity already covers, sourced from a context that
+// happens to name several.
+func TestEngineAndMCPAnswerIdenticallyOverAMultiMemberWorkspace(t *testing.T) {
+	cfg := parityFixture(t)
+	eng := parityEngine(t, cfg)
+	session := paritySession(t, cfg)
+
+	t.Run("search_code_whole_workspace", func(t *testing.T) { parityMultiSearch(t, cfg, eng, session) })
+
+	// Invoke, Process and NewHandler are each one repository's own — the first
+	// second-demo-repo's, the other two versioned-demo-repo's — so a search for
+	// one narrowed to the other proves isolation the way [paritySearchCode]'s
+	// own and other do, unlike LegacyHandler, which both members declare and so
+	// cannot say which repository was actually searched.
+	//
+	// multiRepo2's absent term is NewHandler rather than Process:
+	// gen-second-demo-repo.sh's own invoke.go names Process in a doc comment
+	// ("must never be versioned-demo-repo's Process"), which Zoekt's full-text
+	// search finds there regardless of Process never being declared — a
+	// collision in this fixture's own prose, not the isolation this test
+	// checks. NewHandler names nothing second-demo-repo's text mentions at all.
+	t.Run("search_code_repository_"+multiRepo1, func(t *testing.T) {
+		parityMultiSearchNarrowed(t, cfg, eng, session, multiRepo1, "Process", "Invoke")
+	})
+	t.Run("search_code_repository_"+multiRepo2, func(t *testing.T) {
+		parityMultiSearchNarrowed(t, cfg, eng, session, multiRepo2, "Invoke", "NewHandler")
+	})
+
+	// handler.go's own line count differs per repository — see
+	// multirepo_integration_test.go's TestGetCodeOverAMultiMemberWorkspace
+	// ReadsEachRepositorysOwnContent, which this end line is copied from.
+	t.Run("get_code_repository_"+multiRepo1, func(t *testing.T) {
+		parityMultiGetCode(t, cfg, eng, session, multiRepo1, 6, "legacy: ", "second: ")
+	})
+	t.Run("get_code_repository_"+multiRepo2, func(t *testing.T) {
+		parityMultiGetCode(t, cfg, eng, session, multiRepo2, 9, "second: ", "legacy: ")
+	})
+
+	t.Run("trace_calls_repository_"+multiRepo1, func(t *testing.T) {
+		parityMultiTraceCalls(t, cfg, eng, session, multiRepo1, "Process", "Invoke")
+	})
+	t.Run("trace_calls_repository_"+multiRepo2, func(t *testing.T) {
+		parityMultiTraceCalls(t, cfg, eng, session, multiRepo2, "Invoke", "Process")
+	})
+
+	// repository selects one member per side of a comparison (decision-11 §4),
+	// so demo-multi's own versioned-demo-repo member — the same repository,
+	// revision and graph_ref as demo-v1 — compared against demo-v2 is the same
+	// comparison [parityCompareCode] and [parityCompareCalls] already answer,
+	// reached through a multi-member context and a repository argument instead
+	// of a second single-repository one.
+	t.Run("compare_code_repository_"+multiRepo1, func(t *testing.T) { parityMultiCompareCode(t, cfg, eng, session) })
+	t.Run("compare_calls_repository_"+multiRepo1, func(t *testing.T) { parityMultiCompareCalls(t, cfg, eng, session) })
+}
+
+// parityMultiSearch compares the two paths through search_code left unnarrowed
+// over demo-multi: the shape [TestEngineAndMCPAnswerIdentically]'s own
+// paritySearchCode never reaches, because every context it runs against names
+// one repository.
+func parityMultiSearch(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession) {
+	t.Helper()
+
+	// LegacyHandler is what both members declare, on purpose: a match that
+	// crossed members would still be a real LegacyHandler, so this is the query
+	// that puts the attribution on every match and every citation to the proof,
+	// not merely the one that finds something.
+	const query = "LegacyHandler"
+	result, err := eng.SearchCode(t.Context(), engine.SearchCodeRequest{Context: demorepo.MultiContext, Query: query})
+	if err != nil {
+		t.Fatalf("engine.SearchCode(%s, %s): %v", demorepo.MultiContext, query, err)
+	}
+	workspace := result.Context()
+	if len(workspace.Members) != 2 {
+		t.Fatalf("SearchCode(%s) answered with members %+v, want the two it names", demorepo.MultiContext, workspace.Members)
+	}
+
+	matches := make([]searchMatch, 0, len(result.Matches()))
+	for _, match := range result.Matches() {
+		matches = append(matches, searchMatch{
+			Path: match.Path, Line: match.Line, Snippet: match.Snippet,
+			Repository: match.Repository, Revision: match.Revision,
+		})
+	}
+	direct := parityWire{
+		// list is production's own per-workspace projection (list_contexts.go),
+		// reused rather than duplicated here: it is what decides the shape a
+		// workspace's member count gets, and a second copy of that decision
+		// could drift from the one list_contexts actually runs.
+		Context:  list([]vacctx.Workspace{workspace})[0],
+		Evidence: evidenceOnTheWire(t, workspace, result.Evidence()),
+		Matches:  matches,
+	}
+	wire, raw := parityResult(t, cfg, session, "search_code", map[string]any{"context": demorepo.MultiContext, "query": query})
+	found := assertParity(t, "search_code("+demorepo.MultiContext+", "+query+")", direct, wire, raw)
+
+	seenRepository := map[string]bool{}
+	for _, match := range found.Matches {
+		if match.Repository == "" || match.Revision == "" {
+			t.Errorf("match %+v carries no repository or revision, want the member it was found in", match)
+		}
+		seenRepository[match.Repository] = true
+	}
+	for _, repository := range []string{multiRepo1, multiRepo2} {
+		if !seenRepository[repository] {
+			t.Errorf("search_code(%s, %s) matches = %+v, want at least one from %s", demorepo.MultiContext, query, found.Matches, repository)
+		}
+	}
+}
+
+// parityMultiSearchNarrowed compares the two paths through search_code
+// narrowed to one member of demo-multi by repository: the flat, unattributed
+// shape a single-repository context already gets, sourced from a context that
+// names several. own is a symbol only repository declares and absent is a
+// real symbol that belongs to the other member, mirroring the own/other pair
+// [paritySearchCode] checks isolation with.
+func parityMultiSearchNarrowed(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession, repository, own, absent string) {
+	t.Helper()
+
+	search := func(query string) parityWire {
+		t.Helper()
+		result, err := eng.SearchCode(t.Context(), engine.SearchCodeRequest{
+			Context: demorepo.MultiContext, Repository: repository, Query: query,
+		})
+		if err != nil {
+			t.Fatalf("engine.SearchCode(%s, repository=%s, %s): %v", demorepo.MultiContext, repository, query, err)
+		}
+		workspace := result.Context()
+		if len(workspace.Members) != 1 || workspace.Members[0].Repository != repository {
+			t.Fatalf("SearchCode(%s, repository=%s) answered with members %+v, want the one it names", demorepo.MultiContext, repository, workspace.Members)
+		}
+
+		matches := make([]searchMatch, 0, len(result.Matches()))
+		for _, match := range result.Matches() {
+			matches = append(matches, searchMatch{Path: match.Path, Line: match.Line, Snippet: match.Snippet})
+		}
+		direct := parityWire{
+			Context:  onTheWire(t, workspace),
+			Evidence: evidenceOnTheWire(t, workspace, result.Evidence()),
+			Matches:  matches,
+		}
+		wire, raw := parityResult(t, cfg, session, "search_code", map[string]any{
+			"context": demorepo.MultiContext, "repository": repository, "query": query,
+		})
+		return assertParity(t, "search_code("+demorepo.MultiContext+", repository="+repository+", "+query+")", direct, wire, raw)
+	}
+
+	if found := search(own); len(found.Matches) == 0 {
+		t.Errorf("search_code(%s, repository=%s, %s) found nothing on either side", demorepo.MultiContext, repository, own)
+	}
+	if found := search(absent); len(found.Matches) != 0 {
+		t.Errorf("search_code(%s, repository=%s, %s) = %+v, want no matches: that belongs to the other repository",
+			demorepo.MultiContext, repository, absent, found.Matches)
+	}
+}
+
+// parityMultiGetCode compares the two paths through get_code narrowed to one
+// member of demo-multi by repository. handler.go exists in both members and
+// says something different in each, which is where a read answered from the
+// wrong one would show it; endLine is that repository's own line count,
+// because get_code refuses a range past the end of the file rather than
+// clamping it.
+func parityMultiGetCode(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession, repository string, endLine int, want, absent string) {
+	t.Helper()
+
+	const path = "handler.go"
+	args := map[string]any{
+		"context": demorepo.MultiContext, "repository": repository, "path": path, "start_line": 1, "end_line": endLine,
+	}
+	result, err := eng.GetCode(t.Context(), engine.GetCodeRequest{
+		Context: demorepo.MultiContext, Repository: repository, Path: path, StartLine: 1, EndLine: endLine,
+	})
+	if err != nil {
+		t.Fatalf("engine.GetCode(%s, repository=%s, %s): %v", demorepo.MultiContext, repository, path, err)
+	}
+	workspace := result.Context()
+	if len(workspace.Members) != 1 || workspace.Members[0].Repository != repository {
+		t.Fatalf("GetCode(%s, repository=%s) answered with members %+v, want the one it names", demorepo.MultiContext, repository, workspace.Members)
+	}
+
+	src := result.Source()
+	direct := parityWire{
+		Context:   onTheWire(t, workspace),
+		Evidence:  evidenceOnTheWire(t, workspace, result.Evidence()),
+		Path:      src.Path,
+		StartLine: src.StartLine,
+		EndLine:   src.EndLine,
+		Content:   src.Content,
+	}
+	wire, raw := parityResult(t, cfg, session, "get_code", args)
+	read := assertParity(t, "get_code("+demorepo.MultiContext+", repository="+repository+", "+path+")", direct, wire, raw)
+
+	if !strings.Contains(read.Content, want) || strings.Contains(read.Content, absent) {
+		t.Errorf("get_code(%s, repository=%s, %s) = %q, want the %s body", demorepo.MultiContext, repository, path, read.Content, want)
+	}
+}
+
+// parityMultiTraceCalls compares the two paths through trace_calls narrowed to
+// one member of demo-multi by repository. LegacyHandler is declared in both
+// members' graphs, so a walk answered from the wrong one reports the wrong
+// caller among LegacyHandler's callers rather than merely a different count —
+// the same collision multirepo_integration_test.go's own trace_calls test
+// walks.
+func parityMultiTraceCalls(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession, repository, wantCaller, absentCaller string) {
+	t.Helper()
+
+	args := map[string]any{
+		"context": demorepo.MultiContext, "repository": repository, "symbol": "LegacyHandler", "direction": "callers", "depth": 2,
+	}
+	result, err := eng.TraceCalls(t.Context(), engine.TraceCallsRequest{
+		Context: demorepo.MultiContext, Repository: repository, Symbol: "LegacyHandler", Direction: provider.Callers, Depth: 2,
+	})
+	if err != nil {
+		t.Fatalf("engine.TraceCalls(%s, repository=%s, LegacyHandler): %v", demorepo.MultiContext, repository, err)
+	}
+	workspace := result.Context()
+	if len(workspace.Members) != 1 || workspace.Members[0].Repository != repository {
+		t.Fatalf("TraceCalls(%s, repository=%s) answered with members %+v, want the one it names", demorepo.MultiContext, repository, workspace.Members)
+	}
+
+	graph := result.Graph()
+	calls := make([]call, 0, len(graph.Edges))
+	for _, edge := range graph.Edges {
+		calls = append(calls, call{Caller: edge.Caller, Callee: edge.Callee, Path: edge.Path, Line: edge.Line})
+	}
+	direct := parityWire{
+		Context:  onTheWire(t, workspace),
+		Evidence: evidenceOnTheWire(t, workspace, result.Evidence()),
+		Symbol:   graph.Symbol,
+		Calls:    calls,
+	}
+	wire, raw := parityResult(t, cfg, session, "trace_calls", args)
+	traced := assertParity(t, "trace_calls("+demorepo.MultiContext+", repository="+repository+", LegacyHandler)", direct, wire, raw)
+
+	callers := callersOf(traced.Calls, "LegacyHandler")
+	if !contains(callers, wantCaller) {
+		t.Errorf("LegacyHandler's callers in %s = %v, want it to include %s", repository, callers, wantCaller)
+	}
+	if contains(callers, absentCaller) {
+		t.Errorf("LegacyHandler's callers in %s = %v, which includes %s from the other repository: the trace crossed graphs", repository, callers, absentCaller)
+	}
+}
+
+// parityMultiCompareCode compares the two paths through compare_code with the
+// from side narrowed out of demo-multi by repository: the same processor.go
+// MODIFIED comparison [parityCompareCode] runs between demo-v1 and demo-v2,
+// reached with one side named through the multi-member context instead.
+func parityMultiCompareCode(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession) {
+	t.Helper()
+
+	const path = "processor.go"
+	args := map[string]any{
+		"from_context": demorepo.MultiContext, "repository": multiRepo1, "to_context": v2, "path": path,
+	}
+	result, err := eng.CompareCode(t.Context(), engine.CompareCodeRequest{
+		FromContext: demorepo.MultiContext, Repository: multiRepo1, ToContext: v2, Path: path,
+	})
+	if err != nil {
+		t.Fatalf("engine.CompareCode(%s repository=%s, %s, %s): %v", demorepo.MultiContext, multiRepo1, v2, path, err)
+	}
+	direct := comparedCodeOnTheWire(t, result)
+
+	res, raw := compareRaw(t, session, "compare_code", args)
+	if res.IsError {
+		t.Fatalf("compare_code(%v) failed: %s", args, raw)
+	}
+	var wire compareCodeWire
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
+	}
+	assertNoGraphRefLeak(t, cfg, "compare_code", raw)
+
+	if !reflect.DeepEqual(direct, wire) {
+		t.Errorf("compare_code(%s repository=%s, %s, %s):\n  engine: %+v\n     MCP: %+v", demorepo.MultiContext, multiRepo1, v2, path, direct, wire)
+	}
+	if wire.Change != "MODIFIED" || wire.Path != path {
+		t.Errorf("compare_code(%s repository=%s, %s, %s) = %q at %q, want MODIFIED at %s",
+			demorepo.MultiContext, multiRepo1, v2, path, wire.Change, wire.Path, path)
+	}
+	assertParitySide(t, "from", wire.From, raw, true, memberOf(t, cfg, demorepo.MultiContext, multiRepo1))
+	assertParitySide(t, "to", wire.To, raw, true, only(cfg, v2))
+	t.Logf("compare_code(%s repository=%s, %s, %s): both sides answered %s", demorepo.MultiContext, multiRepo1, v2, path, raw)
+}
+
+// parityMultiCompareCalls is [parityMultiCompareCode]'s mirror for
+// compare_calls: the same Process added-NewHandler/removed-LegacyHandler
+// comparison [parityCompareCalls] runs between demo-v1 and demo-v2, with the
+// from side narrowed out of demo-multi by repository instead.
+func parityMultiCompareCalls(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession) {
+	t.Helper()
+
+	args := map[string]any{
+		"from_context": demorepo.MultiContext, "repository": multiRepo1, "to_context": v2,
+		"symbol": "Process", "direction": "callees", "depth": 1,
+	}
+	result, err := eng.CompareCalls(t.Context(), engine.CompareCallsRequest{
+		FromContext: demorepo.MultiContext, Repository: multiRepo1, ToContext: v2,
+		Symbol: "Process", Direction: provider.Callees, Depth: 1,
+	})
+	if err != nil {
+		t.Fatalf("engine.CompareCalls(%s repository=%s, %s, Process): %v", demorepo.MultiContext, multiRepo1, v2, err)
+	}
+	direct := comparedCallsOnTheWire(t, result)
+	wire, raw := compareCallsOnFixture(t, cfg, session, args)
+
+	if !reflect.DeepEqual(direct, wire) {
+		t.Errorf("compare_calls(%s repository=%s, %s, Process):\n  engine: %+v\n     MCP: %+v", demorepo.MultiContext, multiRepo1, v2, direct, wire)
+	}
+	if wire.Presence != "BOTH" {
+		t.Errorf("compare_calls(%s repository=%s, %s, Process) presence = %q, want BOTH", demorepo.MultiContext, multiRepo1, v2, wire.Presence)
+	}
+	if got := classified(wire.Added); !slices.Equal(got, []string{"Process -> NewHandler"}) {
+		t.Errorf("compare_calls(%s repository=%s, %s, Process) added = %v, want [Process -> NewHandler]", demorepo.MultiContext, multiRepo1, v2, got)
+	}
+	if got := classified(wire.Removed); !slices.Equal(got, []string{"Process -> LegacyHandler"}) {
+		t.Errorf("compare_calls(%s repository=%s, %s, Process) removed = %v, want [Process -> LegacyHandler]", demorepo.MultiContext, multiRepo1, v2, got)
+	}
+	assertParitySide(t, "from", wire.From, raw, true, memberOf(t, cfg, demorepo.MultiContext, multiRepo1))
+	assertParitySide(t, "to", wire.To, raw, true, only(cfg, v2))
+	t.Logf("compare_calls(%s repository=%s, %s, Process): both sides answered %s", demorepo.MultiContext, multiRepo1, v2, raw)
+}
+
+// TestEngineAndMCPRefuseAMultiMemberWorkspaceWithoutARepositoryIdentically is
+// AC #2's other half over demo-multi: the four tools decision-11 §3 requires a
+// repository from refuse identically, with the same INVALID_ARGUMENT and the
+// same repositories named in the details, whether asked of the engine or
+// through MCP. search_code is absent for the reason [SearchCodeRequest]'s own
+// doc gives: repository is optional there, so a blank one is a wider search
+// and not a refusal.
+func TestEngineAndMCPRefuseAMultiMemberWorkspaceWithoutARepositoryIdentically(t *testing.T) {
+	cfg := parityFixture(t)
+	eng := parityEngine(t, cfg)
+	session := paritySession(t, cfg)
+
+	t.Run("get_code", func(t *testing.T) {
+		_, err := eng.GetCode(t.Context(), engine.GetCodeRequest{
+			Context: demorepo.MultiContext, Path: "handler.go", StartLine: 1, EndLine: 9,
+		})
+		assertCodeParity(t, "get_code("+demorepo.MultiContext+", no repository)", directCode(t, err),
+			parityErrorCode(t, session, "get_code", map[string]any{
+				"context": demorepo.MultiContext, "path": "handler.go", "start_line": 1, "end_line": 9,
+			}), vacerr.InvalidArgument)
+	})
+
+	t.Run("trace_calls", func(t *testing.T) {
+		_, err := eng.TraceCalls(t.Context(), engine.TraceCallsRequest{
+			Context: demorepo.MultiContext, Symbol: "LegacyHandler", Direction: provider.Callers, Depth: 2,
+		})
+		assertCodeParity(t, "trace_calls("+demorepo.MultiContext+", no repository)", directCode(t, err),
+			parityErrorCode(t, session, "trace_calls", map[string]any{
+				"context": demorepo.MultiContext, "symbol": "LegacyHandler", "direction": "callers", "depth": 2,
+			}), vacerr.InvalidArgument)
+	})
+
+	t.Run("compare_code", func(t *testing.T) {
+		_, err := eng.CompareCode(t.Context(), engine.CompareCodeRequest{
+			FromContext: demorepo.MultiContext, ToContext: v2, Path: "processor.go",
+		})
+		assertCodeParity(t, "compare_code("+demorepo.MultiContext+", no repository)", directCode(t, err),
+			parityErrorCode(t, session, "compare_code", map[string]any{
+				"from_context": demorepo.MultiContext, "to_context": v2, "path": "processor.go",
+			}), vacerr.InvalidArgument)
+	})
+
+	t.Run("compare_calls", func(t *testing.T) {
+		_, err := eng.CompareCalls(t.Context(), engine.CompareCallsRequest{
+			FromContext: demorepo.MultiContext, ToContext: v2, Symbol: "Process", Direction: provider.Callees, Depth: 1,
+		})
+		assertCodeParity(t, "compare_calls("+demorepo.MultiContext+", no repository)", directCode(t, err),
+			parityErrorCode(t, session, "compare_calls", map[string]any{
+				"from_context": demorepo.MultiContext, "to_context": v2, "symbol": "Process", "direction": "callees", "depth": 1,
+			}), vacerr.InvalidArgument)
+	})
 }
 
 // TestEngineAndMCPCompareIdentically is the same gate for the two comparison
@@ -400,7 +841,7 @@ func parityCompareCalls(t *testing.T, cfg *config.Config, eng *engine.Engine, se
 				t.Fatalf("engine.CompareCalls(%s): %v", tc.symbol, err)
 			}
 			direct := comparedCallsOnTheWire(t, result)
-			wire, raw := compareCallsOnFixture(t, session, map[string]any{
+			wire, raw := compareCallsOnFixture(t, cfg, session, map[string]any{
 				"from_context": v1, "to_context": v2,
 				"symbol": tc.symbol, "direction": string(tc.direction), "depth": 1,
 			})
@@ -719,6 +1160,103 @@ func paritySession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	return clientSession
 }
 
+// paritySessionOverStdio is [paritySession]'s own registration — every tool,
+// on a second, independently built *mcp.Server and engine over cfg — reached
+// instead over [mcp.IOTransport], the newline-delimited-JSON framing
+// mcp.StdioTransport itself is: `Connect` on that type does nothing but pair
+// os.Stdin and os.Stdout into one of these. Paired over an in-memory pipe
+// rather than run as the built binary's subprocess, because what could differ
+// between the two transports this server offers is that framing and nothing
+// about a process boundary: the tool handlers, the engine and doc-1's Tool
+// Contract are all reached identically either way, and the process boundary
+// itself is doc-1 §15's release gate's to check, over the binary it builds.
+//
+// A third engine and a third *mcp.Server, not [paritySession]'s own, for the
+// reason that function's doc gives: agreement is only interesting between two
+// independently constructed things, and comparing a server's HTTP answer to
+// its own STDIO answer would only prove it agrees with itself down two wires.
+func paritySessionOverStdio(t *testing.T, cfg *config.Config) *mcp.ClientSession {
+	t.Helper()
+
+	srv := server.New(testVersion)
+	eng := parityEngine(t, cfg)
+	AddListContexts(srv, eng)
+	AddSearchCode(srv, eng)
+	AddTraceCalls(srv, eng)
+	AddGetCode(srv, eng)
+	AddCompareCode(srv, eng)
+	AddCompareCalls(srv, eng)
+
+	// Two pipes, one per direction: a client's Reader is the other end of the
+	// server's Writer, and the other way round, which is what turns two
+	// unidirectional pipes into the duplex stream STDIO gives a real subprocess.
+	serverRead, clientWrite := io.Pipe()
+	clientRead, serverWrite := io.Pipe()
+	go func() { _ = srv.Run(t.Context(), &mcp.IOTransport{Reader: serverRead, Writer: serverWrite}) }()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "vacmcp-test", Version: testVersion}, nil)
+	clientSession, err := client.Connect(t.Context(), &mcp.IOTransport{Reader: clientRead, Writer: clientWrite}, nil)
+	if err != nil {
+		t.Fatalf("connect over stdio: %v", err)
+	}
+	// Closing the client's writer is what lets srv.Run's goroutine see EOF and
+	// return, the in-process mirror of a real STDIO subprocess's stdin closing
+	// when its caller goes away.
+	t.Cleanup(func() { _ = clientSession.Close() })
+	return clientSession
+}
+
+// TestSTDIOAndStreamableHTTPAnswerIdenticallyOverAMultiMemberWorkspace is AC
+// #7: the transport a client happens to use is no part of the version
+// contract, so it must not be part of the answer either. Every other
+// comparison in this file is the engine against one MCP transport, Streamable
+// HTTP; this is MCP against MCP, comparing that transport's own bytes against
+// [paritySessionOverStdio]'s, over demo-multi — where a members array and
+// per-item attribution are what a transport-specific difference in framing or
+// encoding would have the most room to disturb — and over every one of the
+// shapes decision-11 §5 draws: list_contexts's members array, an unnarrowed
+// search's attribution, and the flat shape each repository-narrowed tool falls
+// back to.
+func TestSTDIOAndStreamableHTTPAnswerIdenticallyOverAMultiMemberWorkspace(t *testing.T) {
+	cfg := parityFixture(t)
+	streamable := paritySession(t, cfg)
+	stdio := paritySessionOverStdio(t, cfg)
+
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"list_contexts", map[string]any{}},
+		{"search_code", map[string]any{"context": demorepo.MultiContext, "query": "LegacyHandler"}},
+		{"get_code", map[string]any{
+			"context": demorepo.MultiContext, "repository": multiRepo1, "path": "handler.go", "start_line": 1, "end_line": 6,
+		}},
+		{"trace_calls", map[string]any{
+			"context": demorepo.MultiContext, "repository": multiRepo2, "symbol": "LegacyHandler", "direction": "callers", "depth": 2,
+		}},
+		{"compare_code", map[string]any{
+			"from_context": demorepo.MultiContext, "repository": multiRepo1, "to_context": v2, "path": "processor.go",
+		}},
+		{"compare_calls", map[string]any{
+			"from_context": demorepo.MultiContext, "repository": multiRepo1, "to_context": v2,
+			"symbol": "Process", "direction": "callees", "depth": 1,
+		}},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			httpRaw, httpIsError := parityCall(t, streamable, tc.tool, tc.args)
+			stdioRaw, stdioIsError := parityCall(t, stdio, tc.tool, tc.args)
+			if httpIsError != stdioIsError {
+				t.Fatalf("%s(%v): Streamable HTTP is-error = %v, STDIO is-error = %v\n  HTTP:  %s\n  STDIO: %s",
+					tc.tool, tc.args, httpIsError, stdioIsError, httpRaw, stdioRaw)
+			}
+			if httpRaw != stdioRaw {
+				t.Errorf("%s(%v):\n  HTTP:  %s\n  STDIO: %s", tc.tool, tc.args, httpRaw, stdioRaw)
+			}
+			t.Logf("%s(%v): both transports answered %s", tc.tool, tc.args, httpRaw)
+		})
+	}
+}
+
 // parityCall makes one tools/call and returns the JSON text the client received
 // together with whether it was an error result. The text rather than the
 // decoded structured content, for the reason the other integration tests give:
@@ -742,7 +1280,7 @@ func parityCall(t *testing.T, session *mcp.ClientSession, name string, args map[
 
 // parityResult calls a tool, requires it to have answered, and decodes what came
 // back. The raw text travels with it so a failed comparison can be read.
-func parityResult(t *testing.T, session *mcp.ClientSession, name string, args map[string]any) (parityWire, string) {
+func parityResult(t *testing.T, cfg *config.Config, session *mcp.ClientSession, name string, args map[string]any) (parityWire, string) {
 	t.Helper()
 
 	raw, isError := parityCall(t, session, name, args)
@@ -753,13 +1291,63 @@ func parityResult(t *testing.T, session *mcp.ClientSession, name string, args ma
 	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
 	}
-	// The graph reference is internal, and a tool's output is the only place it
-	// could leak from. The comparison above cannot catch it: it is not a field
-	// parityWire has.
-	if strings.Contains(raw, "graph_ref") || strings.Contains(raw, "vacmcp-demo-") {
-		t.Errorf("%s leaked the graph reference: %s", name, raw)
-	}
+	assertNoGraphRefLeak(t, cfg, name, raw)
 	return wire, raw
+}
+
+// configuredGraphRefs is the CBM project name behind every member of every
+// context cfg configures — every graph a tool's output could leak, read off
+// the fixture's own configuration rather than assumed from a naming
+// convention. A hardcoded "vacmcp-demo-" prefix, which this used to be, misses
+// second-demo-repo's own project: demorepo.Repo2Graph is "vacmcp-demo2", with
+// no dash after "demo", so it would leak silently under that check and still
+// pass.
+func configuredGraphRefs(cfg *config.Config) []string {
+	seen := map[string]bool{}
+	var refs []string
+	for _, workspace := range cfg.Contexts {
+		for _, member := range workspace.Members {
+			if member.GraphRef != "" && !seen[member.GraphRef] {
+				seen[member.GraphRef] = true
+				refs = append(refs, member.GraphRef)
+			}
+		}
+	}
+	return refs
+}
+
+// assertNoGraphRefLeak fails the test if raw names the graph_ref field or any
+// of cfg's configured CBM project names. The graph reference is internal, and
+// a tool's output is the only place it could leak from; the struct comparison
+// above cannot catch it, because it is not a field parityWire has.
+func assertNoGraphRefLeak(t *testing.T, cfg *config.Config, what, raw string) {
+	t.Helper()
+	if strings.Contains(raw, "graph_ref") {
+		t.Errorf("%s leaked the graph reference: %s", what, raw)
+		return
+	}
+	for _, ref := range configuredGraphRefs(cfg) {
+		if strings.Contains(raw, ref) {
+			t.Errorf("%s leaked the graph reference %s: %s", what, ref, raw)
+		}
+	}
+}
+
+// memberOf returns the one member of cfg's context id whose repository is
+// repository, failing the test when id names no such repository. Read by
+// name rather than by [config.Config.Contexts]'s member index, so it does not
+// assume the fixture's own members are written in a particular order — that
+// order is already checked once, in concurrency_integration_test.go's
+// concurrentVersions, and this need not repeat it to rely on the same fact.
+func memberOf(t *testing.T, cfg *config.Config, id, repository string) vacctx.CodeContext {
+	t.Helper()
+	for _, member := range cfg.Contexts[id].Members {
+		if member.Repository == repository {
+			return member
+		}
+	}
+	t.Fatalf("%s names no repository %s", id, repository)
+	return vacctx.CodeContext{}
 }
 
 // parityErrorCode calls a tool, requires it to have refused, and returns the

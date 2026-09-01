@@ -4,10 +4,11 @@ package tools
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/tc3oliver/version-aware-code-mcp/config"
 )
 
 // compare_calls over a real MCP session against the two real codebase-memory-mcp
@@ -25,7 +26,7 @@ import (
 func TestCompareCallsReportsAddedAndRemovedEdges(t *testing.T) {
 	cfg := traceFixture(t)
 
-	got, raw := compareCallsOnFixture(t, paritySession(t, cfg), map[string]any{
+	got, raw := compareCallsOnFixture(t, cfg, paritySession(t, cfg), map[string]any{
 		"from_context": v1, "to_context": v2,
 		"symbol": "Process", "direction": "callees", "depth": 1,
 	})
@@ -75,7 +76,7 @@ func TestCompareCallsReportsAddedAndRemovedEdges(t *testing.T) {
 func TestCompareCallsReportsAnUnchangedEdge(t *testing.T) {
 	cfg := traceFixture(t)
 
-	got, raw := compareCallsOnFixture(t, paritySession(t, cfg), map[string]any{
+	got, raw := compareCallsOnFixture(t, cfg, paritySession(t, cfg), map[string]any{
 		"from_context": v1, "to_context": v2,
 		"symbol": "Keep", "direction": "callees", "depth": 1,
 	})
@@ -117,7 +118,7 @@ func TestCompareCallsReportsASymbolOnlyOneVersionHas(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			got, raw := compareCallsOnFixture(t, session, map[string]any{
+			got, raw := compareCallsOnFixture(t, cfg, session, map[string]any{
 				"from_context": v1, "to_context": v2,
 				"symbol": tc.symbol, "direction": "callers", "depth": 1,
 			})
@@ -164,7 +165,11 @@ func TestCompareCallsReportsASymbolOnlyOneVersionHas(t *testing.T) {
 // compareCallsOnFixture makes one call and decodes what came back, failing the
 // test unless the tool answered. compare_calls_test.go's own helper fixes the
 // direction and the depth, which these tests vary.
-func compareCallsOnFixture(t *testing.T, session *mcp.ClientSession, args map[string]any) (compareCallsWire, string) {
+//
+// cfg is what the leak check reads its graph names from: see
+// parity_integration_test.go's assertNoGraphRefLeak, which this used to spell
+// out for itself with the same hardcoded prefix that check no longer uses.
+func compareCallsOnFixture(t *testing.T, cfg *config.Config, session *mcp.ClientSession, args map[string]any) (compareCallsWire, string) {
 	t.Helper()
 
 	res, raw := compareRaw(t, session, "compare_calls", args)
@@ -175,11 +180,7 @@ func compareCallsOnFixture(t *testing.T, session *mcp.ClientSession, args map[st
 	if err := json.Unmarshal([]byte(raw), &got); err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
 	}
-	// The graph reference is the CBM project behind a context: internal, and a
-	// tool's output is the only place it could leak from.
-	if strings.Contains(raw, "graph_ref") || strings.Contains(raw, "vacmcp-demo-") {
-		t.Errorf("compare_calls leaked the graph reference: %s", raw)
-	}
+	assertNoGraphRefLeak(t, cfg, "compare_calls", raw)
 	return got, raw
 }
 
