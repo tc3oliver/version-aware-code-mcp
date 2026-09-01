@@ -281,7 +281,7 @@ func TestTraceCallsIsDiscoverable(t *testing.T) {
 		t.Fatalf("input schema = %#v, want a JSON object", tool.InputSchema)
 	}
 	properties, _ := schema["properties"].(map[string]any)
-	for _, field := range []string{"context", "symbol", "direction", "depth"} {
+	for _, field := range []string{"context", "repository", "symbol", "direction", "depth"} {
 		if _, declared := properties[field]; !declared {
 			t.Errorf("input schema does not declare %q: %v", field, properties)
 		}

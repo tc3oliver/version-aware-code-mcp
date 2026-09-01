@@ -9,22 +9,30 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
 )
 
-// compareCodeInput is what a caller asks for. Every field is required: none of
-// them carries an omitempty, so schema inference marks all three required and
-// the SDK rejects a call missing one before the handler runs, exactly as
-// get_code's does.
+// compareCodeInput is what a caller asks for. The three original fields are
+// still required: none of them carries an omitempty, so schema inference marks
+// them required and the SDK rejects a call missing one before the handler runs,
+// exactly as get_code's does.
 //
-// The two contexts are the whole scope of the comparison. There is no
-// repository, branch or revision field, for the reason no request in this
-// server has one: each side is compared at the revision its own context
-// declares, so a caller cannot compare a version the configuration never
-// granted it. The path is asked of both sides identically — there is
-// deliberately no way to read one file on the from side and another on the to
-// side, because a difference produced by reading two different files is not a
-// difference between two versions.
+// The two contexts are the whole scope of the comparison. There is no branch or
+// revision field, for the reason no request in this server has one: each side is
+// compared at the revision its own context declares, so a caller cannot compare
+// a version the configuration never granted it. The path is asked of both sides
+// identically — there is deliberately no way to read one file on the from side
+// and another on the to side, because a difference produced by reading two
+// different files is not a difference between two versions.
+//
+// Repository is the one thing a request may say about where to look, and it
+// widens nothing: it selects a repository both contexts already name, and one
+// either of them does not name is refused rather than compared. It is asked of
+// both sides identically for the reason the path is — a comparison of two
+// repositories is not a comparison of two versions — and it is optional to the
+// schema because a context naming one repository never needs it. A context
+// naming several has no comparison without it and says so with INVALID_ARGUMENT.
 type compareCodeInput struct {
 	FromContext string `json:"from_context" jsonschema:"the id of the version context to compare from, as returned by list_contexts; the file is read at the revision that context declares"`
 	ToContext   string `json:"to_context" jsonschema:"the id of the version context to compare to, as returned by list_contexts; it must name the same repository as from_context"`
+	Repository  string `json:"repository,omitempty" jsonschema:"which repository to compare, as one of the members list_contexts reports for both contexts; required when either context names several, and unnecessary when they name one"`
 	Path        string `json:"path" jsonschema:"the file to compare, relative to the repository root; the same path is read on both sides"`
 }
 
@@ -54,9 +62,11 @@ func side(s engine.ComparisonSide) (*evidence.Output, error) {
 	if !s.Present() {
 		return nil, nil
 	}
-	// A present side is one version, which is a workspace of one member — a
-	// comparison refuses a context naming several — so this marshals to the flat
-	// context block a single-context tool emits.
+	// A present side is one version, which is a workspace of one member: a
+	// comparison is answered in one repository per side, so the engine either had
+	// one member or was told which one by the request's repository. So this
+	// marshals to the flat context block a single-context tool emits, whichever of
+	// the two it was.
 	out, err := evidence.NewWorkspace(s.Context(), s.Evidence()...)
 	if err != nil {
 		return nil, err
@@ -123,8 +133,9 @@ func AddCompareCode(srv *mcp.Server, eng *engine.Engine) {
 		Name:  "compare_code",
 		Title: "Compare a file between two version contexts",
 		Description: "Compare one file between two version contexts. " +
-			"Pass two context ids from list_contexts: the file is read at the revision each one declares, and no repository, branch or revision can be given here. " +
+			"Pass two context ids from list_contexts: the file is read at the revision each one declares, and no branch or revision can be given here. " +
 			"Both contexts must name the same repository — two repositories have no shared history to compare, which is INVALID_ARGUMENT. " +
+			"A context naming several repositories requires repository, given as one of the members list_contexts reports for it and applied to both sides; leaving it out is INVALID_ARGUMENT naming the side that needs it. " +
 			"change is ADDED (only the to context has the file), REMOVED (only the from context has it), MODIFIED or UNCHANGED, with the changed regions as structured hunks; a binary file is marked and has no hunks. " +
 			"The from and to sides are reported separately, each with the version context it was read at and the evidence backing it, and the side a version does not have the file in is null. " +
 			"A source backend that reads one version at a time and cannot compare two is SOURCE_DIFF_UNAVAILABLE.",
@@ -133,6 +144,7 @@ func AddCompareCode(srv *mcp.Server, eng *engine.Engine) {
 		result, err := eng.CompareCode(ctx, engine.CompareCodeRequest{
 			FromContext: in.FromContext,
 			ToContext:   in.ToContext,
+			Repository:  in.Repository,
 			Path:        in.Path,
 		})
 		if err != nil {

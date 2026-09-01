@@ -9,17 +9,26 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/evidence"
 )
 
-// getCodeInput is what a caller asks for. Every field is required: none of them
-// carries an omitempty, so schema inference marks all four required and the SDK
-// rejects a call missing one before the handler runs.
+// getCodeInput is what a caller asks for. The four original fields are still
+// required: none of them carries an omitempty, so schema inference marks them
+// required and the SDK rejects a call missing one before the handler runs.
 //
-// The repository and revision to read at are deliberately absent. They come
-// from the context, so a caller cannot widen or redirect its own scope.
+// The revision to read at is deliberately absent. It comes from the context, so
+// a caller cannot redirect its own scope.
+//
+// Repository is not a way out of that: it selects one of the repositories the
+// context already names, and one it does not name is refused rather than read.
+// It is optional to the schema rather than required because a context naming one
+// repository — every context this tool could be called with before — needs no
+// repository to say which. A context naming several has no read without it and
+// says so with INVALID_ARGUMENT: two members can both have a src/main.c, and
+// nothing else in the request says which was meant.
 type getCodeInput struct {
-	Context   string `json:"context" jsonschema:"the id of the version context to read at, as returned by list_contexts"`
-	Path      string `json:"path" jsonschema:"the file to read, relative to the repository root"`
-	StartLine int    `json:"start_line" jsonschema:"the first line to read, 1-based and inclusive"`
-	EndLine   int    `json:"end_line" jsonschema:"the last line to read, inclusive; must not be before start_line"`
+	Context    string `json:"context" jsonschema:"the id of the version context to read at, as returned by list_contexts"`
+	Repository string `json:"repository,omitempty" jsonschema:"which repository of the context to read from, as one of the members list_contexts reports for it; required when the context names several, and unnecessary when it names one"`
+	Path       string `json:"path" jsonschema:"the file to read, relative to the repository root"`
+	StartLine  int    `json:"start_line" jsonschema:"the first line to read, 1-based and inclusive"`
+	EndLine    int    `json:"end_line" jsonschema:"the last line to read, inclusive; must not be before start_line"`
 }
 
 // getCodeResult is the tool-specific half of the payload. The other half — the
@@ -58,17 +67,19 @@ func AddGetCode(srv *mcp.Server, eng *engine.Engine) {
 		Name:  "get_code",
 		Title: "Read source at a context's revision",
 		Description: "Read lines [start_line, end_line] of a file exactly as they are at the revision the given context declares. " +
-			"Call list_contexts first to learn which context ids exist. " +
+			"Call list_contexts first to learn which context ids exist, and which repositories each one names. " +
+			"A context naming several repositories requires repository, given as one of the members list_contexts reports for it, to say which one to read; leaving it out is INVALID_ARGUMENT rather than a read in one of them. " +
 			"The result carries the repository, branch and revision the content was read at, plus the path and line range, so it can be cited. " +
 			"It fails instead of answering from another version: an unknown context id is CONTEXT_NOT_FOUND, a path or line range the revision does not have is INVALID_ARGUMENT, " +
 			"and source that is not the declared revision is SOURCE_MISMATCH.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in getCodeInput) (*mcp.CallToolResult, any, error) {
 		result, err := eng.GetCode(ctx, engine.GetCodeRequest{
-			Context:   in.Context,
-			Path:      in.Path,
-			StartLine: in.StartLine,
-			EndLine:   in.EndLine,
+			Context:    in.Context,
+			Repository: in.Repository,
+			Path:       in.Path,
+			StartLine:  in.StartLine,
+			EndLine:    in.EndLine,
 		})
 		if err != nil {
 			return failed(err)
@@ -77,9 +88,10 @@ func AddGetCode(srv *mcp.Server, eng *engine.Engine) {
 		// The context carries the revision the bytes actually came from, not the
 		// spelling the configuration used, which is what lets a caller check the
 		// claim instead of trusting it.
-		// The workspace a read is answered in has exactly one member — get_code
-		// refuses a context naming several — so this marshals to the flat context
-		// block it always has.
+		// The workspace a read is answered in has exactly one member: a read is one
+		// file at one revision, so the engine either had one member or was told
+		// which one by in.Repository. So this marshals to the flat context block it
+		// always has, whichever of the two it was.
 		out, err := evidence.NewWorkspace(result.Context(), result.Evidence()...)
 		if err != nil {
 			// The context is missing a field the contract requires, so there is no

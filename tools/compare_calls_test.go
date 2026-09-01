@@ -72,9 +72,14 @@ type compareCallsWire struct {
 	Unchanged          []callRelationWire  `json:"unchanged"`
 }
 
-// AC #2: the input schema accepts the two context ids, the symbol, the direction
-// and the depth, and nothing else. A repository, branch or revision property
-// here would let a caller walk a graph the configuration never granted it.
+// AC #2: the input schema accepts the two context ids, the symbol, the
+// direction, the depth and the repository to compare in, and nothing else. A
+// branch or revision property here would let a caller walk a graph the
+// configuration never granted it.
+//
+// repository is not that: it selects one repository both contexts already name,
+// which is what a context naming several needs to be walked at all, and a
+// repository neither names is refused rather than reached.
 func TestCompareCallsInputSchemaIsTwoContextsAndOneQuestion(t *testing.T) {
 	tool := comparisonTool(t, "compare_calls")
 
@@ -90,11 +95,11 @@ func TestCompareCallsInputSchemaIsTwoContextsAndOneQuestion(t *testing.T) {
 	}
 	t.Logf("compare_calls input schema = %s", raw)
 
-	want := []string{"depth", "direction", "from_context", "symbol", "to_context"}
+	want := []string{"depth", "direction", "from_context", "repository", "symbol", "to_context"}
 	if got := slices.Sorted(maps.Keys(schema.Properties)); !slices.Equal(got, want) {
 		t.Errorf("input schema has the properties %v, want exactly %v", got, want)
 	}
-	for _, forbidden := range []string{"repository", "branch", "revision"} {
+	for _, forbidden := range []string{"branch", "revision"} {
 		if _, ok := schema.Properties[forbidden]; ok {
 			t.Errorf("input schema accepts a %s override: %s", forbidden, raw)
 		}

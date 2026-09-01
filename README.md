@@ -253,10 +253,16 @@ vacmcp context create stack-v1 --repo backend --ref release/1.x \
 The nth `--ref` belongs to the nth `--repo`. Such a context is built and removed
 as one thing: it reaches `READY` only when every repository in it has been
 checked out, indexed, given its graph and verified, and one that fails anywhere
-is `FAILED` whole rather than half servable. Note that the query tools do not
-answer in a context over several repositories yet — they refuse it with
-`INVALID_ARGUMENT` naming the repositories, rather than answering out of the
-first one and leaving the rest silently outside the scope.
+is `FAILED` whole rather than half servable.
+
+The query tools answer in such a context by taking a `repository` argument, one
+of the ones `list_contexts` reports for it. `search_code` covers every repository
+of the context without it and one of them with it; the other four answer in
+exactly one repository, so they require it and refuse the call with
+`INVALID_ARGUMENT` naming the selectable repositories rather than answering out
+of the first one and leaving the rest silently outside the scope. A `repository`
+the context does not name is refused too — it selects one of the versions the
+configuration granted, it never reaches past them.
 
 Everything lives under `~/.vacmcp` unless `--data-dir` says otherwise, including
 the search index. Start Zoekt over it, check the installation, and serve:
@@ -416,12 +422,17 @@ vacmcp contexts --config vacmcp.yaml    # id, repository, branch, revision
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `list_contexts` | none | every configured context: id, repository, branch, revision |
-| `search_code` | `context`, `query` | matches as path, line and snippet, from that context's branch only |
-| `trace_calls` | `context`, `symbol`, `direction`, `depth` | call edges as caller, callee, path and line, from that context's graph only |
-| `get_code` | `context`, `path`, `start_line`, `end_line` | those lines as they are at that context's revision |
-| `compare_code` | `from_context`, `to_context`, `path` | what happened to that file between the two revisions — `ADDED`, `REMOVED`, `MODIFIED` or `UNCHANGED` — with the changed regions as hunks |
-| `compare_calls` | `from_context`, `to_context`, `symbol`, `direction`, `depth` | which versions had the symbol, and the call relations added, removed and unchanged between them |
+| `list_contexts` | none | every configured context: id, and either repository, branch and revision, or a `members` array of them |
+| `search_code` | `context`, `query`, `repository`? | matches as path, line and snippet, from that context's branch only |
+| `trace_calls` | `context`, `symbol`, `direction`, `depth`, `repository`? | call edges as caller, callee, path and line, from that context's graph only |
+| `get_code` | `context`, `path`, `start_line`, `end_line`, `repository`? | those lines as they are at that context's revision |
+| `compare_code` | `from_context`, `to_context`, `path`, `repository`? | what happened to that file between the two revisions — `ADDED`, `REMOVED`, `MODIFIED` or `UNCHANGED` — with the changed regions as hunks |
+| `compare_calls` | `from_context`, `to_context`, `symbol`, `direction`, `depth`, `repository`? | which versions had the symbol, and the call relations added, removed and unchanged between them |
+
+`repository` is marked `?` because it is optional to the schema, not because it
+is always optional: a context naming one repository never needs it, and a context
+naming several requires it in every tool but `search_code`, which searches all of
+them without it.
 
 `direction` is `callers` or `callees`; `depth` is 1 to 5. A query is wrapped in
 the context's `repo:` and `branch:` filters and otherwise passed to Zoekt as
@@ -456,6 +467,15 @@ That is `get_code` on `processor.go`. The same three lines in `backend-v1` read
 `list_contexts` is the exception: its payload is the set of contexts, each
 already carrying those four fields, and there is no single version to scope it
 to. An unconfigured server answers it with an empty list rather than an error.
+
+A context naming several repositories carries them as a `members` array instead
+of those four fields, in `list_contexts` and in the `context` block of a result
+alike — one entry per repository, each with its own `branch` and `revision`, and
+no `id` of its own, since the context's id names the whole set. Each citation in
+`evidence` then carries the `repository` and `revision` it was found in, and so
+does each `search_code` match. The shape follows the number of repositories: a
+context naming one answers exactly as it does above, so a client written against
+that shape keeps reading it.
 
 The two comparison tools take two contexts instead of one and answer in both, so
 they carry two of those blocks rather than one merged pair. `from` and `to` each

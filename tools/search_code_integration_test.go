@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -52,7 +53,7 @@ func TestSearchCodeAnswersInsideTheContextItWasGiven(t *testing.T) {
 	if len(found.Matches) == 0 {
 		t.Fatalf("search_code(%s, NewHandler) returned no matches, want the ones on %s", v2, only(cfg, v2).Branch)
 	}
-	if got, want := found.Context, listedContextOf(cfg, v2); got != want {
+	if got, want := found.Context, listedContextOf(cfg, v2); !reflect.DeepEqual(got, want) {
 		t.Errorf("context = %+v, want %+v", got, want)
 	}
 	for _, match := range found.Matches {
@@ -67,7 +68,7 @@ func TestSearchCodeAnswersInsideTheContextItWasGiven(t *testing.T) {
 	if len(absent.Matches) != 0 {
 		t.Errorf("search_code(%s, NewHandler) = %+v, want no matches: %s does not have that symbol", v1, absent.Matches, only(cfg, v1).Branch)
 	}
-	if got, want := absent.Context, listedContextOf(cfg, v1); got != want {
+	if got, want := absent.Context, listedContextOf(cfg, v1); !reflect.DeepEqual(got, want) {
 		t.Errorf("context = %+v, want %+v", got, want)
 	}
 
@@ -146,7 +147,7 @@ func TestSearchCodeOutputCarriesContextAndEvidence(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
 	}
-	if out.Context != listedContextOf(cfg, v2) {
+	if !reflect.DeepEqual(out.Context, listedContextOf(cfg, v2)) {
 		t.Errorf("context = %+v, want %+v", out.Context, listedContextOf(cfg, v2))
 	}
 	if len(out.Evidence) != len(out.Matches) {
@@ -217,7 +218,7 @@ func TestSearchCodeWorksWhenTheGraphProviderIsUnavailable(t *testing.T) {
 	if len(found.Matches) == 0 {
 		t.Fatalf("search_code(%s, NewHandler) returned no matches while CBM is unavailable, want the ones on %s", v2, only(cfg, v2).Branch)
 	}
-	if got, want := found.Context, listedContextOf(cfg, v2); got != want {
+	if got, want := found.Context, listedContextOf(cfg, v2); !reflect.DeepEqual(got, want) {
 		t.Errorf("context = %+v, want %+v", got, want)
 	}
 	t.Logf("search_code(%s, NewHandler) with CBM unavailable = %+v", v2, found.Matches)
@@ -262,9 +263,18 @@ func TestSearchCodeIsDiscoverable(t *testing.T) {
 			t.Errorf("input schema does not require %q: %s", field, in)
 		}
 	}
-	// The context decides the repository and the branch, so a query may not
-	// carry its own: that would be a way out of the version it was given.
-	for _, field := range []string{"repository", "branch", "revision"} {
+	// repository is optional and selects one of the ones the context already
+	// names, so a search without it covers all of them and a search with it covers
+	// one of them.
+	if _, ok := input.Properties["repository"]; !ok {
+		t.Errorf("input schema has no %q property: %s", "repository", in)
+	}
+	if slices.Contains(input.Required, "repository") {
+		t.Errorf("input schema requires %q, which a context naming one repository does not need: %s", "repository", in)
+	}
+	// The context decides the branch and the revision, so a query may not carry
+	// its own: that would be a way out of the version it was given.
+	for _, field := range []string{"branch", "revision"} {
 		if _, ok := input.Properties[field]; ok {
 			t.Errorf("input schema takes %q, want the context to decide it: %s", field, in)
 		}
@@ -392,6 +402,11 @@ func callSearchCode(t *testing.T, session *mcp.ClientSession, contextID, query s
 
 // listedContextOf is the context configuration as it must appear on the wire:
 // the four public fields of the context filed under id, and no graph reference.
+//
+// The contexts here name one repository each, which is the shape that carries
+// those four fields directly; [listedContext] can also hold a members list, so
+// it is no longer a comparable type and the assertions on it go through
+// [reflect.DeepEqual].
 func listedContextOf(cfg *config.Config, id string) listedContext {
 	codeCtx := only(cfg, id)
 	return listedContext{
