@@ -933,10 +933,18 @@ func TestGetCodeReportsTheRevisionActuallyRead(t *testing.T) {
 // caller that ignored the error still cannot mistake it for an answer.
 func TestProviderFailuresAreReturnedUnchanged(t *testing.T) {
 	// One case per provider, each with the code that provider is the source of.
+	//
+	// rebuilt marks the one failure the engine adds to rather than passes on: an
+	// ambiguity has to say which repository of the context was walked, which the
+	// graph backend cannot know, so trace_calls returns a new error carrying the
+	// provider's own code, message and details. That is where the "unchanged" of
+	// this test stops and [TestTraceCallsReportsAnAmbiguousSymbolWithTheRepositoryItWalked]
+	// takes over; nothing here may be reclassified either way.
 	for _, tc := range []struct {
-		name string
-		code vacerr.Code
-		call func(*engine.Engine, *fakeSearch, *fakeGraph, *fakeSource, vacctx.CodeContext, error) (contextual, error)
+		name    string
+		code    vacerr.Code
+		rebuilt bool
+		call    func(*engine.Engine, *fakeSearch, *fakeGraph, *fakeSource, vacctx.CodeContext, error) (contextual, error)
 	}{
 		{
 			name: "search provider unavailable",
@@ -947,8 +955,9 @@ func TestProviderFailuresAreReturnedUnchanged(t *testing.T) {
 			},
 		},
 		{
-			name: "symbol ambiguous",
-			code: vacerr.SymbolAmbiguous,
+			name:    "symbol ambiguous",
+			code:    vacerr.SymbolAmbiguous,
+			rebuilt: true,
 			call: func(eng *engine.Engine, _ *fakeSearch, graph *fakeGraph, _ *fakeSource, cfg vacctx.CodeContext, err error) (contextual, error) {
 				graph.err = err
 				return eng.TraceCalls(context.Background(), engine.TraceCallsRequest{
@@ -973,7 +982,18 @@ func TestProviderFailuresAreReturnedUnchanged(t *testing.T) {
 
 			out, err := tc.call(eng, search, graph, source, configured, failure)
 			assertCode(t, err, tc.code)
-			if !errors.Is(err, failure) {
+			switch {
+			case tc.rebuilt:
+				// Rebuilt, so not the same error value — but everything the
+				// provider said about the failure is still what the caller reads.
+				var vErr *vacerr.Error
+				if !errors.As(err, &vErr) {
+					t.Fatalf("error is %v, want a *vacerr.Error", err)
+				}
+				if vErr.Message != failure.Message || vErr.Details["context"] != configured.ID {
+					t.Fatalf("error is %q with details %v, want the provider's own message and details", vErr.Message, vErr.Details)
+				}
+			case !errors.Is(err, failure):
 				t.Fatalf("error is %v, want the provider's own error", err)
 			}
 			assertNotAnAnswer(t, out)
