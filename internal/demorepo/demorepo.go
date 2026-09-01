@@ -34,9 +34,26 @@ const (
 //
 // Generation is serialised across processes. `go test ./...` runs each
 // package's binary in parallel and more than one of them lands here on a cold
-// checkout; the generator deletes and recreates the fixture, so overlapping
-// runs tear it out from under whichever process is reading it. mkdir is atomic
-// on every platform, so exactly one process generates and the others wait.
+// checkout; two generators running at once would each be swapping the fixture
+// path out from under the other. mkdir is atomic on every platform, so exactly
+// one process generates and the others wait.
+//
+// The lock serialises generators, and only generators: a caller that finds the
+// fixture already complete returns it without taking the lock, and the tests it
+// hands the path to then read that fixture for as long as they run. So what
+// keeps a reader off a fixture being rebuilt is not this lock but the
+// generator, which builds in a staging directory and publishes by rename —
+// leaving no moment where the fixture path holds anything other than a finished
+// repository. complete() therefore answers about a settled fixture or not at
+// all, which is what makes both of the unlocked checks below safe.
+//
+// It was not always so. The generator used to build in place, and its three
+// branches all exist from `checkout -b release/v2` onward — two commits before
+// release/v2 holds anything of its own. A caller taking the early return in
+// that window got a fixture whose release/v1 and release/v2 held the same
+// processor.go, and tools/get_code reported that as broken version isolation,
+// which is the last thing this project's tests should be able to say falsely.
+// internal/demorepo's publish_test.go holds the generator to the invariant.
 func Generate(t testing.TB) string {
 	t.Helper()
 	root := moduleRoot(t)
@@ -50,7 +67,7 @@ func Generate(t testing.TB) string {
 	for {
 		if err := os.Mkdir(lock, 0o755); err == nil {
 			defer func() { _ = os.Remove(lock) }()
-			// Re-check: the holder we queued behind may have just built it.
+			// Re-check: the holder we queued behind may have just published it.
 			if !complete(repo) {
 				script := filepath.Join(root, "testdata", "gen-versioned-demo-repo.sh")
 				if out, err := exec.Command(script).CombinedOutput(); err != nil {
@@ -104,7 +121,10 @@ func moduleRoot(t testing.TB) string {
 }
 
 // complete reports whether repo already holds all three branches, which is the
-// only state the generator leaves behind on success.
+// only state the generator leaves behind on success. Because the generator
+// publishes the finished fixture by renaming it into place, this is a question
+// about a fixture that is not being written to: the three branches are never
+// visible here mid-build.
 func complete(repo string) bool {
 	for _, branch := range []string{Main, V1, V2} {
 		if gitIn(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch).Run() != nil {
