@@ -2,11 +2,8 @@ package engine
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
-	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
 // memberToCompare resolves one side of a comparison to the single member it is
@@ -19,13 +16,12 @@ import (
 // repository on the from side against another on the to side is not a
 // difference between two versions.
 //
-// It is [Engine.resolveMember]'s work with one thing said differently, and the
-// difference is what it says when the context names several repositories and the
-// request named none. resolveMember reports a scope this server cannot answer a
-// question in, which was the whole truth while no comparison could name a
-// repository; now one can, so the caller is told that repository is required and
-// which of its two contexts needs it. Told only "this context names several", a
-// caller would have no way to know it is holding the argument that fixes it.
+// A context naming several repositories with the argument left blank is
+// [repositoryRequired], as it is for the two single-context queries that narrow
+// to one member — with the one thing a comparison has to add: which of its two
+// contexts needs narrowing. Told only that a context names several, a caller
+// holding two of them would not know which one it is being asked about, and
+// would go on to narrow the side that was never the problem.
 func (e *Engine) memberToCompare(ctx context.Context, tool, side, id, repository string) (vacctx.CodeContext, error) {
 	workspace, err := e.resolve(ctx, id)
 	if err != nil {
@@ -39,36 +35,18 @@ func (e *Engine) memberToCompare(ctx context.Context, tool, side, id, repository
 		// A blank repository over a workspace of several is the only way to reach
 		// here: a named repository selects exactly one member or is refused, and a
 		// workspace with no member at all is refused before either.
-		return vacctx.CodeContext{}, repositoryRequired(tool, side, id, members)
+		//
+		// The side travels in the details as well as in the message, because it is
+		// what a caller acts on: only one of the two contexts is the one to narrow,
+		// and picking a member for it instead would compare a repository the
+		// request named nothing of, under the name of the context it did name.
+		return vacctx.CodeContext{}, repositoryRequired(
+			tool, "the "+side+" context", id,
+			"so repository is required to say which one to compare",
+			members, map[string]any{"side": side},
+		)
 	}
 	return members[0], nil
-}
-
-// repositoryRequired refuses a side naming several repositories with nothing to
-// choose between them by.
-//
-// The repositories travel with it because the caller cannot see the
-// configuration: told only that its context names several, it cannot tell which
-// name to write. The side travels with it because a comparison names two
-// contexts and only one of them is the one to fix — a caller that guessed wrong
-// would go on to narrow the side that was never the problem.
-//
-// It is [vacerr.InvalidArgument] for the reason [severalRepositories] is: the
-// code set is the public tool API, and a missing required argument is what
-// INVALID_ARGUMENT has said since v0.1.0. Refusing is the point — picking a
-// member for the caller would compare a repository it named nothing of, under
-// the name of the context it did name.
-func repositoryRequired(tool, side, id string, members []vacctx.CodeContext) error {
-	repositories := make([]string, 0, len(members))
-	for _, member := range members {
-		repositories = append(repositories, member.Repository)
-	}
-	return vacerr.New(
-		vacerr.InvalidArgument,
-		fmt.Sprintf("%s: the %s context %q names %d repositories (%s), so repository is required to say which one to compare",
-			tool, side, id, len(repositories), strings.Join(repositories, ", ")),
-		map[string]any{"context": id, "side": side, "repositories": repositories},
-	)
 }
 
 // ComparisonSide is one version's half of a comparison: what the from context
