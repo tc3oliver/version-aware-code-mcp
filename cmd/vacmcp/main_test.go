@@ -371,8 +371,8 @@ func TestValidateAcceptsTheExampleConfig(t *testing.T) {
 	if err := run([]string{"validate", "--config", "../../config/example.yaml"}, &out); err != nil {
 		t.Fatalf("validate example.yaml: %v", err)
 	}
-	if !strings.Contains(out.String(), "ok, 2 contexts") {
-		t.Errorf("validate printed %q, want it to report 2 contexts", out.String())
+	if !strings.Contains(out.String(), "ok, 3 contexts") {
+		t.Errorf("validate printed %q, want it to report 3 contexts", out.String())
 	}
 }
 

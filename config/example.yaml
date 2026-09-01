@@ -23,6 +23,8 @@ repositories:
   example/backend:
     # Local clone. vacmcp reads it, it never writes to it.
     path: /srv/repos/backend
+  example/frontend:
+    path: /srv/repos/frontend
 
 contexts:
   app-v1:
@@ -37,3 +39,19 @@ contexts:
     branch: release/2.x
     revision: 94cb821
     graph_ref: backend-v2
+
+  # A multi-repo context: one id names several repositories, each pinned to its
+  # own revision. search_code covers both; get_code and trace_calls each need a
+  # repository argument to say which one, since a file path or a call graph is
+  # one repository's own. Same graph_ref as app-v1 above is fine here — it names
+  # the same repository at the same revision, so it is the same CBM project.
+  stack-v1:
+    members:
+      - repository: example/backend
+        branch: release/1.x
+        revision: 8af31e2
+        graph_ref: backend-v1
+      - repository: example/frontend
+        branch: release/3.x
+        revision: 1a2b3c4
+        graph_ref: frontend-v3
