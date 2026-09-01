@@ -103,8 +103,16 @@ jobs:
       # No tag, so -race is spent on the tests whose invariants are this
       # module's own — locks, state transitions, atomic writes. The real-engine
       # tests under -race are Tier 3's, in full-gate.yml.
+      #
+      # -v and the log are what assert-no-skips.sh needs: a skip prints no
+      # `--- SKIP` line without -v, so calling the script on a quiet log would
+      # gate on nothing. This step ran without either until TASK-89, which meant
+      # a skip here was invisible and the job stayed green having verified less
+      # than it claimed. The bigger log is what that costs.
       - name: Race test
-        run: go test -timeout 30m -race $(go list ./... | grep -v '/integration$')
+        run: |
+          go test -timeout 30m -race -v $(go list ./... | grep -v '/integration$') 2>&1 | tee "$RUNNER_TEMP/race.log"
+          .github/assert-no-skips.sh "$RUNNER_TEMP/race.log"
 
       - name: License check
         run: .github/license-check.sh
