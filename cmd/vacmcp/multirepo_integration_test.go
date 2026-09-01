@@ -11,6 +11,7 @@ package main
 // afterwards — are the managed package's own and are checked there.
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,16 +191,12 @@ func TestContextCreateOverTwoRepositoriesReachesReadyWithBothMembersBuilt(t *tes
 	}
 }
 
-// TestServeManagedRefusesAContextItCannotAnswerIn is what a READY
-// multi-repository context is to the query plane today: a context the server
-// knows about and will not answer a question in.
-//
-// Expanding a query over several members is not implemented, and answering in
-// the first member would be the one thing worse than refusing — a whole
-// repository's worth of code silently outside the scope of an answer that names
-// the context the caller asked for. So this holds the refusal, and it is the
-// test that has to change when the query plane learns to fan out.
-func TestServeManagedRefusesAContextItCannotAnswerIn(t *testing.T) {
+// TestServeManagedSearchesEveryMemberOfAMultiRepositoryContext is what a READY
+// multi-repository context is to the query plane: search_code is the one tool
+// that spans every member rather than requiring repository to pick one
+// (decision-11 §3), so a query with no repository argument reaches both of
+// "stack"'s repositories, and each match says which one it came from.
+func TestServeManagedSearchesEveryMemberOfAMultiRepositoryContext(t *testing.T) {
 	data, _, _ := twoManagedRepositories(t)
 	if _, err := createStack(t, data, "stack"); err != nil {
 		t.Fatalf("context create: %v", err)
@@ -217,20 +214,51 @@ func TestServeManagedRefusesAContextItCannotAnswerIn(t *testing.T) {
 	}
 
 	res := callTool(t, session, "search_code", map[string]any{"context": "stack", "query": apiToken})
-	if !res.IsError {
-		t.Fatalf("search_code in a two-repository context succeeded, want it refused: %s", resultText(t, res))
-	}
-	if got := errorCode(t, res); got != vacerr.InvalidArgument {
-		t.Errorf("search_code in a two-repository context = %q, want %q", got, vacerr.InvalidArgument)
-	}
-	if text := resultText(t, res); !strings.Contains(text, "api") || !strings.Contains(text, "web") {
-		t.Errorf("the refusal reads %q, want it to name both repositories the context is over", text)
+	if res.IsError {
+		t.Fatalf("search_code in a two-repository context failed, want it to search both: %s", resultText(t, res))
 	}
 
-	// The server answers otherwise, so the refusal above is about this context
-	// and not about a server that could not serve anything.
+	var payload struct {
+		Matches []struct {
+			Path       string `json:"path"`
+			Repository string `json:"repository"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &payload); err != nil {
+		t.Fatalf("decoding search_code: %v", err)
+	}
+	if len(payload.Matches) == 0 {
+		t.Fatalf("search_code(stack, %s) found nothing, want the match %s's own repository defines", apiToken, apiToken)
+	}
+	for _, match := range payload.Matches {
+		if match.Repository != "api" {
+			t.Errorf("match %+v is stamped %q, want %q: %s only exists in that repository", match, match.Repository, "api", apiToken)
+		}
+	}
+
+	// The mirror query, so this is proven both ways rather than one context
+	// happening to answer everything.
+	res = callTool(t, session, "search_code", map[string]any{"context": "stack", "query": webToken})
+	if res.IsError {
+		t.Fatalf("search_code in a two-repository context failed, want it to search both: %s", resultText(t, res))
+	}
+	payload.Matches = nil
+	if err := json.Unmarshal([]byte(resultText(t, res)), &payload); err != nil {
+		t.Fatalf("decoding search_code: %v", err)
+	}
+	if len(payload.Matches) == 0 {
+		t.Fatalf("search_code(stack, %s) found nothing, want the match %s's own repository defines", webToken, webToken)
+	}
+	for _, match := range payload.Matches {
+		if match.Repository != "web" {
+			t.Errorf("match %+v is stamped %q, want %q: %s only exists in that repository", match, match.Repository, "web", webToken)
+		}
+	}
+
+	// The server answers otherwise too: the two-repository context spanning
+	// both is not the only thing it can serve.
 	if !searchFinds(t, session, "api-only", apiToken) {
-		t.Error("search_code(api-only) found nothing, so the refusal above would pass for the wrong reason")
+		t.Error("search_code(api-only) found nothing")
 	}
 }
 

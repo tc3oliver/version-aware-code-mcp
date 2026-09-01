@@ -115,23 +115,35 @@ different handler per release.
 | `release/v1` | `LegacyHandler()` |
 | `release/v2` | `NewHandler()` |
 
-It is generated, never committed — a nested `.git` directory cannot be tracked
-by this repository, so the path is in `.gitignore`:
+`testdata/second-demo-repo/` stands beside it: one branch, `main`, colliding
+with the first repository on purpose — the same path, `handler.go`, declaring
+a `LegacyHandler` of its own with different content and a different caller
+(`Invoke` rather than `Process`). It is what a multi-repository workspace is
+tested against: `demo-multi` (below) pairs the two, and the collision is what
+real search, read and trace have to keep apart rather than merge.
+
+Both are generated, never committed — a nested `.git` directory cannot be
+tracked by this repository, so both paths are in `.gitignore`:
 
 ```bash
 ./testdata/gen-versioned-demo-repo.sh
+./testdata/gen-second-demo-repo.sh
 ```
 
-The script rebuilds the fixture from scratch on every run and pins the commit
-identity and dates, so repeated runs produce the same commit hashes and an
-already indexed fixture stays valid. Go tests reach it through
-`internal/demorepo`, which generates it on demand and resolves each branch's
-revision with `git rev-parse`; never hard-code a commit hash.
+Each script rebuilds its repository from scratch on every run and pins the
+commit identity and dates, so repeated runs produce the same commit hashes and
+an already indexed fixture stays valid. Both publish by building in a staging
+directory and renaming it into place, never in place, so a reader never sees a
+half-built repository — see either script's own comment for the failure that
+guards against. Go tests reach them through `internal/demorepo`
+(`demorepo.Generate` and `demorepo.GenerateSecond`), which generate on demand
+and resolve every branch's revision with `git rev-parse`; never hard-code a
+commit hash.
 
 ### Indexes and graphs
 
-Integration tests query real engines, so the fixture has to be indexed before
-they can run. That needs [Zoekt](https://github.com/sourcegraph/zoekt)
+Integration tests query real engines, so the fixtures have to be indexed
+before they can run. That needs [Zoekt](https://github.com/sourcegraph/zoekt)
 (`zoekt-git-index` to build the index and `zoekt-webserver` to serve it, both
 on `PATH`) and
 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.10.1
@@ -142,25 +154,25 @@ or newer (on `PATH`, or pointed at with `CBM_BIN`):
 ```
 
 It wipes and rebuilds everything under `testdata/fixture/`, which is in
-`.gitignore` like the repository itself:
+`.gitignore` like the repositories themselves:
 
 | Path | What it holds |
 | --- | --- |
-| `zoekt-index/` | one index carrying `main`, `release/v1` and `release/v2` |
-| `worktrees/` | a checkout per release, the directories CBM indexes |
-| `cbm-data/` | CBM's own store for the three graphs below |
+| `zoekt-index/` | both repositories, each indexed separately into the same directory, so Zoekt serves two repository names out of it |
+| `worktrees/` | a checkout per graph, the directories CBM indexes |
+| `cbm-data/` | CBM's own store for the graphs below |
 | `ambiguous/` | two packages declaring one function name, indexed as `vacmcp-demo-ambiguous` |
 | `config.yaml` | repositories and contexts naming both, with resolved revisions |
 
 `cbm-data/` exists because CBM has no `--data-dir` flag; it keys its store off
 `CBM_CACHE_DIR`, falling back to the developer's global
 `~/.cache/codebase-memory-mcp` when unset. The script and `make
-test-integration` both set it to `testdata/fixture/cbm-data`, so the three
-graphs below live beside the rest of the fixture instead of accumulating in
-that global directory — re-running `prepare-fixture.sh` wipes them with
-everything else, the same reset a stale Zoekt index already gets. If you keep
-a CBM daemon running locally for the startup-cost speedup CI's comment
-describes, point it at the same directory:
+test-integration` both set it to `testdata/fixture/cbm-data`, so the graphs
+below live beside the rest of the fixture instead of accumulating in that
+global directory — re-running `prepare-fixture.sh` wipes them with everything
+else, the same reset a stale Zoekt index already gets. If you keep a CBM
+daemon running locally for the startup-cost speedup CI's comment describes,
+point it at the same directory:
 `CBM_CACHE_DIR=testdata/fixture/cbm-data codebase-memory-mcp daemon start` —
 running the tests without a daemon warm under that directory still passes,
 just slower per `cli` call, the same tradeoff CI's comment describes.
@@ -174,9 +186,13 @@ this repository.
 
 Each release is indexed into its own CBM project, named after the `graph_ref`
 of its context. Two versions sharing one project would trace calls against the
-other version's graph. `vacmcp-demo-ambiguous` is no release of the repository
-— it is the duplicated symbol `trace_calls` has to report both candidates for,
-built here rather than by each test that asks about one.
+other version's graph. `demo-multi`, the multi-member context pairing
+`versioned-demo-repo`'s `release/v1` with `second-demo-repo`, reuses `demo-v1`'s
+own `graph_ref` for the first member — legal because it is the same repository
+at the same revision — and gets a project of its own,
+`vacmcp-demo2`, for the second. `vacmcp-demo-ambiguous` is no release of
+either repository — it is the duplicated symbol `trace_calls` has to report
+both candidates for, built here rather than by each test that asks about one.
 
 Tests reach the result through `demorepo.Prepared`, which skips when the
 fixture has not been built. Nothing `make test` runs asks for it — that is what

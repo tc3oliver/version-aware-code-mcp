@@ -39,15 +39,18 @@ func searchProvider(t *testing.T) (*zoektadapter.Provider, map[string]vacctx.Cod
 	// This test brings its own server up, so it supplies the address.
 	cfg.Providers.Zoekt.URL = startZoekt(t, fixture.ZoektIndex)
 
-	// One member per fixture context, which is what this adapter is handed: a
-	// search runs in one repository at one revision whatever the context it came
-	// out of holds.
+	// One member per single-repository fixture context, which is what this
+	// adapter is handed: a search runs in one repository at one revision
+	// whatever the context it came out of holds. This package's own tests only
+	// ever ask about v1 and v2, so a multi-member context elsewhere in the
+	// fixture (demo-multi, colliding with the first repository on purpose for
+	// the engine-level multi-repository tests) has nothing here to flatten it
+	// into and is skipped rather than failing the whole provider construction.
 	contexts := map[string]vacctx.CodeContext{}
 	for id, workspace := range cfg.Contexts {
-		if len(workspace.Members) != 1 {
-			t.Fatalf("context %q names %d repositories, want the one the fixture declares", id, len(workspace.Members))
+		if len(workspace.Members) == 1 {
+			contexts[id] = workspace.Members[0]
 		}
-		contexts[id] = workspace.Members[0]
 	}
 	return zoektadapter.New(cfg), contexts
 }
