@@ -96,16 +96,21 @@ func assertRelations(t *testing.T, got []engine.CallRelation, what string, want 
 }
 
 // Acceptance criterion 1: a comparison names its scope with two context IDs and
-// nothing else. A repository, branch or revision field here would let a caller
-// compare a version the configuration never granted it, which is the whole
-// guarantee given away in a struct literal.
+// the repository they are narrowed to, and nothing else. A branch or revision
+// field here would let a caller compare a version the configuration never
+// granted it, which is the whole guarantee given away in a struct literal.
+//
+// Repository is not such a field, which is why it is the one addition this list
+// admits: it can only pick one of the repositories a context already names, so
+// it narrows what the two IDs granted and can reach nothing they did not — see
+// TestCompareCallsRefusesARepositoryASideDoesNotName.
 func TestCompareCallsRequestIsScopedByContextIDsAlone(t *testing.T) {
 	typ := reflect.TypeOf(engine.CompareCallsRequest{})
 	var got []string
 	for i := range typ.NumField() {
 		got = append(got, typ.Field(i).Name)
 	}
-	want := []string{"FromContext", "ToContext", "Symbol", "Direction", "Depth"}
+	want := []string{"FromContext", "ToContext", "Repository", "Symbol", "Direction", "Depth"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("CompareCallsRequest has the fields %v, want exactly %v", got, want)
 	}

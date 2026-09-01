@@ -16,16 +16,25 @@ import (
 // CompareCallsRequest is one symbol's call graph in two version contexts, asked
 // for so the two can be set against each other.
 //
-// It names its scope with two context IDs and nothing else, for the reason every
-// request here does: the repository, branch and revision of each side come from
-// the configuration those IDs name, so a caller cannot compare a version it was
-// not granted. Symbol, Direction and Depth are asked of both sides identically —
-// there is deliberately no way to walk the from side one way and the to side
+// It names its scope with two context IDs, for the reason every request here
+// does: the repository, branch and revision of each side come from the
+// configuration those IDs name, so a caller cannot compare a version it was not
+// granted.
+//
+// Repository picks the one repository of those contexts the call graphs are
+// walked in, exactly as it does for [CompareCodeRequest]: it selects one of the
+// members a context already names and can reach no further, it is what a context
+// over a single repository never needs to fill in, and it is what a context
+// naming several cannot be compared without — there is no default member.
+//
+// Repository, Symbol, Direction and Depth are asked of both sides identically.
+// There is deliberately no way to walk the from side one way and the to side
 // another, because a difference produced by asking two different questions is
 // not a difference between the two versions.
 type CompareCallsRequest struct {
 	FromContext string
 	ToContext   string
+	Repository  string
 	Symbol      string
 	Direction   provider.Direction
 	Depth       int
@@ -210,14 +219,15 @@ func (e *Engine) traceSide(ctx context.Context, codeCtx vacctx.CodeContext, req 
 // reports how the two differ.
 //
 // It asks nothing the four single-context queries do not: both sides are
-// resolved through the same [Engine.resolve], walked through the same
+// resolved and narrowed to one member the same way, walked through the same
 // [provider.GraphProvider] with the same [provider.TraceRequest], and the
 // comparison itself is a set difference over what came back. There is no
 // compare capability behind a provider, so a backend gains this query by
 // answering the one it already answers, and no backend can disagree with
 // another about what "the same call" means.
 //
-// Both contexts must name the same repository, as they must for
+// Both sides must name the same repository once req.Repository has selected
+// which member of each context is the side, as they must for
 // [Engine.CompareCode]. Two repositories' call graphs are not two versions of
 // one, and here nothing would stop the comparison running: each side is walked
 // in its own graph, so the two would be set against each other and the result
@@ -250,11 +260,11 @@ func (e *Engine) CompareCalls(ctx context.Context, req CompareCallsRequest) (Com
 	// for: an ID naming no configured version has no graph to walk, and a
 	// comparison that walked one side first would report the other's failure
 	// after doing work in a version the caller may not have meant.
-	fromCtx, err := e.resolveMember(ctx, req.FromContext, "")
+	fromCtx, err := e.memberToCompare(ctx, "compare_calls", "from", req.FromContext, req.Repository)
 	if err != nil {
 		return CompareCallsResult{}, err
 	}
-	toCtx, err := e.resolveMember(ctx, req.ToContext, "")
+	toCtx, err := e.memberToCompare(ctx, "compare_calls", "to", req.ToContext, req.Repository)
 	if err != nil {
 		return CompareCallsResult{}, err
 	}
