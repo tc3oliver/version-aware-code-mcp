@@ -76,17 +76,62 @@ func (f *fakeSource) Read(_ context.Context, codeCtx vacctx.CodeContext, path st
 // be kept agreeing.
 var _ engine.ContextSource = (*resolver.Resolver)(nil)
 
-// fakeContexts resolves every ID to one context, whether or not that context is
-// usable. A *resolver.Resolver cannot answer with an incomplete one; the point
-// of the check under test is that the engine does not rely on that.
-type fakeContexts struct {
-	codeCtx vacctx.CodeContext
+// The two method signatures, pinned from both sides. The first assignment holds
+// only if ContextSource's methods are at least these; the second holds only if
+// they are at most these, and together they say the interface is exactly the
+// pair below — a context and an ID in, a workspace and an error out.
+//
+// It is spelled out here rather than left to the implementations above because
+// the error on Contexts is the part most easily lost: a source that decides
+// which contexts a caller may see and cannot report a failure has only the empty
+// list to answer with, which says there are no versions rather than that it
+// could not tell.
+type contextSourceSignature interface {
+	Contexts(ctx context.Context) ([]vacctx.Workspace, error)
+	Resolve(ctx context.Context, id string) (vacctx.Workspace, error)
 }
 
-func (f fakeContexts) Contexts() []vacctx.CodeContext { return []vacctx.CodeContext{f.codeCtx} }
+var (
+	_ contextSourceSignature = engine.ContextSource(nil)
+	_ engine.ContextSource   = contextSourceSignature(nil)
+)
 
-func (f fakeContexts) Resolve(context.Context, string) (vacctx.CodeContext, error) {
-	return f.codeCtx, nil
+// single is the workspace a version context is unless it says otherwise: one
+// repository, filed under the context's own ID.
+//
+// Every test in this package that wants today's behaviour writes it out, rather
+// than handing a bare [vacctx.CodeContext] to a fake that would wrap it. What
+// the tests are about is which member reached which provider, and a wrapper
+// would hide exactly that while keeping everything compiling.
+func single(codeCtx vacctx.CodeContext) vacctx.Workspace {
+	return vacctx.Workspace{ID: codeCtx.ID, Members: []vacctx.CodeContext{codeCtx}}
+}
+
+// over is a workspace of several repositories under one ID: the shape a
+// configuration can declare and no query can yet be answered in. Every member is
+// filed under the workspace ID, as a resolver files them.
+func over(id string, members ...vacctx.CodeContext) vacctx.Workspace {
+	filed := make([]vacctx.CodeContext, 0, len(members))
+	for _, member := range members {
+		member.ID = id
+		filed = append(filed, member)
+	}
+	return vacctx.Workspace{ID: id, Members: filed}
+}
+
+// fakeContexts resolves every ID to one workspace, whether or not that workspace
+// is usable. A *resolver.Resolver cannot answer with an incomplete one; the
+// point of the check under test is that the engine does not rely on that.
+type fakeContexts struct {
+	workspace vacctx.Workspace
+}
+
+func (f fakeContexts) Contexts(context.Context) ([]vacctx.Workspace, error) {
+	return []vacctx.Workspace{f.workspace}, nil
+}
+
+func (f fakeContexts) Resolve(context.Context, string) (vacctx.Workspace, error) {
+	return f.workspace, nil
 }
 
 // newRepo builds a real one-commit git repository and returns its path and the
@@ -132,7 +177,7 @@ func newEngine(t *testing.T) (*engine.Engine, *fakeSearch, *fakeGraph, *fakeSour
 	}
 	cfg := &config.Config{
 		Repositories: map[string]config.Repository{"demo": {Path: path}},
-		Contexts:     map[string]vacctx.CodeContext{configured.ID: configured},
+		Contexts:     map[string]vacctx.Workspace{configured.ID: single(configured)},
 	}
 	search, graph, source := &fakeSearch{}, &fakeGraph{}, &fakeSource{}
 	return engine.New(resolver.New(cfg), search, graph, source), search, graph, source, configured
@@ -179,16 +224,22 @@ func TestUnknownContextIsContextNotFound(t *testing.T) {
 	}
 }
 
-// A ContextSource is not trusted to have validated what it hands back. A
-// context missing any field every query is scoped by names no version to answer
-// in, and is refused before a provider sees it: a provider given an empty
-// revision reads whatever the checkout happens to be on, which is an answer
-// from a version nobody asked for.
+// A ContextSource is not trusted to have validated what it hands back. A member
+// missing any field every query is scoped by names no version to answer in, and
+// is refused before a provider sees it: a provider given an empty revision reads
+// whatever the checkout happens to be on, which is an answer from a version
+// nobody asked for.
 //
 // The ID is one of them. Without it the query would reach its provider, get an
 // answer, and only then fail in evidence.New — with an error that is not a
 // *vacerr.Error and names no context, which is the one shape doc-1 says a
 // failure never takes.
+//
+// Each case is run twice: with the incomplete member alone, and with it beside a
+// complete one. The second is what makes this a check of every member rather
+// than of the first: a workspace whose first member is perfectly usable must
+// still be refused for the second, and the refusal must name the field that is
+// blank rather than the fact that the workspace has two repositories in it.
 func TestIncompleteResolvedContextIsRefusedBeforeAnyProvider(t *testing.T) {
 	for _, tc := range []struct {
 		field string
@@ -201,40 +252,199 @@ func TestIncompleteResolvedContextIsRefusedBeforeAnyProvider(t *testing.T) {
 		// would otherwise pass a bare != "" check.
 		{"revision", func(c *vacctx.CodeContext) { c.Revision = "  " }},
 	} {
-		t.Run(tc.field, func(t *testing.T) {
-			incomplete := usable
-			tc.blank(&incomplete)
+		incomplete := usable
+		tc.blank(&incomplete)
+
+		// The complete member is written out with its own repository so the
+		// workspace below is one a configuration could really declare: one
+		// repository per member.
+		complete := usable
+		complete.Repository = "other"
+		complete.GraphRef = "other-main"
+
+		for _, shape := range []struct {
+			name      string
+			workspace vacctx.Workspace
+		}{
+			{"alone", vacctx.Workspace{ID: usable.ID, Members: []vacctx.CodeContext{incomplete}}},
+			{"beside a complete member", vacctx.Workspace{ID: usable.ID, Members: []vacctx.CodeContext{complete, incomplete}}},
+		} {
+			t.Run(tc.field+", "+shape.name, func(t *testing.T) {
+				search, graph, source := &fakeSearch{}, &fakeGraph{}, &fakeSource{}
+				eng := engine.New(fakeContexts{workspace: shape.workspace}, search, graph, source)
+				ctx := context.Background()
+
+				// usable.ID, not incomplete.ID: what is under test is a
+				// ContextSource answering a well-formed request with a context it
+				// should not have, so the request itself stays well-formed.
+				_, searchErr := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: usable.ID, Query: "demo"})
+				_, traceErr := eng.TraceCalls(ctx, engine.TraceCallsRequest{
+					Context: usable.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
+				})
+				_, getErr := eng.GetCode(ctx, engine.GetCodeRequest{
+					Context: usable.ID, Path: "process.go", StartLine: 1, EndLine: 1,
+				})
+
+				for name, err := range map[string]error{"SearchCode": searchErr, "TraceCalls": traceErr, "GetCode": getErr} {
+					if err == nil {
+						t.Fatalf("%s answered in a context with an incomplete member", name)
+					}
+					assertCode(t, err, vacerr.InvalidArgument)
+					// The blank field, not the member count: a refusal that named
+					// the second repository would mean the completeness check
+					// never ran on it.
+					var vErr *vacerr.Error
+					if !errors.As(err, &vErr) {
+						t.Fatalf("%s failed with %v, want a *vacerr.Error", name, err)
+					}
+					if vErr.Details["field"] != tc.field {
+						t.Errorf("%s says field %v, want the blank %q: %v", name, vErr.Details["field"], tc.field, err)
+					}
+				}
+
+				if search.called || graph.called || source.called {
+					t.Fatalf("a provider was reached with an incomplete context: search=%v graph=%v source=%v", search.called, graph.called, source.called)
+				}
+			})
+		}
+	}
+}
+
+// A context naming several repositories is refused by every query, with an error
+// that says so, and no provider is reached in any of the versions it names.
+//
+// This is the half of the workspace model that is not implemented yet, pinned so
+// it cannot be half-implemented by accident. The two failures it rules out are
+// the ones that look like success: answering in the first member, which drops a
+// whole repository out of a scope the caller was told it asked in, and answering
+// with an empty result, which reads as "none of this code exists here".
+func TestAContextOfSeveralRepositoriesIsRefusedRatherThanNarrowed(t *testing.T) {
+	second := usable
+	second.Repository = "other"
+	second.Branch = "release/2.x"
+	second.Revision = "2222222222222222222222222222222222222222"
+	second.GraphRef = "other-v2"
+
+	search, graph, source := &fakeSearch{}, &fakeGraph{}, &fakeSource{}
+	eng := engine.New(fakeContexts{workspace: over(usable.ID, usable, second)}, search, graph, source)
+	ctx := context.Background()
+
+	searchOut, searchErr := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: usable.ID, Query: "demo"})
+	traceOut, traceErr := eng.TraceCalls(ctx, engine.TraceCallsRequest{
+		Context: usable.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
+	})
+	getOut, getErr := eng.GetCode(ctx, engine.GetCodeRequest{
+		Context: usable.ID, Path: "process.go", StartLine: 1, EndLine: 1,
+	})
+	_, compareCodeErr := eng.CompareCode(ctx, engine.CompareCodeRequest{
+		FromContext: usable.ID, ToContext: usable.ID, Path: "process.go",
+	})
+	_, compareCallsErr := eng.CompareCalls(ctx, engine.CompareCallsRequest{
+		FromContext: usable.ID, ToContext: usable.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
+	})
+
+	for name, err := range map[string]error{
+		"SearchCode":   searchErr,
+		"TraceCalls":   traceErr,
+		"GetCode":      getErr,
+		"CompareCode":  compareCodeErr,
+		"CompareCalls": compareCallsErr,
+	} {
+		if err == nil {
+			t.Fatalf("%s answered in a context naming two repositories", name)
+		}
+		assertCode(t, err, vacerr.InvalidArgument)
+		// The message is what a caller reads, and it has to say which of its
+		// contexts it cannot use and why.
+		if !strings.Contains(err.Error(), usable.ID) || !strings.Contains(err.Error(), "2 repositories") {
+			t.Errorf("%s failed with %q, want it to name the context and its two repositories", name, err)
+		}
+		var vErr *vacerr.Error
+		if !errors.As(err, &vErr) {
+			t.Fatalf("%s failed with %v, want a *vacerr.Error", name, err)
+		}
+		if got, ok := vErr.Details["repositories"].([]string); !ok || !slices.Equal(got, []string{usable.Repository, second.Repository}) {
+			t.Errorf("%s says repositories %v, want both of them", vErr.Details["repositories"], []string{usable.Repository, second.Repository})
+		}
+	}
+
+	// Not one of them, and not the first: a search that had reached the search
+	// provider would have answered about one repository under the name of a
+	// context covering two.
+	if search.called || graph.called || source.called {
+		t.Fatalf("a provider was reached for a context naming two repositories: search=%v graph=%v source=%v", search.called, graph.called, source.called)
+	}
+	for name, out := range map[string]contextual{"SearchCode": searchOut, "TraceCalls": traceOut, "GetCode": getOut} {
+		t.Run(name, func(t *testing.T) { assertNotAnAnswer(t, out) })
+	}
+}
+
+// A workspace with no member at all is refused the same way, and says the same
+// thing a context missing its repository says: there is no version to answer in.
+// A ContextSource is an interface, so "the configuration rejects this" is not a
+// reason for the engine not to check it.
+func TestAContextOfNoRepositoryAtAllIsRefused(t *testing.T) {
+	search, graph, source := &fakeSearch{}, &fakeGraph{}, &fakeSource{}
+	eng := engine.New(fakeContexts{workspace: vacctx.Workspace{ID: usable.ID}}, search, graph, source)
+
+	searchErr, traceErr, getErr := queryAll(t, eng)
+	for name, err := range map[string]error{"SearchCode": searchErr, "TraceCalls": traceErr, "GetCode": getErr} {
+		if err == nil {
+			t.Fatalf("%s answered in a context naming no repository", name)
+		}
+		assertCode(t, err, vacerr.InvalidArgument)
+	}
+	if search.called || graph.called || source.called {
+		t.Fatalf("a provider was reached for a context naming no repository: search=%v graph=%v source=%v", search.called, graph.called, source.called)
+	}
+}
+
+// The provider is handed a member of the workspace the request named, and it is
+// possible to say which one: the member's own repository, branch, revision and
+// graph reference arrive, not the workspace's ID with some other version's
+// fields attached to it.
+//
+// Two workspaces, each over its own repository, are configured at once, so
+// "the right member arrived" cannot be satisfied by handing over the only
+// context there is. Every field differs between them for the same reason.
+func TestTheMemberOfTheNamedWorkspaceIsWhatReachesTheProvider(t *testing.T) {
+	v1 := vacctx.CodeContext{
+		ID: "demo@v1", Repository: "demo", Branch: "release/1.x",
+		Revision: "1111111111111111111111111111111111111111", GraphRef: "demo-v1",
+	}
+	v2 := vacctx.CodeContext{
+		ID: "other@v2", Repository: "other", Branch: "release/2.x",
+		Revision: "2222222222222222222222222222222222222222", GraphRef: "other-v2",
+	}
+
+	for _, want := range []vacctx.CodeContext{v1, v2} {
+		t.Run(want.ID, func(t *testing.T) {
 			search, graph, source := &fakeSearch{}, &fakeGraph{}, &fakeSource{}
-			eng := engine.New(fakeContexts{codeCtx: incomplete}, search, graph, source)
+			eng := engine.New(mapContexts{v1.ID: single(v1), v2.ID: single(v2)}, search, graph, source)
 			ctx := context.Background()
 
-			// usable.ID, not incomplete.ID: what is under test is a
-			// ContextSource answering a well-formed request with a context it
-			// should not have, so the request itself stays well-formed.
-			if _, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: usable.ID, Query: "demo"}); err != nil {
-				assertCode(t, err, vacerr.InvalidArgument)
-			} else {
-				t.Fatal("SearchCode answered in an incomplete context")
+			if _, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: want.ID, Query: "demo"}); err != nil {
+				t.Fatalf("SearchCode: %v", err)
 			}
-
 			if _, err := eng.TraceCalls(ctx, engine.TraceCallsRequest{
-				Context: usable.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
+				Context: want.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
 			}); err != nil {
-				assertCode(t, err, vacerr.InvalidArgument)
-			} else {
-				t.Fatal("TraceCalls answered in an incomplete context")
+				t.Fatalf("TraceCalls: %v", err)
 			}
-
 			if _, err := eng.GetCode(ctx, engine.GetCodeRequest{
-				Context: usable.ID, Path: "process.go", StartLine: 1, EndLine: 1,
+				Context: want.ID, Path: "process.go", StartLine: 1, EndLine: 1,
 			}); err != nil {
-				assertCode(t, err, vacerr.InvalidArgument)
-			} else {
-				t.Fatal("GetCode answered in an incomplete context")
+				t.Fatalf("GetCode: %v", err)
 			}
 
-			if search.called || graph.called || source.called {
-				t.Fatalf("a provider was reached with an incomplete context: search=%v graph=%v source=%v", search.called, graph.called, source.called)
+			for name, got := range map[string]vacctx.CodeContext{
+				"Search":     search.codeCtx,
+				"TraceCalls": graph.codeCtx,
+				"Read":       source.codeCtx,
+			} {
+				if got != want {
+					t.Errorf("%s was handed member %+v, want %+v", name, got, want)
+				}
 			}
 		})
 	}
@@ -246,10 +456,15 @@ func TestIncompleteResolvedContextIsRefusedBeforeAnyProvider(t *testing.T) {
 // the absent graph provider break the two queries that never wanted it, which
 // is the independent failure of doc-1 §23's eighth criterion given up one layer
 // down, at the context instead of the provider.
+// The graph reference is read off the member, which is where it lives: the
+// workspace below is complete in every way a workspace can be — it has its ID
+// and it has its one member — and the member is the only thing missing a
+// graph_ref. A check that looked at anything but the member would find nothing
+// wrong here and let trace_calls through to the graph provider.
 func TestOnlyTraceCallsNeedsAGraphRef(t *testing.T) {
 	searchOnly := usable
 	searchOnly.GraphRef = ""
-	contexts := fakeContexts{codeCtx: searchOnly}
+	contexts := fakeContexts{workspace: single(searchOnly)}
 
 	// With a graph provider present the context is what is incomplete, so the
 	// refusal blames the context — and still reaches no provider.
@@ -259,6 +474,13 @@ func TestOnlyTraceCallsNeedsAGraphRef(t *testing.T) {
 
 		searchErr, traceErr, getErr := queryAll(t, eng)
 		assertCode(t, traceErr, vacerr.InvalidArgument)
+		var vErr *vacerr.Error
+		if !errors.As(traceErr, &vErr) {
+			t.Fatalf("TraceCalls failed with %v, want a *vacerr.Error", traceErr)
+		}
+		if vErr.Details["field"] != "graph_ref" {
+			t.Errorf("TraceCalls says field %v, want the member's blank graph_ref", vErr.Details["field"])
+		}
 		if searchErr != nil || getErr != nil {
 			t.Fatalf("a context with no graph_ref broke a query that reads no graph: search=%v get=%v", searchErr, getErr)
 		}
@@ -550,29 +772,49 @@ func TestASuccessfulResultCannotBeBuiltOutsideTheEngine(t *testing.T) {
 }
 
 // ListContexts is what a caller asks before it knows which versions exist, so
-// it needs no context of its own and cannot fail. The IDs are filled in and the
+// it needs no context of its own and does not fail for want of one. The IDs are
+// filled in, each context carries the member it was configured with, and the
 // order is stable.
 func TestListContexts(t *testing.T) {
 	path, head := newRepo(t)
 	cfg := &config.Config{
 		Repositories: map[string]config.Repository{"demo": {Path: path}},
-		Contexts: map[string]vacctx.CodeContext{
-			"demo@v2": {Repository: "demo", Branch: "v2", Revision: head},
-			"demo@v1": {Repository: "demo", Branch: "v1", Revision: head},
+		Contexts: map[string]vacctx.Workspace{
+			"demo@v2": {Members: []vacctx.CodeContext{{Repository: "demo", Branch: "v2", Revision: head}}},
+			"demo@v1": {Members: []vacctx.CodeContext{{Repository: "demo", Branch: "v1", Revision: head}}},
 		},
 	}
 	eng := engine.New(resolver.New(cfg), &fakeSearch{}, &fakeGraph{}, &fakeSource{})
 
-	listed := eng.ListContexts(context.Background())
+	listed, err := eng.ListContexts(context.Background())
+	if err != nil {
+		t.Fatalf("ListContexts: %v", err)
+	}
 	if len(listed) != 2 {
 		t.Fatalf("listed %d contexts, want 2", len(listed))
 	}
 	if listed[0].ID != "demo@v1" || listed[1].ID != "demo@v2" {
 		t.Fatalf("listed %v, want them sorted by id with the ids filled in", listed)
 	}
+	// Down to the member: a listing that reported the IDs and lost what they are
+	// scoped to would still pass everything above.
+	for _, want := range []struct {
+		at     int
+		branch string
+	}{{0, "v1"}, {1, "v2"}} {
+		members := listed[want.at].Members
+		if len(members) != 1 || members[0].Branch != want.branch || members[0].ID != listed[want.at].ID {
+			t.Fatalf("%s listed members %+v, want the one branch %q it was configured with, filed under its context",
+				listed[want.at].ID, members, want.branch)
+		}
+	}
 
 	empty := engine.New(resolver.New(&config.Config{}), &fakeSearch{}, &fakeGraph{}, &fakeSource{})
-	if got := empty.ListContexts(context.Background()); got == nil || len(got) != 0 {
+	got, err := empty.ListContexts(context.Background())
+	if err != nil {
+		t.Fatalf("ListContexts of an empty configuration: %v", err)
+	}
+	if got == nil || len(got) != 0 {
 		t.Fatalf("an empty configuration listed %v, want an empty non-nil list", got)
 	}
 }
@@ -581,19 +823,26 @@ func TestListContexts(t *testing.T) {
 // which a *resolver.Resolver never does. The order of ListContexts is the
 // engine's promise, so it must not rest on the one implementation that happens
 // to sort for it.
-type unsortedContexts []vacctx.CodeContext
+type unsortedContexts []vacctx.Workspace
 
-func (u unsortedContexts) Contexts() []vacctx.CodeContext { return u }
+func (u unsortedContexts) Contexts(context.Context) ([]vacctx.Workspace, error) { return u, nil }
 
-func (u unsortedContexts) Resolve(_ context.Context, id string) (vacctx.CodeContext, error) {
-	return vacctx.CodeContext{}, vacerr.New(vacerr.ContextNotFound, "no", map[string]any{"context": id})
+func (u unsortedContexts) Resolve(_ context.Context, id string) (vacctx.Workspace, error) {
+	return vacctx.Workspace{}, vacerr.New(vacerr.ContextNotFound, "no", map[string]any{"context": id})
 }
 
 func TestListContextsSortsWhateverTheSourceHandsBack(t *testing.T) {
-	source := unsortedContexts{{ID: "demo@v2"}, {ID: "demo@v10"}, {ID: "demo@v1"}}
+	source := unsortedContexts{
+		single(vacctx.CodeContext{ID: "demo@v2"}),
+		single(vacctx.CodeContext{ID: "demo@v10"}),
+		single(vacctx.CodeContext{ID: "demo@v1"}),
+	}
 	eng := engine.New(source, &fakeSearch{}, &fakeGraph{}, &fakeSource{})
 
-	listed := eng.ListContexts(context.Background())
+	listed, err := eng.ListContexts(context.Background())
+	if err != nil {
+		t.Fatalf("ListContexts: %v", err)
+	}
 	want := []string{"demo@v1", "demo@v10", "demo@v2"}
 	if len(listed) != len(want) {
 		t.Fatalf("listed %v, want %d contexts", listed, len(want))
@@ -609,6 +858,34 @@ func TestListContextsSortsWhateverTheSourceHandsBack(t *testing.T) {
 	if source[0].ID != "demo@v2" {
 		t.Fatalf("ListContexts sorted the source's slice in place: %v", source)
 	}
+}
+
+// A source that could not say which contexts exist has not said there are none.
+// The failure is the source's own, returned unchanged and with no list beside
+// it: an empty list here would tell an agent there is no version to ask about,
+// which is a statement about the configuration rather than about the failure.
+func TestListContextsReportsASourceThatCouldNotAnswer(t *testing.T) {
+	refused := vacerr.New(vacerr.InvalidArgument, "the context source would not answer", nil)
+	eng := engine.New(failingContexts{err: refused}, &fakeSearch{}, &fakeGraph{}, &fakeSource{})
+
+	listed, err := eng.ListContexts(context.Background())
+	if !errors.Is(err, refused) {
+		t.Fatalf("ListContexts reported %v, want the source's own error", err)
+	}
+	if listed != nil {
+		t.Fatalf("ListContexts returned %v beside its error, want no list at all", listed)
+	}
+}
+
+// failingContexts is a source that cannot answer either question.
+type failingContexts struct{ err error }
+
+func (f failingContexts) Contexts(context.Context) ([]vacctx.Workspace, error) {
+	return nil, f.err
+}
+
+func (f failingContexts) Resolve(context.Context, string) (vacctx.Workspace, error) {
+	return vacctx.Workspace{}, f.err
 }
 
 // usable is the complete context the nil-provider tests are answered in. They
@@ -641,7 +918,7 @@ func queryAll(t *testing.T, eng *engine.Engine) (searchErr, traceErr, getErr err
 // not a nil dereference, and not an empty result, which would read as "this
 // version has no such code" — and every other query answers as usual.
 func TestAMissingProviderFailsOnlyItsOwnQuery(t *testing.T) {
-	contexts := fakeContexts{codeCtx: usable}
+	contexts := fakeContexts{workspace: single(usable)}
 
 	t.Run("no search provider", func(t *testing.T) {
 		eng := engine.New(contexts, nil, &fakeGraph{}, &fakeSource{})
@@ -651,7 +928,7 @@ func TestAMissingProviderFailsOnlyItsOwnQuery(t *testing.T) {
 		if traceErr != nil || getErr != nil {
 			t.Fatalf("an absent search provider broke another query: trace=%v get=%v", traceErr, getErr)
 		}
-		if listed := eng.ListContexts(context.Background()); len(listed) != 1 {
+		if listed, err := eng.ListContexts(context.Background()); err != nil || len(listed) != 1 {
 			t.Fatalf("an absent search provider left ListContexts answering %v", listed)
 		}
 	})
@@ -666,7 +943,7 @@ func TestAMissingProviderFailsOnlyItsOwnQuery(t *testing.T) {
 		if searchErr != nil || getErr != nil {
 			t.Fatalf("an absent graph provider broke another query: search=%v get=%v", searchErr, getErr)
 		}
-		if listed := eng.ListContexts(context.Background()); len(listed) != 1 {
+		if listed, err := eng.ListContexts(context.Background()); err != nil || len(listed) != 1 {
 			t.Fatalf("an absent graph provider left ListContexts answering %v", listed)
 		}
 	})
@@ -679,7 +956,7 @@ func TestAMissingProviderFailsOnlyItsOwnQuery(t *testing.T) {
 		if searchErr != nil || traceErr != nil {
 			t.Fatalf("an absent source provider broke another query: search=%v trace=%v", searchErr, traceErr)
 		}
-		if listed := eng.ListContexts(context.Background()); len(listed) != 1 {
+		if listed, err := eng.ListContexts(context.Background()); err != nil || len(listed) != 1 {
 			t.Fatalf("an absent source provider left ListContexts answering %v", listed)
 		}
 	})
@@ -744,7 +1021,7 @@ func TestCloseClosesOnlyWhatWasHandedOver(t *testing.T) {
 	graph := &closeableGraph{err: refuses}
 	source := &closeableSource{}
 
-	eng := engine.New(fakeContexts{codeCtx: usable}, keepOpen{kept}, graph, source)
+	eng := engine.New(fakeContexts{workspace: single(usable)}, keepOpen{kept}, graph, source)
 
 	err := eng.Close()
 	if !errors.Is(err, refuses) {
@@ -761,7 +1038,7 @@ func TestCloseClosesOnlyWhatWasHandedOver(t *testing.T) {
 // Nothing to close is not a failure. A provider that cannot be closed is left
 // alone, and an absent one is not dereferenced.
 func TestCloseWithNothingToClose(t *testing.T) {
-	eng := engine.New(fakeContexts{codeCtx: usable}, &fakeSearch{}, nil, nil)
+	eng := engine.New(fakeContexts{workspace: single(usable)}, &fakeSearch{}, nil, nil)
 
 	if err := eng.Close(); err != nil {
 		t.Fatalf("closing an Engine with nothing to close reported %v", err)

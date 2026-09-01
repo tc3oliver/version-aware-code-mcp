@@ -25,28 +25,44 @@ import (
 // The two versions this program answers in. A real one reads them from a
 // configuration file; the engine only ever sees them through the interface
 // below.
+//
+// Each is a workspace of one repository, which is what a version context is
+// unless it says otherwise: the member carries the scope, and the workspace ID
+// is the name a query asks for.
 var versions = demoContexts{
-	{ID: "demo-v1", Repository: "demo", Branch: "release/v1", Revision: "1111111111111111111111111111111111111111", GraphRef: "demo-v1"},
-	{ID: "demo-v2", Repository: "demo", Branch: "release/v2", Revision: "2222222222222222222222222222222222222222", GraphRef: "demo-v2"},
+	single("demo-v1", vacctx.CodeContext{Repository: "demo", Branch: "release/v1", Revision: "1111111111111111111111111111111111111111", GraphRef: "demo-v1"}),
+	single("demo-v2", vacctx.CodeContext{Repository: "demo", Branch: "release/v2", Revision: "2222222222222222222222222222222222222222", GraphRef: "demo-v2"}),
+}
+
+// single is one repository as the workspace it is. The member is filed under the
+// workspace's ID, because that is the name every result and every citation is
+// scoped by.
+func single(id string, member vacctx.CodeContext) vacctx.Workspace {
+	member.ID = id
+	return vacctx.Workspace{ID: id, Members: []vacctx.CodeContext{member}}
 }
 
 // demoContexts stands in for *resolver.Resolver. An engine.ContextSource is the
 // two methods below and nothing more, so a program keeping its version scopes
 // in a database, a service or — here — a slice implements it without touching
 // this project's configuration format.
-type demoContexts []vacctx.CodeContext
+type demoContexts []vacctx.Workspace
 
-func (d demoContexts) Contexts() []vacctx.CodeContext { return d }
+// Nothing here can fail, and the error is returned anyway: the interface has one
+// so that a source deciding which contexts a caller may see has something to
+// report a failure with other than an empty list, which would say there are no
+// versions at all.
+func (d demoContexts) Contexts(context.Context) ([]vacctx.Workspace, error) { return d, nil }
 
 // An id that names no version is refused rather than guessed at: answering out
 // of some other version is exactly the failure vacmcp exists to prevent.
-func (d demoContexts) Resolve(_ context.Context, id string) (vacctx.CodeContext, error) {
-	for _, codeCtx := range d {
-		if codeCtx.ID == id {
-			return codeCtx, nil
+func (d demoContexts) Resolve(_ context.Context, id string) (vacctx.Workspace, error) {
+	for _, workspace := range d {
+		if workspace.ID == id {
+			return workspace, nil
 		}
 	}
-	return vacctx.CodeContext{}, vacerr.New(
+	return vacctx.Workspace{}, vacerr.New(
 		vacerr.ContextNotFound,
 		"no context named "+id,
 		map[string]any{"context": id},
@@ -105,9 +121,14 @@ func run() error {
 func searchEveryVersion(eng *engine.Engine, query string) error {
 	ctx := context.Background()
 
+	listed, err := eng.ListContexts(ctx)
+	if err != nil {
+		return err
+	}
+
 	var lines []string
-	for _, codeCtx := range eng.ListContexts(ctx) {
-		result, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: codeCtx.ID, Query: query})
+	for _, workspace := range listed {
+		result, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: workspace.ID, Query: query})
 		if err != nil {
 			return err
 		}
@@ -126,6 +147,6 @@ func searchEveryVersion(eng *engine.Engine, query string) error {
 		}
 	}
 
-	_, err := fmt.Println(strings.Join(lines, "\n"))
+	_, err = fmt.Println(strings.Join(lines, "\n"))
 	return err
 }

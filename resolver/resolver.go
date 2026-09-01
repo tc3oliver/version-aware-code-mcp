@@ -3,8 +3,11 @@
 // Version correctness is checked in two places, because there are two different
 // claims to check.
 //
-// [Resolver.Resolve] verifies the declared revision is *available*: it exists in
-// that repository and names a commit. It deliberately does not require the
+// [Resolver.Resolve] verifies the declared revision is *available*, for every
+// repository the context names: it exists in that repository and names a
+// commit. Every member is checked and one failure fails the whole context,
+// because a workspace resolved down to the repositories that happened to be
+// readable is an answer scoped to less than it claims. It deliberately does not require the
 // repository to be checked out at it. Git serves any commit in the object
 // database — `git show <rev>:<path>` needs no checkout — and one repository
 // holds several versions at once, which is what lets two contexts over one
@@ -37,7 +40,7 @@ import (
 
 // Resolver answers context IDs from a loaded configuration.
 type Resolver struct {
-	contexts     map[string]vacctx.CodeContext
+	contexts     map[string]vacctx.Workspace
 	repositories map[string]config.Repository
 }
 
@@ -52,77 +55,99 @@ func New(cfg *config.Config) *Resolver {
 // It reports what is configured, not what currently resolves: unlike
 // [Resolver.Resolve] it reads no repository, because listing the versions a
 // caller may ask for is the answer to a different question than whether one of
-// them is serviceable right now.
-func (r *Resolver) Contexts() []vacctx.CodeContext {
+// them is serviceable right now. Nothing here can fail, and the error is
+// returned anyway because the interface this satisfies has one: a source that
+// cannot report a failure can only report an empty list instead, which is the
+// silent fallback this server does not have.
+func (r *Resolver) Contexts(context.Context) ([]vacctx.Workspace, error) {
 	// Not a nil slice: to a caller putting this on a wire, null and [] are
 	// different answers, and "there are none" is [].
-	listed := make([]vacctx.CodeContext, 0, len(r.contexts))
+	listed := make([]vacctx.Workspace, 0, len(r.contexts))
 	for _, id := range slices.Sorted(maps.Keys(r.contexts)) {
-		codeCtx := r.contexts[id]
-		// config.Load fills this in from the key; a hand-built Config may not
-		// have, so the key is the source of truth.
-		codeCtx.ID = id
-		listed = append(listed, codeCtx)
+		listed = append(listed, vacctx.Workspace{ID: id, Members: membersOf(r.contexts[id], id)})
 	}
-	return listed
+	return listed, nil
 }
 
-// Resolve returns the [vacctx.CodeContext] named by id, once its repository is
-// readable and its revision resolves to a commit there.
+// membersOf returns workspace's members filed under id, on a slice of their own.
+//
+// config.Load fills the IDs in from the key; a hand-built Config may not have,
+// so the key is the source of truth — a member without an ID cannot be put on
+// the wire by evidence. The copy is what keeps that from writing back into the
+// configuration the Resolver was built over: a caller handed the stored slice
+// could find the file's own contexts rewritten under it.
+func membersOf(workspace vacctx.Workspace, id string) []vacctx.CodeContext {
+	members := make([]vacctx.CodeContext, 0, len(workspace.Members))
+	for _, member := range workspace.Members {
+		member.ID = id
+		members = append(members, member)
+	}
+	return members
+}
+
+// Resolve returns the [vacctx.Workspace] named by id, once every one of its
+// members has a readable repository and a revision that resolves to a commit
+// there.
 //
 // Every failure is a *[vacerr.Error]: an unknown ID is
 // [vacerr.ContextNotFound], a repository that cannot be read is
 // [vacerr.RepositoryNotFound], and a revision this repository does not have is
-// [vacerr.RevisionNotFound]. On any of them the returned context is the zero
+// [vacerr.RevisionNotFound]. On any of them the returned workspace is the zero
 // value: nothing usable escapes a failed check.
+//
+// One member failing fails the whole workspace, and there is deliberately no
+// partial answer. A workspace is the scope of one question, so a half-resolved
+// one would answer that question over the repositories that happened to be
+// readable and say nothing about the rest — an answer scoped to less than it
+// claims, which is the same failure as answering in the wrong version.
 //
 // A resolved context says the version exists, not that any particular working
 // tree is on it. A caller serving content from a checkout must additionally
 // call [VerifyWorktree].
-func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.CodeContext, error) {
-	codeCtx, ok := r.contexts[id]
+func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.Workspace, error) {
+	workspace, ok := r.contexts[id]
 	if !ok {
 		// No fuzzy matching, no "the only configured context", no default. An
 		// unconfigured ID is an error by design: guessing here would answer
 		// from a version the caller never asked for.
-		return vacctx.CodeContext{}, vacerr.New(
+		return vacctx.Workspace{}, vacerr.New(
 			vacerr.ContextNotFound,
 			fmt.Sprintf("context %q is not configured", id),
 			map[string]any{"context": id},
 		)
 	}
-	// config.Load fills this in from the key; a hand-built Config may not have.
-	// A context without an ID cannot be put on the wire by evidence.
-	codeCtx.ID = id
+	members := membersOf(workspace, id)
 
-	repo, ok := r.repositories[codeCtx.Repository]
-	if !ok {
-		return vacctx.CodeContext{}, vacerr.New(
-			vacerr.RepositoryNotFound,
-			fmt.Sprintf("context %q references repository %q, which is not configured", id, codeCtx.Repository),
-			map[string]any{"context": id, "repository": codeCtx.Repository},
-		)
-	}
-
-	if _, err := revParse(ctx, repo.Path, codeCtx.Revision); err != nil {
-		// One failure, two causes worth telling apart: a path that is not a
-		// usable repository, and a repository that simply does not have this
-		// revision. Only the second one is the user's context being wrong.
-		if _, repoErr := gitDir(ctx, repo.Path); repoErr != nil {
-			return vacctx.CodeContext{}, vacerr.New(
+	for _, member := range members {
+		repo, ok := r.repositories[member.Repository]
+		if !ok {
+			return vacctx.Workspace{}, vacerr.New(
 				vacerr.RepositoryNotFound,
-				fmt.Sprintf("context %q: cannot read repository %q at %s: %v", id, codeCtx.Repository, repo.Path, repoErr),
-				map[string]any{"context": id, "repository": codeCtx.Repository, "path": repo.Path},
+				fmt.Sprintf("context %q references repository %q, which is not configured", id, member.Repository),
+				map[string]any{"context": id, "repository": member.Repository},
 			)
 		}
-		return vacctx.CodeContext{}, vacerr.New(
-			vacerr.RevisionNotFound,
-			fmt.Sprintf("context %q: repository %q has no revision %q: %v", id, codeCtx.Repository, codeCtx.Revision, err),
-			map[string]any{"context": id, "repository": codeCtx.Repository, "revision": codeCtx.Revision, "path": repo.Path},
-		)
+
+		if _, err := revParse(ctx, repo.Path, member.Revision); err != nil {
+			// One failure, two causes worth telling apart: a path that is not a
+			// usable repository, and a repository that simply does not have this
+			// revision. Only the second one is the user's context being wrong.
+			if _, repoErr := gitDir(ctx, repo.Path); repoErr != nil {
+				return vacctx.Workspace{}, vacerr.New(
+					vacerr.RepositoryNotFound,
+					fmt.Sprintf("context %q: cannot read repository %q at %s: %v", id, member.Repository, repo.Path, repoErr),
+					map[string]any{"context": id, "repository": member.Repository, "path": repo.Path},
+				)
+			}
+			return vacctx.Workspace{}, vacerr.New(
+				vacerr.RevisionNotFound,
+				fmt.Sprintf("context %q: repository %q has no revision %q: %v", id, member.Repository, member.Revision, err),
+				map[string]any{"context": id, "repository": member.Repository, "revision": member.Revision, "path": repo.Path},
+			)
+		}
 	}
 
-	return codeCtx, nil
+	return vacctx.Workspace{ID: id, Members: members}, nil
 }
 
 // VerifyWorktree reports whether the working tree at repoPath is on the

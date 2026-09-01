@@ -65,7 +65,14 @@ func AddListContexts(srv *mcp.Server, eng *engine.Engine) {
 		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		OutputSchema: outputSchema(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listContextsOutput, error) {
-		return nil, listContextsOutput{Contexts: list(eng.ListContexts(ctx))}, nil
+		contexts, err := eng.ListContexts(ctx)
+		if err != nil {
+			// An empty configuration is an answer; a configuration that could
+			// not be read is not, and answering [] for it would tell the agent
+			// there are no versions to ask about.
+			return nil, listContextsOutput{}, err
+		}
+		return nil, listContextsOutput{Contexts: list(contexts)}, nil
 	})
 }
 
@@ -92,17 +99,26 @@ func outputSchema() *jsonschema.Schema {
 
 // list projects the engine's contexts onto the wire shape, keeping the order it
 // answered in, which is sorted by ID so repeated calls answer identically.
-func list(contexts []vacctx.CodeContext) []listedContext {
+//
+// One entry per repository, which for a context naming one repository — every
+// context this server can currently answer a query in — is one entry per
+// context, exactly as it has always been. A context naming several is listed as
+// several entries sharing its ID rather than as one entry standing for a
+// repository picked out of it: an agent reading a single repository, branch and
+// revision there would believe the context is scoped to that one alone.
+func list(contexts []vacctx.Workspace) []listedContext {
 	// Not a nil slice: a nil one marshals to null, and null is not the same
 	// answer as "there are none" to the agent reading it.
 	listed := make([]listedContext, 0, len(contexts))
-	for _, codeCtx := range contexts {
-		listed = append(listed, listedContext{
-			ID:         codeCtx.ID,
-			Repository: codeCtx.Repository,
-			Branch:     codeCtx.Branch,
-			Revision:   codeCtx.Revision,
-		})
+	for _, workspace := range contexts {
+		for _, member := range workspace.Members {
+			listed = append(listed, listedContext{
+				ID:         workspace.ID,
+				Repository: member.Repository,
+				Branch:     member.Branch,
+				Revision:   member.Revision,
+			})
+		}
 	}
 	return listed
 }

@@ -70,8 +70,8 @@ func TestCompareCodeReportsEveryChangeKindOnTheRealFixture(t *testing.T) {
 
 			// Each side is the version it was read at, or absent — and an absent
 			// side is most of the answer for ADDED and REMOVED.
-			assertComparedSide(t, "from", got.From, raw, tc.from, cfg.Contexts[v1])
-			assertComparedSide(t, "to", got.To, raw, tc.to, cfg.Contexts[v2])
+			assertComparedSide(t, "from", got.From, raw, tc.from, only(cfg, v1))
+			assertComparedSide(t, "to", got.To, raw, tc.to, only(cfg, v2))
 
 			// An unchanged file has nothing to show line by line, and says so with
 			// an empty list rather than a null one: to an agent those differ.

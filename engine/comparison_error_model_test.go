@@ -61,8 +61,14 @@ var otherRepository = vacctx.CodeContext{
 // Duplicates TestCompareCodeRefusesContextsInDifferentRepositories, on purpose:
 // the rule under test here is that this holds for every comparison, not that it
 // holds for compare_code.
+//
+// What is compared is the resolved member's repository, because that is the only
+// place a repository is written down — a context is a workspace and has none of
+// its own. Both comparisons are asked the same question with two contexts over
+// one repository elsewhere in this file and answer it, so a check that had
+// become true of any two distinct contexts would show up there.
 func TestNoComparisonAnswersAcrossTwoRepositories(t *testing.T) {
-	contexts := mapContexts{compareV1.ID: compareV1, otherRepository.ID: otherRepository}
+	contexts := mapContexts{compareV1.ID: single(compareV1), otherRepository.ID: single(otherRepository)}
 
 	t.Run("compare_code", func(t *testing.T) {
 		source := &diffSource{files: map[string]string{
@@ -374,7 +380,7 @@ func TestEveryComparisonFailsWhenAVersionCannotBeAsked(t *testing.T) {
 // Whichever it is, it is a fact about this server and not about the code asked
 // for: nothing is claimed about the file, the symbol or the versions.
 func TestEachComparisonNamesTheCapabilityItLacks(t *testing.T) {
-	contexts := mapContexts{compareV1.ID: compareV1, compareV2.ID: compareV2}
+	contexts := mapContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2)}
 
 	t.Run("compare_calls: no graph provider", func(t *testing.T) {
 		eng := engine.New(contexts, &fakeSearch{}, nil, &fakeSource{})

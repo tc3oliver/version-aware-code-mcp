@@ -88,7 +88,7 @@ func TestCancellationReachesTheProvider(t *testing.T) {
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
 			blocked := &blockingProvider{entered: make(chan struct{})}
-			eng := engine.New(mapContexts{codeCtx.ID: codeCtx}, blocked, blocked, blocked)
+			eng := engine.New(mapContexts{codeCtx.ID: single(codeCtx)}, blocked, blocked, blocked)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

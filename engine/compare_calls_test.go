@@ -65,7 +65,7 @@ func (g *versionedGraph) TraceCalls(_ context.Context, codeCtx vacctx.CodeContex
 // graphs reads neither code nor an index, and building it with the other two
 // nil is what keeps it that way.
 func compareEngine(graph provider.GraphProvider) *engine.Engine {
-	return engine.New(mapContexts{compareV1.ID: compareV1, compareV2.ID: compareV2}, nil, graph, nil)
+	return engine.New(mapContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2)}, nil, graph, nil)
 }
 
 func compareRequest() engine.CompareCallsRequest {
@@ -171,7 +171,7 @@ func TestCompareCallsUnknownContextIsContextNotFound(t *testing.T) {
 // whichever context was asked about.
 func TestCompareCallsNeedsAGraphOnBothSides(t *testing.T) {
 	t.Run("no graph provider", func(t *testing.T) {
-		eng := engine.New(mapContexts{compareV1.ID: compareV1, compareV2.ID: compareV2}, &fakeSearch{}, nil, &fakeSource{})
+		eng := engine.New(mapContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2)}, &fakeSearch{}, nil, &fakeSource{})
 
 		if _, err := eng.CompareCalls(context.Background(), compareRequest()); err != nil {
 			assertCode(t, err, vacerr.GraphProviderUnavailable)
@@ -192,7 +192,7 @@ func TestCompareCallsNeedsAGraphOnBothSides(t *testing.T) {
 				from.ID: {Symbol: "demo.Process"},
 				to.ID:   {Symbol: "demo.Process"},
 			}}
-			eng := engine.New(mapContexts{from.ID: from, to.ID: to}, nil, graph, nil)
+			eng := engine.New(mapContexts{from.ID: single(from), to.ID: single(to)}, nil, graph, nil)
 
 			if _, err := eng.CompareCalls(context.Background(), compareRequest()); err != nil {
 				assertCode(t, err, vacerr.InvalidArgument)
@@ -593,7 +593,7 @@ func TestCompareCallsNeedsOnlyContextsAndAGraph(t *testing.T) {
 			{Caller: "demo.Serve", Callee: "demo.Process", Path: "serve.go", Line: 9},
 		}},
 	}}
-	eng := engine.New(mapContexts{compareV1.ID: compareV1, compareV2.ID: compareV2}, nil, graph, nil)
+	eng := engine.New(mapContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2)}, nil, graph, nil)
 
 	out, err := eng.CompareCalls(context.Background(), compareRequest())
 	if err != nil {

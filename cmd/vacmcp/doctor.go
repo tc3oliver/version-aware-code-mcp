@@ -236,12 +236,19 @@ func checkManagedContexts(ctx context.Context, s *store.Store, cfg *config.Confi
 			rows = append(rows, check{record.ID, status, fmt.Sprintf("%s %s", record.State, record.Revision)})
 			continue
 		}
-		codeCtx, err := contexts.Resolve(ctx, record.ID)
+		workspace, err := contexts.Resolve(ctx, record.ID)
 		if err != nil {
 			rows = append(rows, check{record.ID, statusFail, err.Error()})
 			continue
 		}
-		rows = append(rows, check{record.ID, statusOK, fmt.Sprintf("%s %s %s", record.State, codeCtx.Repository, codeCtx.Revision)})
+		// One entry per repository the context names. A managed context names
+		// one, so this row reads exactly as it did before a context could name
+		// several.
+		scopes := make([]string, 0, len(workspace.Members))
+		for _, member := range workspace.Members {
+			scopes = append(scopes, fmt.Sprintf("%s %s", member.Repository, member.Revision))
+		}
+		rows = append(rows, check{record.ID, statusOK, fmt.Sprintf("%s %s", record.State, strings.Join(scopes, ", "))})
 	}
 	return rows
 }
@@ -432,16 +439,19 @@ func checkContexts(ctx context.Context, cfg *config.Config) []check {
 	contexts := resolver.New(cfg)
 	checks := make([]check, 0, len(cfg.Contexts))
 	for _, id := range slices.Sorted(maps.Keys(cfg.Contexts)) {
-		codeCtx, err := contexts.Resolve(ctx, id)
+		workspace, err := contexts.Resolve(ctx, id)
 		if err != nil {
 			checks = append(checks, check{id, statusFail, err.Error()})
 			continue
 		}
-		checks = append(checks, check{
-			id,
-			statusOK,
-			fmt.Sprintf("%s %s %s", codeCtx.Repository, codeCtx.Branch, codeCtx.Revision),
-		})
+		// One entry per repository the context names, so a context over one
+		// repository reads exactly as it did before a context could name
+		// several, and one over two says so rather than showing half of itself.
+		scopes := make([]string, 0, len(workspace.Members))
+		for _, member := range workspace.Members {
+			scopes = append(scopes, fmt.Sprintf("%s %s %s", member.Repository, member.Branch, member.Revision))
+		}
+		checks = append(checks, check{id, statusOK, strings.Join(scopes, ", ")})
 	}
 	return checks
 }

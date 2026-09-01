@@ -39,7 +39,17 @@ func searchProvider(t *testing.T) (*zoektadapter.Provider, map[string]vacctx.Cod
 	// This test brings its own server up, so it supplies the address.
 	cfg.Providers.Zoekt.URL = startZoekt(t, fixture.ZoektIndex)
 
-	return zoektadapter.New(cfg), cfg.Contexts
+	// One member per fixture context, which is what this adapter is handed: a
+	// search runs in one repository at one revision whatever the context it came
+	// out of holds.
+	contexts := map[string]vacctx.CodeContext{}
+	for id, workspace := range cfg.Contexts {
+		if len(workspace.Members) != 1 {
+			t.Fatalf("context %q names %d repositories, want the one the fixture declares", id, len(workspace.Members))
+		}
+		contexts[id] = workspace.Members[0]
+	}
+	return zoektadapter.New(cfg), contexts
 }
 
 // search runs one query in the named context and fails the test if it errors.

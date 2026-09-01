@@ -28,6 +28,7 @@ import (
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
+	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
 // The contexts testdata/prepare-fixture.sh configures, one per release branch of
@@ -323,8 +324,15 @@ func (v vacmcp) call(t *testing.T, name string, args map[string]any) (string, bo
 
 // stamp is the configured context, for a failure that has no answer of its own
 // to quote.
+// The configuration's contexts name one repository each, which is what the
+// gate's fixture declares and the only shape a query can be answered in; the
+// zero member is what an ID nobody configured has, and it stamps blank exactly
+// as the missing context did before.
 func (v vacmcp) stamp(contextID string) contextStamp {
-	codeCtx := v.cfg.Contexts[contextID]
+	var codeCtx vacctx.CodeContext
+	if members := v.cfg.Contexts[contextID].Members; len(members) == 1 {
+		codeCtx = members[0]
+	}
 	return contextStamp{
 		ID:         contextID,
 		Repository: codeCtx.Repository,

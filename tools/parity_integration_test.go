@@ -95,7 +95,11 @@ func TestEngineAndMCPAnswerIdentically(t *testing.T) {
 	// one, so if the two sides disagree here they are not even talking about the
 	// same configuration.
 	t.Run("list_contexts", func(t *testing.T) {
-		direct := list(eng.ListContexts(t.Context()))
+		listed, err := eng.ListContexts(t.Context())
+		if err != nil {
+			t.Fatalf("ListContexts: %v", err)
+		}
+		direct := list(listed)
 
 		raw, isError := parityCall(t, session, "list_contexts", map[string]any{})
 		if isError {
@@ -331,8 +335,8 @@ func parityCompareCode(t *testing.T, cfg *config.Config, eng *engine.Engine, ses
 			if wire.Change != tc.change || wire.Path != tc.path {
 				t.Errorf("compare_code(%s) = %q at %q, want %s at %s", tc.path, wire.Change, wire.Path, tc.change, tc.path)
 			}
-			assertParitySide(t, "from", wire.From, raw, tc.fromHas, cfg.Contexts[v1])
-			assertParitySide(t, "to", wire.To, raw, tc.toHas, cfg.Contexts[v2])
+			assertParitySide(t, "from", wire.From, raw, tc.fromHas, only(cfg, v1))
+			assertParitySide(t, "to", wire.To, raw, tc.toHas, only(cfg, v2))
 			if tc.fromHas {
 				assertScoped(t, result.From().Context(), v1)
 			}
@@ -421,8 +425,8 @@ func parityCompareCalls(t *testing.T, cfg *config.Config, eng *engine.Engine, se
 					t.Errorf("compare_calls(%s) reports %v as %s, want %v", tc.symbol, got, classification.name, classification.want)
 				}
 			}
-			assertParitySide(t, "from", wire.From, raw, tc.fromHas, cfg.Contexts[v1])
-			assertParitySide(t, "to", wire.To, raw, tc.toHas, cfg.Contexts[v2])
+			assertParitySide(t, "from", wire.From, raw, tc.fromHas, only(cfg, v1))
+			assertParitySide(t, "to", wire.To, raw, tc.toHas, only(cfg, v2))
 			if tc.fromHas {
 				assertScoped(t, result.From().Context(), v1)
 			}

@@ -46,15 +46,25 @@ const (
 // named here so the engine states what it needs rather than which type supplies
 // it.
 //
-// Contexts takes no [context.Context] and cannot fail because listing what is
-// configured reads no repository; Resolve can, because it checks the version it
-// names is really there.
+// Both methods answer with a [vacctx.Workspace], the set of repositories one
+// context ID names. A context over a single repository is a workspace with one
+// member, so there is one shape here and not two, and the length is the only
+// thing that tells them apart.
+//
+// Both take a [context.Context] and both can fail. Listing what is configured
+// reads no repository, so the resolver's own listing never fails — but a source
+// that decided which contexts a request may see, and could not reach whatever it
+// asks, would have only the empty list left to answer with. An empty list is a
+// statement ("there are no versions here") and not a failure, so a source with
+// no way to report one would have to make that statement falsely. Resolve fails
+// for the more ordinary reason: it checks the versions it names are really
+// there.
 //
 // An implementation is not trusted to have validated what it returns, nor to
 // have ordered it: see [Engine.resolve] and [Engine.ListContexts].
 type ContextSource interface {
-	Contexts() []vacctx.CodeContext
-	Resolve(ctx context.Context, id string) (vacctx.CodeContext, error)
+	Contexts(ctx context.Context) ([]vacctx.Workspace, error)
+	Resolve(ctx context.Context, id string) (vacctx.Workspace, error)
 }
 
 // Engine answers the four queries of doc-1 §5 against one configuration.
@@ -143,8 +153,8 @@ func require(id, name, value string) error {
 	)
 }
 
-// resolve returns the context id names, once it is complete enough to scope a
-// query with.
+// resolve returns the one member of the workspace id names, once every member
+// of it is complete enough to scope a query with.
 //
 // The fields are re-checked here, after the [ContextSource] has already had its
 // say, because [ContextSource] is an interface: whichever implementation is
@@ -156,26 +166,79 @@ func require(id, name, value string) error {
 // without it [evidence.New] refuses the answer downstream, with an error that
 // is not a *[vacerr.Error] and names no context.
 //
+// Every member is checked and not only the one that will be used, because the
+// workspace is what the caller named: a member this query happens not to reach
+// is still part of the scope it asked about, and one that is unusable makes the
+// scope unusable rather than smaller.
+//
 // GraphRef is not checked here, because only [Engine.TraceCalls] reads a graph:
 // requiring it of all three would leave a caller with no graph backend at all
 // unable to search, which is the independent failure of the providers given up
 // at the [ContextSource]. It is checked where it is used.
+//
+// The single member is where this server currently stops. A context naming
+// several repositories parses, resolves and lists, and then every query refuses
+// it with the error [severalRepositories] builds, because expanding a query over
+// several members is not implemented here yet. Answering in the first member
+// would be the one thing worse than refusing: a whole repository's worth of code
+// silently outside the scope of an answer that names the context the caller
+// asked for.
 func (e *Engine) resolve(ctx context.Context, id string) (vacctx.CodeContext, error) {
-	codeCtx, err := e.contexts.Resolve(ctx, id)
+	workspace, err := e.contexts.Resolve(ctx, id)
 	if err != nil {
 		return vacctx.CodeContext{}, err
 	}
-	for _, field := range []struct{ name, value string }{
-		{"id", codeCtx.ID},
-		{"repository", codeCtx.Repository},
-		{"branch", codeCtx.Branch},
-		{"revision", codeCtx.Revision},
-	} {
-		if err := require(id, field.name, field.value); err != nil {
-			return vacctx.CodeContext{}, err
+	for _, member := range workspace.Members {
+		for _, field := range []struct{ name, value string }{
+			{"id", member.ID},
+			{"repository", member.Repository},
+			{"branch", member.Branch},
+			{"revision", member.Revision},
+		} {
+			if err := require(id, field.name, field.value); err != nil {
+				return vacctx.CodeContext{}, err
+			}
 		}
 	}
-	return codeCtx, nil
+	if len(workspace.Members) != 1 {
+		return vacctx.CodeContext{}, severalRepositories(id, workspace)
+	}
+	return workspace.Members[0], nil
+}
+
+// severalRepositories refuses a workspace this server cannot answer a question
+// in: one naming several repositories, or none at all.
+//
+// The code is [vacerr.InvalidArgument] rather than one of its own. The code set
+// is part of the public tool API — ten codes fixed by the v0.1.0 specification
+// and one added since — so a new one is a change to that API, and it belongs
+// with the work that makes a multi-repository context answerable rather than
+// with the work that makes it configurable. What is true today is that the
+// request named a scope this server cannot answer in, which is what
+// INVALID_ARGUMENT says, and the message says the rest plainly.
+//
+// The repositories travel with it because the caller cannot see the
+// configuration: told only that its context names several, it cannot tell
+// whether that is the context it meant.
+func severalRepositories(id string, workspace vacctx.Workspace) error {
+	if len(workspace.Members) == 0 {
+		return vacerr.New(
+			vacerr.InvalidArgument,
+			fmt.Sprintf("context %q resolved without a repository, so there is no version to answer in", id),
+			map[string]any{"context": id},
+		)
+	}
+
+	repositories := make([]string, 0, len(workspace.Members))
+	for _, member := range workspace.Members {
+		repositories = append(repositories, member.Repository)
+	}
+	return vacerr.New(
+		vacerr.InvalidArgument,
+		fmt.Sprintf("context %q names %d repositories (%s), and this server can only answer a question about one",
+			id, len(repositories), strings.Join(repositories, ", ")),
+		map[string]any{"context": id, "repositories": repositories},
+	)
 }
 
 // answer is the half of a successful result that doc-1's Tool Contract fixes:
@@ -275,13 +338,23 @@ func (r GetCodeResult) Source() provider.SourceContent { return r.source }
 //
 // An empty configuration is an answer and not a failure: this is what a caller
 // asks before it knows which versions exist, so there is nothing yet for it to
-// have got wrong.
-func (e *Engine) ListContexts(context.Context) []vacctx.CodeContext {
-	listed := slices.Clone(e.contexts.Contexts())
-	slices.SortFunc(listed, func(a, b vacctx.CodeContext) int {
+// have got wrong. The error is the source's own and nothing else: a source that
+// could not say which contexts exist has not said there are none.
+//
+// A workspace naming several repositories is listed like any other, even though
+// no query can be answered in it yet: what exists in the configuration and what
+// this server can currently answer are two different facts, and hiding the first
+// behind the second would leave a caller unable to see the context it wrote.
+func (e *Engine) ListContexts(ctx context.Context) ([]vacctx.Workspace, error) {
+	contexts, err := e.contexts.Contexts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	listed := slices.Clone(contexts)
+	slices.SortFunc(listed, func(a, b vacctx.Workspace) int {
 		return strings.Compare(a.ID, b.ID)
 	})
-	return listed
+	return listed, nil
 }
 
 // SearchCode searches the code of the context req names.

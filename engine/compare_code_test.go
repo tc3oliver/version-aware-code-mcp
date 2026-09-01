@@ -83,7 +83,7 @@ func (d *diffSource) Diff(_ context.Context, from, to vacctx.CodeContext, req pr
 // and no other provider at all: comparing code reads neither a graph nor an
 // index, and building it with those two nil is what keeps it that way.
 func compareCodeEngine(source provider.SourceProvider) *engine.Engine {
-	return engine.New(mapContexts{compareV1.ID: compareV1, compareV2.ID: compareV2}, nil, nil, source)
+	return engine.New(mapContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2)}, nil, nil, source)
 }
 
 func compareCodeRequest() engine.CompareCodeRequest {
@@ -148,6 +148,12 @@ func TestCompareCodeUnknownContextIsContextNotFound(t *testing.T) {
 // reached, rather than left to whichever backend would happen to notice: a
 // caller holding only this API must not have to rely on the adapter behind it
 // for the refusal.
+//
+// The repository being compared is the resolved member's, which is the only
+// place a repository is written down: a context is a workspace and has none of
+// its own. That is what keeps this check from being satisfied by two contexts
+// merely having different IDs — every other test in this file compares two
+// contexts whose members share a repository, and they answer.
 func TestCompareCodeRefusesContextsInDifferentRepositories(t *testing.T) {
 	other := vacctx.CodeContext{
 		ID: "other@v1", Repository: "other", Branch: "v1",
@@ -157,7 +163,7 @@ func TestCompareCodeRefusesContextsInDifferentRepositories(t *testing.T) {
 		compareV1.ID: "package demo\n",
 		other.ID:     "package other\n",
 	}}
-	eng := engine.New(mapContexts{compareV1.ID: compareV1, other.ID: other}, nil, nil, source)
+	eng := engine.New(mapContexts{compareV1.ID: single(compareV1), other.ID: single(other)}, nil, nil, source)
 	req := compareCodeRequest()
 	req.ToContext = other.ID
 
@@ -427,7 +433,7 @@ func TestCompareCodeNeedsOnlyContextsAndASourceThatCanDiff(t *testing.T) {
 		compareV1.ID: "package demo\n",
 		compareV2.ID: "package demo // v2\n",
 	}}
-	eng := engine.New(mapContexts{compareV1.ID: compareV1, compareV2.ID: compareV2}, nil, nil, source)
+	eng := engine.New(mapContexts{compareV1.ID: single(compareV1), compareV2.ID: single(compareV2)}, nil, nil, source)
 
 	out, err := eng.CompareCode(context.Background(), compareCodeRequest())
 	if err != nil {

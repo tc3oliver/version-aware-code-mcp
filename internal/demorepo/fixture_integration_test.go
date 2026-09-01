@@ -24,10 +24,14 @@ func TestPreparedFixtureMatchesTheRepository(t *testing.T) {
 
 	graphRefs := map[string]string{}
 	for id, branch := range map[string]string{"demo-v1": demorepo.V1, "demo-v2": demorepo.V2} {
-		codeCtx, ok := cfg.Contexts[id]
+		workspace, ok := cfg.Contexts[id]
 		if !ok {
 			t.Fatalf("context %q is missing from %s", id, fixture.Config)
 		}
+		if len(workspace.Members) != 1 {
+			t.Fatalf("context %q names %d repositories, want the one %s declares", id, len(workspace.Members), fixture.Config)
+		}
+		codeCtx := workspace.Members[0]
 		if codeCtx.Branch != branch {
 			t.Errorf("context %q branch = %q, want %q", id, codeCtx.Branch, branch)
 		}

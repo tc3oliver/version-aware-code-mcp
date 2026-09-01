@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"os/exec"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -19,24 +20,31 @@ import (
 // configuration file, no git, no *resolver.Resolver. It is here because
 // "the engine only needs the interface" is a claim that is only worth as much
 // as the second implementation proving it.
-type mapContexts map[string]vacctx.CodeContext
+//
+// Its values are workspaces rather than bare contexts, and every test that
+// wants one repository writes single(…) for it. That is deliberate: a fake that
+// took a [vacctx.CodeContext] and wrapped it into a workspace on the way out
+// would keep every test in this package compiling while hiding the very thing
+// they are now about — which member of which workspace the engine resolved and
+// handed to a provider.
+type mapContexts map[string]vacctx.Workspace
 
-func (m mapContexts) Contexts() []vacctx.CodeContext {
+func (m mapContexts) Contexts(context.Context) ([]vacctx.Workspace, error) {
 	out := slices.Collect(maps.Values(m))
-	slices.SortFunc(out, func(a, b vacctx.CodeContext) int { return strings.Compare(a.ID, b.ID) })
-	return out
+	slices.SortFunc(out, func(a, b vacctx.Workspace) int { return strings.Compare(a.ID, b.ID) })
+	return out, nil
 }
 
-func (m mapContexts) Resolve(_ context.Context, id string) (vacctx.CodeContext, error) {
-	codeCtx, ok := m[id]
+func (m mapContexts) Resolve(_ context.Context, id string) (vacctx.Workspace, error) {
+	workspace, ok := m[id]
 	if !ok {
-		return vacctx.CodeContext{}, vacerr.New(
+		return vacctx.Workspace{}, vacerr.New(
 			vacerr.ContextNotFound,
 			"no context named "+id,
 			map[string]any{"context": id},
 		)
 	}
-	return codeCtx, nil
+	return workspace, nil
 }
 
 // A whole Engine built from implementations that exist only in this file
@@ -65,11 +73,15 @@ func TestEngineRunsOnImplementationsOfNothingButItsInterfaces(t *testing.T) {
 	source := &fakeSource{content: provider.SourceContent{
 		Path: "process.go", StartLine: 12, EndLine: 12, Content: "func Process() {\n", Revision: v2.Revision,
 	}}
-	eng := engine.New(mapContexts{v1.ID: v1, v2.ID: v2}, search, graph, source)
+	eng := engine.New(mapContexts{v1.ID: single(v1), v2.ID: single(v2)}, search, graph, source)
 	ctx := context.Background()
 
-	if listed := eng.ListContexts(ctx); !slices.Equal(listed, []vacctx.CodeContext{v1, v2}) {
-		t.Fatalf("ListContexts returned %+v, want the source's own contexts %+v", listed, []vacctx.CodeContext{v1, v2})
+	listed, err := eng.ListContexts(ctx)
+	if err != nil {
+		t.Fatalf("ListContexts: %v", err)
+	}
+	if want := []vacctx.Workspace{single(v1), single(v2)}; !reflect.DeepEqual(listed, want) {
+		t.Fatalf("ListContexts returned %+v, want the source's own contexts %+v", listed, want)
 	}
 
 	searched, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: v2.ID, Query: "Process"})

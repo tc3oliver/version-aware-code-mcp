@@ -1,6 +1,13 @@
 // Package provider_test is the evidence for the two things the interfaces
 // promise: each one can be implemented on its own, and each method receives the
 // CodeContext that scopes it to a version.
+//
+// A provider is handed one CodeContext and knows nothing of the workspace it
+// came out of, which is why nothing here mentions one: whether the right member
+// of the right context arrived is a fact about the engine that chose it, and it
+// is checked there, in
+// TestTheMemberOfTheNamedWorkspaceIsWhatReachesTheProvider. What this file
+// pins is the other half — that whatever the engine chose arrives intact.
 package provider_test
 
 import (

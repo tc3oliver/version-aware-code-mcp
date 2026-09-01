@@ -84,7 +84,7 @@ func TestTraceCallsAnswersFromTheContextOfTheRequest(t *testing.T) {
 			}
 
 			// AC #1: the context of the answer is the context of the question.
-			configured := cfg.Contexts[tc.context]
+			configured := only(cfg, tc.context)
 			if got.Context.ID != tc.context || got.Context.Repository != configured.Repository ||
 				got.Context.Branch != tc.branch || got.Context.Revision != configured.Revision {
 				t.Errorf("context = %+v, want the configured %s (%+v)", got.Context, tc.context, configured)
@@ -173,14 +173,14 @@ func TestTraceCallsSymbolNotFound(t *testing.T) {
 // right one.
 func TestTraceCallsAmbiguousSymbol(t *testing.T) {
 	cfg := traceFixture(t)
-	demo := cfg.Contexts["demo-v1"]
-	cfg.Contexts["ambiguous"] = vacctx.CodeContext{
+	demo := only(cfg, "demo-v1")
+	cfg.Contexts["ambiguous"] = single(vacctx.CodeContext{
 		ID:         "ambiguous",
 		Repository: demo.Repository,
 		Branch:     demo.Branch,
 		Revision:   demo.Revision,
 		GraphRef:   demorepo.AmbiguousGraph,
-	}
+	})
 
 	body := traceCallsError(t, cfg, map[string]any{
 		"context": "ambiguous", "symbol": "Duplicated", "direction": "callees", "depth": 2,
