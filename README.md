@@ -934,7 +934,7 @@ those:
 | v0.2.0 | managed repository and context lifecycle: `repo` and `context` commands, automatic Zoekt and graph provisioning, readiness verification — done |
 | v0.3.0 | embeddable core / extension API: a supported, documented Go API to embed this core in your own gateway, not yet under a compatibility guarantee — done |
 | v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff within one repository — done |
-| v0.5.0 | multi-repo contexts: a workspace of several repositories under one context id, search spanning every member, and multi-repo graph query — each member keeps its own revision-scoped graph, so there is no cross-repository call edge — this release |
+| v0.5.0 | multi-repo contexts: a workspace of several repositories under one context id, search spanning every member, and multi-repo graph query — each member keeps its own revision-scoped graph, so there is no cross-repository call edge — done |
 | v0.6.0 | operations: metrics, OpenTelemetry, garbage collection, scheduled sync primitives |
 | v1.0.0 | stable public API and compatibility contract |
 
