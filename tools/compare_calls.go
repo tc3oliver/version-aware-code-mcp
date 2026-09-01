@@ -19,15 +19,23 @@ import (
 // model, and keeping every value check on one side of that line means one wrong
 // argument has one shape.
 //
-// The two contexts are the whole scope of the comparison, and there is no
-// repository, branch or revision field: each side is walked in the graph its own
-// context names. Symbol, direction and depth are asked of both sides
-// identically — there is deliberately no way to walk the from side one way and
-// the to side another, because a difference produced by asking two different
-// questions is not a difference between two versions.
+// The two contexts are the whole scope of the comparison, and there is no branch
+// or revision field: each side is walked in the graph its own context names.
+// Symbol, direction and depth are asked of both sides identically — there is
+// deliberately no way to walk the from side one way and the to side another,
+// because a difference produced by asking two different questions is not a
+// difference between two versions.
+//
+// Repository is asked of both sides identically for that same reason, and it
+// widens nothing: it selects a repository both contexts already name, and one
+// either of them does not name is refused rather than walked. A context naming
+// several has no walk without it — a call graph is one repository's own — and
+// says so with INVALID_ARGUMENT naming the side that needs it; a context naming
+// one never needs it.
 type compareCallsInput struct {
 	FromContext string `json:"from_context,omitempty" jsonschema:"the id of the version context to compare from, as returned by list_contexts; the trace runs in that version's graph"`
 	ToContext   string `json:"to_context,omitempty" jsonschema:"the id of the version context to compare to, as returned by list_contexts; it must name the same repository as from_context"`
+	Repository  string `json:"repository,omitempty" jsonschema:"which repository's call graph to compare, as one of the members list_contexts reports for both contexts; required when either context names several, and unnecessary when they name one"`
 	Symbol      string `json:"symbol,omitempty" jsonschema:"the function to compare, named as it is written in the source; it is resolved in each version separately"`
 	Direction   string `json:"direction,omitempty" jsonschema:"callers to walk towards the functions that call the symbol, callees to walk towards the ones it calls"`
 	Depth       int    `json:"depth,omitempty" jsonschema:"how many levels to walk, from 1 to 5; the same depth is walked on both sides"`
@@ -118,8 +126,9 @@ func AddCompareCalls(srv *mcp.Server, eng *engine.Engine) {
 		Name:  "compare_calls",
 		Title: "Compare a symbol's call graph between two version contexts",
 		Description: "Compare the call graph around one symbol between two version contexts. " +
-			"Pass two context ids from list_contexts: the same symbol, direction and depth are walked in each version's own graph, and no repository, branch or revision can be given here. " +
+			"Pass two context ids from list_contexts: the same symbol, direction and depth are walked in each version's own graph, and no branch or revision can be given here. " +
 			"Both contexts must name the same repository — two repositories' call graphs are not two versions of one, which is INVALID_ARGUMENT. " +
+			"A context naming several repositories requires repository, given as one of the members list_contexts reports for it and applied to both sides; leaving it out is INVALID_ARGUMENT naming the side that needs it. " +
 			"direction is \"callers\" (the functions that call the symbol) or \"callees\" (the ones it calls); depth is how many levels to walk, from 1 to 5. " +
 			"presence says which versions had the symbol at all: BOTH, FROM_ONLY or TO_ONLY. The relations are reported as added, removed and unchanged, each carrying its call sites in each version separately. " +
 			"The from and to sides are reported separately too, each with the version context it was traced in and the evidence backing it, and the side of a version that does not have the symbol is null. " +
@@ -129,6 +138,7 @@ func AddCompareCalls(srv *mcp.Server, eng *engine.Engine) {
 		result, err := eng.CompareCalls(ctx, engine.CompareCallsRequest{
 			FromContext: in.FromContext,
 			ToContext:   in.ToContext,
+			Repository:  in.Repository,
 			Symbol:      in.Symbol,
 			Direction:   provider.Direction(in.Direction),
 			Depth:       in.Depth,

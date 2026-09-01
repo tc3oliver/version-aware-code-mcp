@@ -1,0 +1,1 @@
+{"contexts":[{"branch":"release/1.x","id":"demo-v1","repository":"example/demo","revision":"1111111111111111111111111111111111111111"},{"branch":"release/2.x","id":"demo-v2","repository":"example/demo","revision":"2222222222222222222222222222222222222222"},{"branch":"main","id":"other-v1","repository":"example/other","revision":"3333333333333333333333333333333333333333"}]}

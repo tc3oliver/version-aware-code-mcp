@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -225,6 +226,23 @@ func TestSearchCodeOverSeveralRepositoriesReachesTheClient(t *testing.T) {
 		t.Fatalf("matches = %+v, want one from each member: %s", out.Matches, raw)
 	}
 
+	// Every match says which version it is from, and says it for itself. A list
+	// of paths and lines spanning two repositories is not an answer here: alpha
+	// and beta can both have a src/main.go, and a caller reading one line of it
+	// has nothing else in the document to tell it which repository — or which
+	// revision of it — the line is from.
+	//
+	// The revision asserted is the member's own rather than the workspace's
+	// first, because that is the whole claim: two members pinned one revision
+	// apart, and a match attributed to the wrong one would cite a line that is
+	// not there.
+	for i, member := range stackedSearch.Members {
+		if got := out.Matches[i]; got.Repository != member.Repository || got.Revision != member.Revision {
+			t.Errorf("match %d = %+v, want it attributed to %s at %s",
+				i, got, member.Repository, member.Revision)
+		}
+	}
+
 	// The graph reference is internal in both shapes, and a second member is a
 	// second chance to leak one.
 	if strings.Contains(raw, "beta-v2") || strings.Contains(raw, "graph") {
@@ -262,24 +280,31 @@ func TestSearchCodeAdvertisesNoOutputSchema(t *testing.T) {
 		t.Errorf("search_code advertises an output schema, which the SDK enforces on every result: %s", raw)
 	}
 
-	// The input schema is untouched by any of this, and an agent still cannot
-	// widen a search's scope past the context it named.
+	// An agent still cannot widen a search's scope past the context it named.
+	// repository is now among the properties and is not a widening: it selects one
+	// of the repositories the context already names, so it is optional — a search
+	// without it covers all of them — while a branch or a revision property would
+	// be a version the configuration never granted, and neither exists.
 	raw, err := json.Marshal(tool.InputSchema)
 	if err != nil {
 		t.Fatalf("marshal input schema: %v", err)
 	}
 	var schema struct {
 		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
 	}
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatalf("decode input schema %s: %v", raw, err)
 	}
-	for _, field := range []string{"context", "query"} {
+	for _, field := range []string{"context", "query", "repository"} {
 		if _, ok := schema.Properties[field]; !ok {
 			t.Errorf("input schema has no %s property: %s", field, raw)
 		}
 	}
-	for _, forbidden := range []string{"repository", "branch", "revision"} {
+	if slices.Contains(schema.Required, "repository") {
+		t.Errorf("input schema requires repository, which a context naming one does not need: %s", raw)
+	}
+	for _, forbidden := range []string{"branch", "revision"} {
 		if _, ok := schema.Properties[forbidden]; ok {
 			t.Errorf("input schema accepts a %s override: %s", forbidden, raw)
 		}

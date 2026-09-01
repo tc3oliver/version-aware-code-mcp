@@ -152,10 +152,15 @@ func modifiedDiff() *provider.SourceDiff {
 	}
 }
 
-// AC #1: the input schema accepts the two context ids and the path, and nothing
-// else. A repository, branch or revision property here would let a caller
-// compare a version the configuration never granted it — the whole guarantee
-// given away in a JSON field.
+// AC #1: the input schema accepts the two context ids, the path and the
+// repository to compare in, and nothing else. A branch or revision property here
+// would let a caller compare a version the configuration never granted it — the
+// whole guarantee given away in a JSON field.
+//
+// repository is not that. It selects one repository both contexts already name,
+// so it narrows a comparison rather than widening it, and it is optional where
+// the other three are required: a context naming one repository has nothing to
+// select, and a call that named one would have to be told which.
 func TestCompareCodeInputSchemaIsTwoContextsAndAPath(t *testing.T) {
 	tool := comparisonTool(t, "compare_code")
 
@@ -172,20 +177,22 @@ func TestCompareCodeInputSchemaIsTwoContextsAndAPath(t *testing.T) {
 	}
 	t.Logf("compare_code input schema = %s", raw)
 
-	want := []string{"from_context", "path", "to_context"}
+	want := []string{"from_context", "path", "repository", "to_context"}
 	if got := slices.Sorted(maps.Keys(schema.Properties)); !slices.Equal(got, want) {
 		t.Errorf("input schema has the properties %v, want exactly %v", got, want)
 	}
-	for _, field := range want {
+	for _, field := range []string{"from_context", "to_context", "path"} {
 		if !slices.Contains(schema.Required, field) {
 			t.Errorf("input schema does not require %s: %s", field, raw)
 		}
 	}
-	// Named explicitly rather than left to the set comparison: these three are
-	// the fields whose presence would be a version-isolation hole, so they are
-	// checked by name and against the whole schema text, jsonschema descriptions
-	// included.
-	for _, forbidden := range []string{"repository", "branch", "revision"} {
+	if slices.Contains(schema.Required, "repository") {
+		t.Errorf("input schema requires repository, which a context naming one repository does not need: %s", raw)
+	}
+	// Named explicitly rather than left to the set comparison: these two are the
+	// fields whose presence would be a version-isolation hole, so they are checked
+	// by name and against the whole schema text, jsonschema descriptions included.
+	for _, forbidden := range []string{"branch", "revision"} {
 		if _, ok := schema.Properties[forbidden]; ok {
 			t.Errorf("input schema accepts a %s override: %s", forbidden, raw)
 		}
