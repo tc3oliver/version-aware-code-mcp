@@ -146,8 +146,8 @@ func paritySearchCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSessi
 			matches = append(matches, searchMatch{Path: match.Path, Line: match.Line, Snippet: match.Snippet})
 		}
 		direct := parityWire{
-			Context:  onTheWire(result.Context()),
-			Evidence: result.Evidence(),
+			Context:  onTheWire(t, result.Context()),
+			Evidence: citations(t, result.Evidence()),
 			Matches:  matches,
 		}
 		wire, raw := parityResult(t, session, "search_code", map[string]any{"context": contextID, "query": query})
@@ -198,8 +198,8 @@ func parityTraceCalls(t *testing.T, eng *engine.Engine, session *mcp.ClientSessi
 		calls = append(calls, call{Caller: edge.Caller, Callee: edge.Callee, Path: edge.Path, Line: edge.Line})
 	}
 	direct := parityWire{
-		Context:  onTheWire(result.Context()),
-		Evidence: result.Evidence(),
+		Context:  onTheWire(t, result.Context()),
+		Evidence: citations(t, result.Evidence()),
 		Symbol:   graph.Symbol,
 		Calls:    calls,
 	}
@@ -248,8 +248,8 @@ func parityGetCode(t *testing.T, eng *engine.Engine, session *mcp.ClientSession,
 
 	src := result.Source()
 	direct := parityWire{
-		Context:   onTheWire(result.Context()),
-		Evidence:  result.Evidence(),
+		Context:   onTheWire(t, result.Context()),
+		Evidence:  citations(t, result.Evidence()),
 		Path:      src.Path,
 		StartLine: src.StartLine,
 		EndLine:   src.EndLine,
@@ -324,7 +324,7 @@ func parityCompareCode(t *testing.T, cfg *config.Config, eng *engine.Engine, ses
 			if err != nil {
 				t.Fatalf("engine.CompareCode(%s): %v", tc.path, err)
 			}
-			direct := comparedCodeOnTheWire(result)
+			direct := comparedCodeOnTheWire(t, result)
 			wire, raw := compareCodeCall(t, session, v1, v2, tc.path)
 			if !reflect.DeepEqual(direct, wire) {
 				t.Errorf("compare_code(%s):\n  engine: %+v\n     MCP: %+v", tc.path, direct, wire)
@@ -399,7 +399,7 @@ func parityCompareCalls(t *testing.T, cfg *config.Config, eng *engine.Engine, se
 			if err != nil {
 				t.Fatalf("engine.CompareCalls(%s): %v", tc.symbol, err)
 			}
-			direct := comparedCallsOnTheWire(result)
+			direct := comparedCallsOnTheWire(t, result)
 			wire, raw := compareCallsOnFixture(t, session, map[string]any{
 				"from_context": v1, "to_context": v2,
 				"symbol": tc.symbol, "direction": string(tc.direction), "depth": 1,
@@ -480,7 +480,8 @@ func assertParitySide(t *testing.T, which string, side *comparisonSideWire, raw 
 // It is written out here rather than borrowed from compare_code.go's own
 // encoder: a comparison that ran both sides through the encoder under test
 // would agree with itself whatever that encoder did.
-func comparedCodeOnTheWire(result engine.CompareCodeResult) compareCodeWire {
+func comparedCodeOnTheWire(t *testing.T, result engine.CompareCodeResult) compareCodeWire {
+	t.Helper()
 	hunks := make([]hunkWire, 0, len(result.Hunks()))
 	for _, h := range result.Hunks() {
 		lines := make([]diffLineWire, 0, len(h.Lines))
@@ -494,8 +495,8 @@ func comparedCodeOnTheWire(result engine.CompareCodeResult) compareCodeWire {
 		})
 	}
 	return compareCodeWire{
-		From:   comparedSideOnTheWire(result.From()),
-		To:     comparedSideOnTheWire(result.To()),
+		From:   comparedSideOnTheWire(t, result.From()),
+		To:     comparedSideOnTheWire(t, result.To()),
 		Change: string(result.Change()),
 		Path:   result.Path(),
 		Binary: result.Binary(),
@@ -505,10 +506,11 @@ func comparedCodeOnTheWire(result engine.CompareCodeResult) compareCodeWire {
 
 // comparedCallsOnTheWire is an engine call graph comparison projected onto the
 // shape a client receives, the mirror of [comparedCodeOnTheWire].
-func comparedCallsOnTheWire(result engine.CompareCallsResult) compareCallsWire {
+func comparedCallsOnTheWire(t *testing.T, result engine.CompareCallsResult) compareCallsWire {
+	t.Helper()
 	return compareCallsWire{
-		From:               comparedSideOnTheWire(result.From()),
-		To:                 comparedSideOnTheWire(result.To()),
+		From:               comparedSideOnTheWire(t, result.From()),
+		To:                 comparedSideOnTheWire(t, result.To()),
 		Presence:           string(result.Presence()),
 		RequestedSymbol:    result.RequestedSymbol(),
 		FromResolvedSymbol: result.FromResolvedSymbol(),
@@ -523,16 +525,45 @@ func comparedCallsOnTheWire(result engine.CompareCallsResult) compareCallsWire {
 // public context fields and that version's own citations, or null where the
 // version had nothing. The graph reference is deliberately absent, exactly as
 // [onTheWire] leaves it out of a single-context result.
-func comparedSideOnTheWire(s engine.ComparisonSide) *comparisonSideWire {
+func comparedSideOnTheWire(t *testing.T, s engine.ComparisonSide) *comparisonSideWire {
+	t.Helper()
 	if !s.Present() {
 		return nil
 	}
-	side := &comparisonSideWire{Evidence: s.Evidence()}
-	side.Context.ID = s.Context().ID
-	side.Context.Repository = s.Context().Repository
-	side.Context.Branch = s.Context().Branch
-	side.Context.Revision = s.Context().Revision
+	codeCtx := answeredIn(t, s.Context())
+	side := &comparisonSideWire{Evidence: citations(t, s.Evidence())}
+	side.Context.ID = codeCtx.ID
+	side.Context.Repository = codeCtx.Repository
+	side.Context.Branch = codeCtx.Branch
+	side.Context.Revision = codeCtx.Revision
 	return side
+}
+
+// answeredIn is the one member a result was answered in.
+//
+// Every context in these fixtures names one repository, so a result carrying any
+// other number of members is a version scope that went wrong rather than a shape
+// to go on reading: this stops the test instead of picking one of them and
+// comparing the rest of the answer against a version nobody asked about.
+func answeredIn(t *testing.T, workspace vacctx.Workspace) vacctx.CodeContext {
+	t.Helper()
+	if len(workspace.Members) != 1 {
+		t.Fatalf("the engine answered in %d repositories (%+v), want the one this context names",
+			len(workspace.Members), workspace)
+	}
+	return workspace.Members[0]
+}
+
+// citations is the one list of citations such a result carries, for the reason
+// [answeredIn] insists on the one member: the citations arrive one list per
+// member, so a second list would be a second repository's evidence going out
+// under a context that names one.
+func citations(t *testing.T, cited [][]evidence.Evidence) []evidence.Evidence {
+	t.Helper()
+	if len(cited) != 1 {
+		t.Fatalf("the engine cited %d repositories (%+v), want the one this context names", len(cited), cited)
+	}
+	return cited[0]
 }
 
 // relationsOnTheWire projects one classification list. A version that does not
@@ -603,8 +634,9 @@ func assertCodeParity(t *testing.T, what string, direct, wire, want vacerr.Code)
 // on the wire, so the parity comparison cannot see it. That makes this the only
 // place it can be checked at all — and it has to be, because an empty one is
 // how a trace would end up in no graph in particular.
-func assertScoped(t *testing.T, codeCtx vacctx.CodeContext, contextID string) {
+func assertScoped(t *testing.T, workspace vacctx.Workspace, contextID string) {
 	t.Helper()
+	codeCtx := answeredIn(t, workspace)
 	if codeCtx.ID != contextID {
 		t.Errorf("the engine answered in context %q, want %q", codeCtx.ID, contextID)
 	}
@@ -616,7 +648,9 @@ func assertScoped(t *testing.T, codeCtx vacctx.CodeContext, contextID string) {
 // onTheWire is the context as MCP publishes it: the four public fields, without
 // the graph reference. It mirrors the evidence package's own projection, which
 // is what makes it the right shape to compare a tool result against.
-func onTheWire(codeCtx vacctx.CodeContext) listedContext {
+func onTheWire(t *testing.T, workspace vacctx.Workspace) listedContext {
+	t.Helper()
+	codeCtx := answeredIn(t, workspace)
 	return listedContext{
 		ID:         codeCtx.ID,
 		Repository: codeCtx.Repository,

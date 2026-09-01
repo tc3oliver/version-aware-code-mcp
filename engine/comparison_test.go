@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/tc3oliver/version-aware-code-mcp/engine"
-	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 )
 
 // A comparison side is the same bargain as the result types: every field is
@@ -44,8 +43,8 @@ func TestAnAbsentComparisonSideAnswersNothing(t *testing.T) {
 	if absent.Present() {
 		t.Fatal("the absent side reports Present true")
 	}
-	if got := absent.Context(); got != (vacctx.CodeContext{}) {
-		t.Errorf("the absent side reports context %+v, want the zero context", got)
+	if got := absent.Context(); got.ID != "" || len(got.Members) != 0 {
+		t.Errorf("the absent side reports context %+v, want the zero workspace", got)
 	}
 	if got := absent.Evidence(); got != nil {
 		t.Errorf("the absent side reports evidence %+v, want none: it had nothing to cite", got)

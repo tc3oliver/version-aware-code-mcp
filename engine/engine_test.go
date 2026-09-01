@@ -310,14 +310,19 @@ func TestIncompleteResolvedContextIsRefusedBeforeAnyProvider(t *testing.T) {
 	}
 }
 
-// A context naming several repositories is refused by every query, with an error
-// that says so, and no provider is reached in any of the versions it names.
+// A context naming several repositories is refused by every query that can only
+// answer in one, with an error that says so, and no provider is reached in any
+// of the versions it names.
 //
-// This is the half of the workspace model that is not implemented yet, pinned so
-// it cannot be half-implemented by accident. The two failures it rules out are
-// the ones that look like success: answering in the first member, which drops a
-// whole repository out of a scope the caller was told it asked in, and answering
-// with an empty result, which reads as "none of this code exists here".
+// search_code is deliberately not in here: it expands over the members instead,
+// which is what TestSearchCodeExpandsOverEveryMemberOfTheWorkspace is about.
+// The four below are the queries that still have one graph to walk, one file to
+// read or one history to compare, and for them this pins the half of the
+// workspace model that is not implemented yet so it cannot be half-implemented
+// by accident. The two failures it rules out are the ones that look like
+// success: answering in the first member, which drops a whole repository out of
+// a scope the caller was told it asked in, and answering with an empty result,
+// which reads as "none of this code exists here".
 func TestAContextOfSeveralRepositoriesIsRefusedRatherThanNarrowed(t *testing.T) {
 	second := usable
 	second.Repository = "other"
@@ -329,7 +334,6 @@ func TestAContextOfSeveralRepositoriesIsRefusedRatherThanNarrowed(t *testing.T) 
 	eng := engine.New(fakeContexts{workspace: over(usable.ID, usable, second)}, search, graph, source)
 	ctx := context.Background()
 
-	searchOut, searchErr := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: usable.ID, Query: "demo"})
 	traceOut, traceErr := eng.TraceCalls(ctx, engine.TraceCallsRequest{
 		Context: usable.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
 	})
@@ -344,7 +348,6 @@ func TestAContextOfSeveralRepositoriesIsRefusedRatherThanNarrowed(t *testing.T) 
 	})
 
 	for name, err := range map[string]error{
-		"SearchCode":   searchErr,
 		"TraceCalls":   traceErr,
 		"GetCode":      getErr,
 		"CompareCode":  compareCodeErr,
@@ -368,13 +371,13 @@ func TestAContextOfSeveralRepositoriesIsRefusedRatherThanNarrowed(t *testing.T) 
 		}
 	}
 
-	// Not one of them, and not the first: a search that had reached the search
+	// Not one of them, and not the first: a trace that had reached the graph
 	// provider would have answered about one repository under the name of a
 	// context covering two.
-	if search.called || graph.called || source.called {
-		t.Fatalf("a provider was reached for a context naming two repositories: search=%v graph=%v source=%v", search.called, graph.called, source.called)
+	if graph.called || source.called {
+		t.Fatalf("a provider was reached for a context naming two repositories: graph=%v source=%v", graph.called, source.called)
 	}
-	for name, out := range map[string]contextual{"SearchCode": searchOut, "TraceCalls": traceOut, "GetCode": getOut} {
+	for name, out := range map[string]contextual{"TraceCalls": traceOut, "GetCode": getOut} {
 		t.Run(name, func(t *testing.T) { assertNotAnAnswer(t, out) })
 	}
 }
@@ -512,9 +515,19 @@ func TestOnlyTraceCallsNeedsAGraphRef(t *testing.T) {
 
 // The provider is handed the resolved context, graph reference included, and
 // the result says which version it was answered in.
+//
+// This is the whole of a single-repository search, which is what every context
+// this server could answer before workspaces was: one member, one query, the
+// provider's own ranked order kept as it came, and one citation per match. The
+// two matches are here rather than one because order is part of that: a
+// re-ranking or a grouping applied to a single member would be invisible against
+// a one-match answer.
 func TestSearchCodeAnswersInTheResolvedContext(t *testing.T) {
 	eng, search, _, _, configured := newEngine(t)
-	search.results = []provider.SearchResult{{Path: "process.go", Line: 1, Snippet: "package demo"}}
+	search.results = []provider.SearchResult{
+		{Path: "process.go", Line: 1, Snippet: "package demo"},
+		{Path: "aaa.go", Line: 7, Snippet: "// demo"},
+	}
 
 	out, err := eng.SearchCode(context.Background(), engine.SearchCodeRequest{Context: configured.ID, Query: "demo"})
 	if err != nil {
@@ -526,17 +539,29 @@ func TestSearchCodeAnswersInTheResolvedContext(t *testing.T) {
 	if search.query.Query != "demo" {
 		t.Fatalf("provider got query %q, want %q", search.query.Query, "demo")
 	}
-	if out.Context() != configured {
-		t.Fatalf("result context is %+v, want %+v", out.Context(), configured)
+	if got := answeredIn(t, out); got != configured {
+		t.Fatalf("result context is %+v, want a workspace of only %+v", out.Context(), configured)
 	}
-	if len(out.Matches()) != 1 || out.Matches()[0].Path != "process.go" {
-		t.Fatalf("matches are %+v, want the provider's one match", out.Matches())
+	if out.Context().ID != configured.ID {
+		t.Fatalf("result workspace is %q, want the context that was asked for %q", out.Context().ID, configured.ID)
+	}
+	// The provider's order, second match second: a search answers in the order
+	// the backend ranked, and nothing here re-ranks it.
+	want := []engine.Match{
+		{Repository: configured.Repository, Revision: configured.Revision, Path: "process.go", Line: 1, Snippet: "package demo"},
+		{Repository: configured.Repository, Revision: configured.Revision, Path: "aaa.go", Line: 7, Snippet: "// demo"},
+	}
+	if !slices.Equal(out.Matches(), want) {
+		t.Fatalf("matches are %+v, want the provider's two in its own order %+v", out.Matches(), want)
 	}
 	// The match is its own citation: a caller can check the answer at the line
 	// it was found on without asking a second question.
-	want := []evidence.Evidence{evidence.At("process.go", 1, 1, "package demo")}
-	if !slices.Equal(out.Evidence(), want) {
-		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), want)
+	wantCited := []evidence.Evidence{
+		evidence.At("process.go", 1, 1, "package demo"),
+		evidence.At("aaa.go", 7, 7, "// demo"),
+	}
+	if !slices.Equal(citedIn(t, out), wantCited) {
+		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), wantCited)
 	}
 }
 
@@ -554,8 +579,235 @@ func TestSearchCodeCitesNothingRatherThanNil(t *testing.T) {
 	if out.Evidence() == nil {
 		t.Fatal("a match-free search returned nil evidence, want an empty list")
 	}
-	if len(out.Evidence()) != 0 {
-		t.Fatalf("a match-free search cited %+v", out.Evidence())
+	if got := citedIn(t, out); got == nil || len(got) != 0 {
+		t.Fatalf("a match-free search cited %+v, want its one member's empty list", out.Evidence())
+	}
+}
+
+// recordingSearch answers per repository and records every call it was made, in
+// order and with the whole context it was handed.
+//
+// It records the calls rather than the last one because the questions the
+// fan-out raises are about the set of them: that every member was asked, that
+// each was asked with its own version, that a narrowed search asked nobody else,
+// and that all of it happens in one order. A fake keeping only the latest call
+// can answer none of those — a search that asked one member twice and the other
+// never would look exactly like one that asked each once.
+type recordingSearch struct {
+	results map[string][]provider.SearchResult
+	fail    map[string]error
+	calls   []vacctx.CodeContext
+}
+
+func (r *recordingSearch) Search(_ context.Context, codeCtx vacctx.CodeContext, _ provider.SearchQuery) ([]provider.SearchResult, error) {
+	r.calls = append(r.calls, codeCtx)
+	if err := r.fail[codeCtx.Repository]; err != nil {
+		return nil, err
+	}
+	return r.results[codeCtx.Repository], nil
+}
+
+// The workspace the fan-out tests search: one context ID over two repositories,
+// on different branches and pinned to different revisions, so an answer that
+// came from the wrong member cannot be mistaken for one that came from the
+// right one.
+var stack = over("stack@v1",
+	vacctx.CodeContext{
+		Repository: "alpha", Branch: "release/1.x",
+		Revision: "1111111111111111111111111111111111111111", GraphRef: "alpha-v1",
+	},
+	vacctx.CodeContext{
+		Repository: "beta", Branch: "main",
+		Revision: "2222222222222222222222222222222222222222", GraphRef: "beta-main",
+	},
+)
+
+// A workspace of two repositories is searched in both of them: one query per
+// member, each handed that member's own context, and every match comes back
+// saying which of the two it belongs to.
+//
+// The two repositories are made to answer with the same file, line and text on
+// purpose. What is then left to tell the two halves of the result apart is the
+// repository and revision the engine attributed them to — which can only have
+// come from the member that was asked, because [provider.SearchResult] has no
+// field to carry a version in and no provider is ever asked twice.
+func TestSearchCodeExpandsOverEveryMemberOfTheWorkspace(t *testing.T) {
+	alpha, beta := stack.Members[0], stack.Members[1]
+	sameMatch := provider.SearchResult{Path: "process.go", Line: 3, Snippet: "func Process()"}
+	search := &recordingSearch{results: map[string][]provider.SearchResult{
+		"alpha": {sameMatch, {Path: "serve.go", Line: 9, Snippet: "Process()"}},
+		"beta":  {sameMatch},
+	}}
+	eng := engine.New(fakeContexts{workspace: stack}, search, &fakeGraph{}, &fakeSource{})
+
+	out, err := eng.SearchCode(context.Background(), engine.SearchCodeRequest{Context: stack.ID, Query: "Process"})
+	if err != nil {
+		t.Fatalf("SearchCode: %v", err)
+	}
+
+	// Once each, and with the member's own scope: a provider handed the
+	// workspace's ID with another member's branch on it would search the wrong
+	// branch and report it under the right name.
+	if !slices.Equal(search.calls, []vacctx.CodeContext{alpha, beta}) {
+		t.Fatalf("the provider was called with %+v, want one call per member with its own context %+v",
+			search.calls, []vacctx.CodeContext{alpha, beta})
+	}
+
+	// Grouped by member in the workspace's order, and inside a group in the
+	// order that provider ranked them.
+	want := []engine.Match{
+		{Repository: "alpha", Revision: alpha.Revision, Path: "process.go", Line: 3, Snippet: "func Process()"},
+		{Repository: "alpha", Revision: alpha.Revision, Path: "serve.go", Line: 9, Snippet: "Process()"},
+		{Repository: "beta", Revision: beta.Revision, Path: "process.go", Line: 3, Snippet: "func Process()"},
+	}
+	if !slices.Equal(out.Matches(), want) {
+		t.Fatalf("matches are %+v, want %+v", out.Matches(), want)
+	}
+
+	// Every match belongs to a repository this workspace names. A match
+	// attributed to anything else would be a result from outside the scope the
+	// caller asked in, however plausible the name on it.
+	members := []string{alpha.Repository, beta.Repository}
+	for _, match := range out.Matches() {
+		if !slices.Contains(members, match.Repository) {
+			t.Errorf("match %+v is attributed to %q, which is not a member of %q (%v)",
+				match, match.Repository, stack.ID, members)
+		}
+	}
+
+	// The answer is scoped to the whole workspace, and its citations arrive one
+	// list per member in the same order, which is what attributes them.
+	if got := out.Context(); got.ID != stack.ID || !slices.Equal(got.Members, stack.Members) {
+		t.Fatalf("result context is %+v, want the workspace it searched %+v", got, stack)
+	}
+	wantCited := [][]evidence.Evidence{
+		{evidence.At("process.go", 3, 3, "func Process()"), evidence.At("serve.go", 9, 9, "Process()")},
+		{evidence.At("process.go", 3, 3, "func Process()")},
+	}
+	if got := out.Evidence(); len(got) != 2 ||
+		!slices.Equal(got[0], wantCited[0]) || !slices.Equal(got[1], wantCited[1]) {
+		t.Fatalf("evidence is %+v, want one list per member %+v", got, wantCited)
+	}
+
+	// Asked again it answers identically. The order is the members' and the
+	// providers' and nothing else's, so nothing about it can depend on a map's
+	// iteration or on which query came back first.
+	again, err := eng.SearchCode(context.Background(), engine.SearchCodeRequest{Context: stack.ID, Query: "Process"})
+	if err != nil {
+		t.Fatalf("SearchCode again: %v", err)
+	}
+	if !slices.Equal(again.Matches(), out.Matches()) {
+		t.Fatalf("the same search answered %+v and then %+v", out.Matches(), again.Matches())
+	}
+}
+
+// Repository names one member and the search runs there and nowhere else. The
+// other member is not queried at all — not queried and discarded, which would
+// read the same in the result and be a query in a version the caller narrowed
+// away from.
+func TestSearchCodeNarrowedToOneMemberQueriesNoOther(t *testing.T) {
+	alpha := stack.Members[0]
+	search := &recordingSearch{results: map[string][]provider.SearchResult{
+		"alpha": {{Path: "process.go", Line: 3, Snippet: "func Process()"}},
+		"beta":  {{Path: "beta.go", Line: 1, Snippet: "func Process()"}},
+	}}
+	eng := engine.New(fakeContexts{workspace: stack}, search, &fakeGraph{}, &fakeSource{})
+
+	out, err := eng.SearchCode(context.Background(), engine.SearchCodeRequest{
+		Context: stack.ID, Repository: "alpha", Query: "Process",
+	})
+	if err != nil {
+		t.Fatalf("SearchCode: %v", err)
+	}
+	if !slices.Equal(search.calls, []vacctx.CodeContext{alpha}) {
+		t.Fatalf("the provider was called with %+v, want only alpha's own context %+v", search.calls, alpha)
+	}
+
+	// The scope of the answer is the member it was narrowed to, not the context
+	// it was cut out of: reporting beta beside it would claim a repository was
+	// searched that never was.
+	if got := answeredIn(t, out); got != alpha {
+		t.Fatalf("result context is %+v, want a workspace of only %+v", out.Context(), alpha)
+	}
+	want := []engine.Match{{
+		Repository: "alpha", Revision: alpha.Revision,
+		Path: "process.go", Line: 3, Snippet: "func Process()",
+	}}
+	if !slices.Equal(out.Matches(), want) {
+		t.Fatalf("matches are %+v, want only alpha's %+v", out.Matches(), want)
+	}
+}
+
+// A repository the context does not name is refused, and the refusal says which
+// ones it could have asked for.
+//
+// Not an empty result, which would read as "that repository has none of this
+// code" about a repository this context never covered, and not a fallback to a
+// member the caller did not name — which would answer in a version it never
+// asked about, under the name of one it did.
+func TestSearchCodeRefusesARepositoryTheContextDoesNotName(t *testing.T) {
+	search := &recordingSearch{}
+	eng := engine.New(fakeContexts{workspace: stack}, search, &fakeGraph{}, &fakeSource{})
+
+	out, err := eng.SearchCode(context.Background(), engine.SearchCodeRequest{
+		Context: stack.ID, Repository: "gamma", Query: "Process",
+	})
+	if err == nil {
+		t.Fatal("SearchCode answered for a repository outside the workspace")
+	}
+	assertCode(t, err, vacerr.InvalidArgument)
+	assertNotAnAnswer(t, out)
+	if len(out.Matches()) != 0 {
+		t.Errorf("a refused search returned matches %+v", out.Matches())
+	}
+	if len(search.calls) != 0 {
+		t.Fatalf("a repository outside the workspace reached the provider as %+v", search.calls)
+	}
+
+	var vErr *vacerr.Error
+	if !errors.As(err, &vErr) {
+		t.Fatalf("SearchCode failed with %v, want a *vacerr.Error", err)
+	}
+	if vErr.Details["repository"] != "gamma" {
+		t.Errorf("the refusal says repository %v, want the one that was asked for", vErr.Details["repository"])
+	}
+	// The caller cannot see the configuration: told only "no", it cannot tell a
+	// misspelling from the wrong context.
+	if got, ok := vErr.Details["repositories"].([]string); !ok || !slices.Equal(got, []string{"alpha", "beta"}) {
+		t.Errorf("the refusal offers %v, want the repositories this context does name", vErr.Details["repositories"])
+	}
+}
+
+// One member's provider failing fails the whole search, with that member's error
+// and nothing beside it — whichever member it was.
+//
+// The half-answer is the outcome being ruled out. A caller comparing two
+// versions reads a missing repository as "this code is not in that version", so
+// a result carrying only the members that happened to answer would report a
+// failed backend as a finding about code. Missing data is not a difference.
+func TestOneMemberFailingFailsTheWholeSearch(t *testing.T) {
+	for _, broken := range []string{"alpha", "beta"} {
+		t.Run(broken, func(t *testing.T) {
+			failure := vacerr.New(vacerr.SearchProviderUnavailable, "the index is not there", map[string]any{"repository": broken})
+			search := &recordingSearch{
+				results: map[string][]provider.SearchResult{
+					"alpha": {{Path: "process.go", Line: 3, Snippet: "func Process()"}},
+					"beta":  {{Path: "beta.go", Line: 1, Snippet: "func Process()"}},
+				},
+				fail: map[string]error{broken: failure},
+			}
+			eng := engine.New(fakeContexts{workspace: stack}, search, &fakeGraph{}, &fakeSource{})
+
+			out, err := eng.SearchCode(context.Background(), engine.SearchCodeRequest{Context: stack.ID, Query: "Process"})
+			if !errors.Is(err, failure) {
+				t.Fatalf("SearchCode failed with %v, want the member's own error", err)
+			}
+			assertCode(t, err, vacerr.SearchProviderUnavailable)
+			assertNotAnAnswer(t, out)
+			if len(out.Matches()) != 0 {
+				t.Fatalf("a failed search returned %+v, want no matches at all: the member that answered is not half an answer", out.Matches())
+			}
+		})
 	}
 }
 
@@ -598,15 +850,15 @@ func TestTraceCallsAnswersInTheResolvedContext(t *testing.T) {
 	if graph.req != (provider.TraceRequest{Symbol: "Process", Direction: provider.Callers, Depth: 2}) {
 		t.Fatalf("provider got request %+v", graph.req)
 	}
-	if out.Context() != configured {
-		t.Fatalf("result context is %+v, want %+v", out.Context(), configured)
+	if got := answeredIn(t, out); got != configured {
+		t.Fatalf("result context is %+v, want a workspace of only %+v", out.Context(), configured)
 	}
 	// What the graph resolved the request to, not what was asked for.
 	if out.Graph().Symbol != "demo.Process" || len(out.Graph().Edges) != 1 {
 		t.Fatalf("graph is %+v, want the provider's", out.Graph())
 	}
 	want := []evidence.Evidence{evidence.At("process.go", 1, 1, "")}
-	if !slices.Equal(out.Evidence(), want) {
+	if !slices.Equal(citedIn(t, out), want) {
 		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), want)
 	}
 }
@@ -634,7 +886,7 @@ func TestTraceCallsCitesEachLocationOnce(t *testing.T) {
 		evidence.At("process.go", 7, 7, ""),
 		evidence.At("serve.go", 3, 3, ""),
 	}
-	if !slices.Equal(out.Evidence(), want) {
+	if !slices.Equal(citedIn(t, out), want) {
 		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), want)
 	}
 	if len(out.Graph().Edges) != 3 {
@@ -660,8 +912,8 @@ func TestGetCodeReportsTheRevisionActuallyRead(t *testing.T) {
 	if source.codeCtx != configured || source.path != "process.go" || source.start != 1 || source.end != 1 {
 		t.Fatalf("provider got %+v %q %d-%d", source.codeCtx, source.path, source.start, source.end)
 	}
-	if out.Context().Revision != readAt {
-		t.Fatalf("result revision is %q, want the revision read %q", out.Context().Revision, readAt)
+	if got := answeredIn(t, out); got.Revision != readAt {
+		t.Fatalf("result revision is %q, want the revision read %q", got.Revision, readAt)
 	}
 	if out.Source().Content != "package demo\n" {
 		t.Fatalf("content is %q, want the provider's", out.Source().Content)
@@ -669,7 +921,7 @@ func TestGetCodeReportsTheRevisionActuallyRead(t *testing.T) {
 	// The citation is the range read, and it is scoped by the revision it was
 	// read at rather than the one the configuration spelled.
 	want := []evidence.Evidence{evidence.At("process.go", 1, 1, "")}
-	if !slices.Equal(out.Evidence(), want) {
+	if !slices.Equal(citedIn(t, out), want) {
 		t.Fatalf("evidence is %+v, want %+v", out.Evidence(), want)
 	}
 }
@@ -732,9 +984,14 @@ func TestProviderFailuresAreReturnedUnchanged(t *testing.T) {
 // contextual is every result type: they answer Context and Evidence and
 // nothing else in common, which is the whole of what a failed call must not
 // return.
+//
+// Both are workspace-shaped: the version an answer was given in is the set of
+// repositories it covered, and the citations come back one list per member of
+// it, so a citation's provenance is its position and no result type has anywhere
+// to put an unattributed one.
 type contextual interface {
-	Context() vacctx.CodeContext
-	Evidence() []evidence.Evidence
+	Context() vacctx.Workspace
+	Evidence() [][]evidence.Evidence
 }
 
 var (
@@ -745,12 +1002,38 @@ var (
 
 func assertNotAnAnswer(t *testing.T, out contextual) {
 	t.Helper()
-	if out.Context() != (vacctx.CodeContext{}) {
-		t.Errorf("a failed call returned context %+v, want the zero context", out.Context())
+	if got := out.Context(); got.ID != "" || len(got.Members) != 0 {
+		t.Errorf("a failed call returned context %+v, want the zero workspace", got)
 	}
 	if out.Evidence() != nil {
 		t.Errorf("a failed call returned evidence %+v, want none", out.Evidence())
 	}
+}
+
+// answeredIn is the one member a result was answered in, for the queries that answer
+// in one repository. It fails the test rather than indexing blind: a result that
+// grew a second member is not one to go on comparing field by field, because
+// every check after this would be about a version the caller was told only half
+// of.
+func answeredIn(t *testing.T, out contextual) vacctx.CodeContext {
+	t.Helper()
+	got := out.Context()
+	if len(got.Members) != 1 {
+		t.Fatalf("the result was answered in %d members (%+v), want exactly one", len(got.Members), got)
+	}
+	return got.Members[0]
+}
+
+// citedIn is the citations of a result answered in one member, which is the whole
+// of its evidence. It insists on the one list for the same reason [answeredIn] insists
+// on the one member.
+func citedIn(t *testing.T, out contextual) []evidence.Evidence {
+	t.Helper()
+	got := out.Evidence()
+	if len(got) != 1 {
+		t.Fatalf("the result carries %d evidence lists (%+v), want the one its single member found", len(got), got)
+	}
+	return got[0]
 }
 
 // The contract is structural, not a convention each method remembers: every

@@ -83,7 +83,10 @@ func AddTraceCalls(srv *mcp.Server, eng *engine.Engine) {
 			calls = append(calls, call{Caller: edge.Caller, Callee: edge.Callee, Path: edge.Path, Line: edge.Line})
 		}
 
-		out, err := evidence.New(result.Context(), result.Evidence()...)
+		// The workspace a walk is answered in has exactly one member — trace_calls
+		// refuses a context naming several — so this marshals to the flat context
+		// block it always has.
+		out, err := evidence.NewWorkspace(result.Context(), result.Evidence()...)
 		if err != nil {
 			return nil, nil, err
 		}

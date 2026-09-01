@@ -250,11 +250,11 @@ func (e *Engine) CompareCalls(ctx context.Context, req CompareCallsRequest) (Com
 	// for: an ID naming no configured version has no graph to walk, and a
 	// comparison that walked one side first would report the other's failure
 	// after doing work in a version the caller may not have meant.
-	fromCtx, err := e.resolve(ctx, req.FromContext)
+	fromCtx, err := e.resolveMember(ctx, req.FromContext, "")
 	if err != nil {
 		return CompareCallsResult{}, err
 	}
-	toCtx, err := e.resolve(ctx, req.ToContext)
+	toCtx, err := e.resolveMember(ctx, req.ToContext, "")
 	if err != nil {
 		return CompareCallsResult{}, err
 	}
@@ -331,11 +331,11 @@ func (e *Engine) CompareCalls(ctx context.Context, req CompareCallsRequest) (Com
 	// The absent side stays the zero ComparisonSide, which reports Present false
 	// and cites nothing — the absence is the answer rather than a gap in it.
 	if fromGraph != nil {
-		result.from = ComparisonSide{answer{fromCtx, citeEdges(fromGraph.Edges)}}
+		result.from = ComparisonSide{inOneMember(fromCtx, citeEdges(fromGraph.Edges))}
 		result.fromSymbol = fromGraph.Symbol
 	}
 	if toGraph != nil {
-		result.to = ComparisonSide{answer{toCtx, citeEdges(toGraph.Edges)}}
+		result.to = ComparisonSide{inOneMember(toCtx, citeEdges(toGraph.Edges))}
 		result.toSymbol = toGraph.Symbol
 	}
 

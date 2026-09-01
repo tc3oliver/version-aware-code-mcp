@@ -1,9 +1,5 @@
 package engine
 
-import (
-	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
-)
-
 // ComparisonSide is one version's half of a comparison: what the from context
 // had, or what the to context had, or the fact that this version had nothing.
 //
@@ -33,12 +29,13 @@ type ComparisonSide struct {
 // about it is worth citing".
 //
 // It is derived rather than stored: a side is present exactly when it carries a
-// version to be present in, so an absent side is the zero [ComparisonSide] and
-// there is no second field that can disagree with the first. Calling Context
-// and Evidence on an absent side is safe and reports the zero context and no
-// evidence — a side reporting Present false has nothing to cite by definition,
-// and nothing here dereferences anything to say so.
-func (s ComparisonSide) Present() bool { return s.codeCtx != (vacctx.CodeContext{}) }
+// version to be present in, which is a member in its workspace, so an absent
+// side is the zero [ComparisonSide] and there is no second field that can
+// disagree with the first. Calling Context and Evidence on an absent side is
+// safe and reports the zero workspace and no evidence — a side reporting Present
+// false has nothing to cite by definition, and nothing here dereferences
+// anything to say so.
+func (s ComparisonSide) Present() bool { return len(s.workspace.Members) != 0 }
 
 // CodeChange is what happened to the compared code between the two contexts.
 // It is the one-word answer a caller reads first, and the four values below are

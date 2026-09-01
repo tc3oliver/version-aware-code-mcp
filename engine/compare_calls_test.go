@@ -319,7 +319,7 @@ func TestCompareCallsReportsASymbolFoundInOnlyOneVersion(t *testing.T) {
 				listed, empty = out.Added(), out.Removed()
 			}
 
-			if !side.Present() || side.Context() != tc.present {
+			if !side.Present() || answeredIn(t, side) != tc.present {
 				t.Fatalf("the surviving side reports %+v and Present %v, want the version that has the symbol", side.Context(), side.Present())
 			}
 			if absent.Present() {
@@ -522,7 +522,7 @@ func TestCompareCallsOfOneVersionWithItselfReportsNoChange(t *testing.T) {
 	if !slices.Equal(moved.FromEvidence, want) || !slices.Equal(moved.ToEvidence, want) {
 		t.Fatalf("the relation cites from=%+v to=%+v, want both versions citing %+v", moved.FromEvidence, moved.ToEvidence, want)
 	}
-	if out.From().Context() != compareV1 || out.To().Context() != compareV1 {
+	if answeredIn(t, out.From()) != compareV1 || answeredIn(t, out.To()) != compareV1 {
 		t.Fatalf("the sides report from=%+v to=%+v, want both in the one version compared", out.From().Context(), out.To().Context())
 	}
 }
@@ -625,11 +625,11 @@ func TestCompareCallsNeedsOnlyContextsAndAGraph(t *testing.T) {
 
 	// Each side reports its own version and cites it, and neither borrows the
 	// other's: the same line number in two versions is two different lines.
-	if out.From().Context() != compareV1 || out.To().Context() != compareV2 {
+	if answeredIn(t, out.From()) != compareV1 || answeredIn(t, out.To()) != compareV2 {
 		t.Fatalf("the sides report from=%+v to=%+v, want the two versions compared", out.From().Context(), out.To().Context())
 	}
 	wantCites := []evidence.Evidence{evidence.At("main.go", 4, 4, ""), evidence.At("serve.go", 9, 9, "")}
-	if !slices.Equal(out.From().Evidence(), wantCites) || !slices.Equal(out.To().Evidence(), wantCites) {
+	if !slices.Equal(citedIn(t, out.From()), wantCites) || !slices.Equal(citedIn(t, out.To()), wantCites) {
 		t.Fatalf("the sides cite from=%+v to=%+v, want each version's own call sites %+v",
 			out.From().Evidence(), out.To().Evidence(), wantCites)
 	}

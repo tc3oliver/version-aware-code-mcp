@@ -91,13 +91,20 @@ func TestEngineRunsOnImplementationsOfNothingButItsInterfaces(t *testing.T) {
 	if search.codeCtx != v2 {
 		t.Fatalf("search provider got context %+v, want %+v", search.codeCtx, v2)
 	}
-	if !slices.Equal(searched.Matches(), search.results) {
-		t.Fatalf("matches are %+v, want the provider's %+v", searched.Matches(), search.results)
+	// The provider's own match, with the member it was found in written onto it
+	// by the engine — a search backend reports where a match is, and which
+	// version that is comes from which context was asked.
+	wantMatches := []engine.Match{{
+		Repository: v2.Repository, Revision: v2.Revision,
+		Path: "process.go", Line: 12, Snippet: "func Process()",
+	}}
+	if !slices.Equal(searched.Matches(), wantMatches) {
+		t.Fatalf("matches are %+v, want the provider's %+v attributed to %s", searched.Matches(), search.results, v2.Repository)
 	}
-	if searched.Context() != v2 {
-		t.Fatalf("result context is %+v, want %+v", searched.Context(), v2)
+	if got := answeredIn(t, searched); got != v2 {
+		t.Fatalf("result context is %+v, want a workspace of only %+v", searched.Context(), v2)
 	}
-	if want := []evidence.Evidence{evidence.At("process.go", 12, 12, "func Process()")}; !slices.Equal(searched.Evidence(), want) {
+	if want := []evidence.Evidence{evidence.At("process.go", 12, 12, "func Process()")}; !slices.Equal(citedIn(t, searched), want) {
 		t.Fatalf("evidence is %+v, want %+v", searched.Evidence(), want)
 	}
 
@@ -113,10 +120,10 @@ func TestEngineRunsOnImplementationsOfNothingButItsInterfaces(t *testing.T) {
 	if traced.Graph().Symbol != "demo.Process" || !slices.Equal(traced.Graph().Edges, graph.graph.Edges) {
 		t.Fatalf("graph is %+v, want the provider's %+v", traced.Graph(), graph.graph)
 	}
-	if traced.Context() != v2 {
-		t.Fatalf("result context is %+v, want %+v", traced.Context(), v2)
+	if got := answeredIn(t, traced); got != v2 {
+		t.Fatalf("result context is %+v, want a workspace of only %+v", traced.Context(), v2)
 	}
-	if want := []evidence.Evidence{evidence.At("main.go", 4, 4, "")}; !slices.Equal(traced.Evidence(), want) {
+	if want := []evidence.Evidence{evidence.At("main.go", 4, 4, "")}; !slices.Equal(citedIn(t, traced), want) {
 		t.Fatalf("evidence is %+v, want %+v", traced.Evidence(), want)
 	}
 
@@ -132,10 +139,10 @@ func TestEngineRunsOnImplementationsOfNothingButItsInterfaces(t *testing.T) {
 	if read.Source() != source.content {
 		t.Fatalf("content is %+v, want the provider's %+v", read.Source(), source.content)
 	}
-	if read.Context() != v2 {
-		t.Fatalf("result context is %+v, want %+v", read.Context(), v2)
+	if got := answeredIn(t, read); got != v2 {
+		t.Fatalf("result context is %+v, want a workspace of only %+v", read.Context(), v2)
 	}
-	if want := []evidence.Evidence{evidence.At("process.go", 12, 12, "")}; !slices.Equal(read.Evidence(), want) {
+	if want := []evidence.Evidence{evidence.At("process.go", 12, 12, "")}; !slices.Equal(citedIn(t, read), want) {
 		t.Fatalf("evidence is %+v, want %+v", read.Evidence(), want)
 	}
 

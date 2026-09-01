@@ -380,10 +380,10 @@ func TestComparisonToolsHoldNoComparisonLogic(t *testing.T) {
 		},
 	}
 	wantQueries := map[string]string{"compare_code.go": "CompareCode", "compare_calls.go": "CompareCalls"}
-	// mcp.AddTool registers, evidence.New builds one side's envelope, and
-	// provider.Direction is a string conversion. None of the three can compare
-	// anything.
-	allowedPackageCalls := map[string]bool{"mcp.AddTool": true, "evidence.New": true, "provider.Direction": true}
+	// mcp.AddTool registers, evidence.NewWorkspace builds one side's envelope
+	// from the workspace that side was answered in, and provider.Direction is a
+	// string conversion. None of the three can compare anything.
+	allowedPackageCalls := map[string]bool{"mcp.AddTool": true, "evidence.NewWorkspace": true, "provider.Direction": true}
 
 	for file, wantImport := range wantImports {
 		t.Run(file, func(t *testing.T) {

@@ -184,7 +184,15 @@ func concurrentGet(ctx context.Context, t *testing.T, eng *engine.Engine, where 
 		t.Errorf("%s: GetCode(processor.go) error = %v", where, err)
 		return
 	}
-	if got := read.Context().Revision; got != version.codeCtx.Revision {
+	// One member, because every context in this fixture names one repository, and
+	// the revision the bytes came from is that member's. Reported rather than
+	// fatal: this runs in a goroutine of its own.
+	members := read.Context().Members
+	if len(members) != 1 {
+		t.Errorf("%s: GetCode answered in %d repositories, want the one this context names", where, len(members))
+		return
+	}
+	if got := members[0].Revision; got != version.codeCtx.Revision {
 		t.Errorf("%s: GetCode read at revision %s, want %s", where, got, version.codeCtx.Revision)
 	}
 
@@ -280,7 +288,12 @@ func assertComparedAt(t *testing.T, where, which string, side engine.ComparisonS
 	if got := side.Context().ID; got != want.codeCtx.ID {
 		t.Errorf("%s: the %s side was answered in context %q, want %q", where, which, got, want.codeCtx.ID)
 	}
-	if got := side.Context().Revision; got != want.codeCtx.Revision {
+	members := side.Context().Members
+	if len(members) != 1 {
+		t.Errorf("%s: the %s side was answered in %d repositories, want the one this context names", where, which, len(members))
+		return
+	}
+	if got := members[0].Revision; got != want.codeCtx.Revision {
 		t.Errorf("%s: the %s side was answered at revision %s, want %s", where, which, got, want.codeCtx.Revision)
 	}
 }

@@ -77,7 +77,10 @@ func AddGetCode(srv *mcp.Server, eng *engine.Engine) {
 		// The context carries the revision the bytes actually came from, not the
 		// spelling the configuration used, which is what lets a caller check the
 		// claim instead of trusting it.
-		out, err := evidence.New(result.Context(), result.Evidence()...)
+		// The workspace a read is answered in has exactly one member — get_code
+		// refuses a context naming several — so this marshals to the flat context
+		// block it always has.
+		out, err := evidence.NewWorkspace(result.Context(), result.Evidence()...)
 		if err != nil {
 			// The context is missing a field the contract requires, so there is no
 			// way to answer without dropping part of it. Failing is the contract

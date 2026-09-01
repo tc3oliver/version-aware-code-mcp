@@ -642,10 +642,12 @@ provider that is there but cannot compare two versions is a different answer
 again, `SOURCE_DIFF_UNAVAILABLE`, and the next section is where that capability
 is implemented.
 
-A request names its scope with context ids and nothing else — no request type
-has a repository, branch or revision field — and every successful result carries
-the version it was answered in together with its evidence, because the result
-types have no exported fields and only a method on the engine builds one. The
+A request names its scope with context ids: no request type has a branch or
+revision field, and the one repository field there is —
+`SearchCodeRequest.Repository` — narrows a search to one of the repositories its
+context already names rather than reaching outside them. Every successful result
+carries the version it was answered in together with its evidence, because the
+result types have no exported fields and only a method on the engine builds one. The
 version guarantee is inherited by embedding rather than re-implemented.
 
 **Lifecycle.** `Close` releases the dependencies that can be released: one

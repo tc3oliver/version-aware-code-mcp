@@ -135,15 +135,23 @@ func searchEveryVersion(eng *engine.Engine, query string) error {
 
 		// Every result names the version it was answered in and cites where it
 		// can be checked; neither is optional, and neither had to be assembled
-		// here.
+		// here. The version is the workspace the search ran in — one member per
+		// repository it covered — and the citations arrive grouped the same way,
+		// one list per member, so no citation can be read as another
+		// repository's.
 		answered := result.Context()
-		lines = append(lines, fmt.Sprintf("%s: %s %s @ %s", answered.ID, answered.Repository, answered.Branch, answered.Revision))
+		for _, member := range answered.Members {
+			lines = append(lines, fmt.Sprintf("%s: %s %s @ %s", answered.ID, member.Repository, member.Branch, member.Revision))
+		}
 		for _, match := range result.Matches() {
 			lines = append(lines, fmt.Sprintf("  match    %s:%d  %s", match.Path, match.Line, match.Snippet))
 		}
-		for _, citation := range result.Evidence() {
-			at := citation.Location
-			lines = append(lines, fmt.Sprintf("  evidence %s:%d-%d", at.Path, at.StartLine, at.EndLine))
+		for i, cited := range result.Evidence() {
+			for _, citation := range cited {
+				at := citation.Location
+				lines = append(lines, fmt.Sprintf("  evidence %s:%d-%d in %s",
+					at.Path, at.StartLine, at.EndLine, answered.Members[i].Repository))
+			}
 		}
 	}
 
