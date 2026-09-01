@@ -182,7 +182,8 @@ func require(id, name, value string) error {
 // It hands back the workspace rather than a member of it, because how many
 // members a query answers in is the query's own to decide: [Engine.SearchCode]
 // answers in all of them, and the queries that can still only answer in one say
-// so by calling [Engine.resolveMember].
+// so by refusing what [selectMembers] hands back when it is more than one, with
+// [repositoryRequired].
 func (e *Engine) resolve(ctx context.Context, id string) (vacctx.Workspace, error) {
 	workspace, err := e.contexts.Resolve(ctx, id)
 	if err != nil {
@@ -225,7 +226,7 @@ func (e *Engine) resolve(ctx context.Context, id string) (vacctx.Workspace, erro
 // a context is what the caller asked in and every repository in it is part of
 // that question. A workspace with no member at all selects nothing and is
 // refused before either branch: there is no version to answer in, which is what
-// [severalRepositories] says for it.
+// [noRepository] says for it.
 //
 // The first member naming the repository wins, and there is never a second: the
 // configuration refuses one repository declared twice in one workspace, because
@@ -233,19 +234,18 @@ func (e *Engine) resolve(ctx context.Context, id string) (vacctx.Workspace, erro
 // meant.
 func selectMembers(id, repository string, workspace vacctx.Workspace) ([]vacctx.CodeContext, error) {
 	if len(workspace.Members) == 0 {
-		return nil, severalRepositories(id, workspace)
+		return nil, noRepository(id)
 	}
 	if strings.TrimSpace(repository) == "" {
 		return workspace.Members, nil
 	}
 
-	selectable := make([]string, 0, len(workspace.Members))
 	for _, member := range workspace.Members {
 		if member.Repository == repository {
 			return []vacctx.CodeContext{member}, nil
 		}
-		selectable = append(selectable, member.Repository)
 	}
+	selectable := repositoryNames(workspace.Members)
 	return nil, vacerr.New(
 		vacerr.InvalidArgument,
 		fmt.Sprintf("context %q does not name repository %q; it names %s",
@@ -254,62 +254,82 @@ func selectMembers(id, repository string, workspace vacctx.Workspace) ([]vacctx.
 	)
 }
 
-// resolveMember resolves id and picks the single member of it that repository
-// selects, for a query that can only be answered in one repository.
+// repositoryRequired refuses a query that answers in one repository, asked in a
+// context naming several with the repository argument left blank. Answering in
+// the first member would be the one thing worse than refusing: a whole
+// repository's worth of code silently outside the scope of an answer that names
+// the context the caller asked for.
 //
-// A blank repository is only usable here when the workspace has exactly one
-// member; anything else is [severalRepositories], because a query that answers
-// in one version cannot be handed a context naming several and pick. Answering
-// in the first would be the one thing worse than refusing: a whole repository's
-// worth of code silently outside the scope of an answer that names the context
-// the caller asked for.
-func (e *Engine) resolveMember(ctx context.Context, id, repository string) (vacctx.CodeContext, error) {
-	workspace, err := e.resolve(ctx, id)
-	if err != nil {
-		return vacctx.CodeContext{}, err
-	}
-	members, err := selectMembers(id, repository, workspace)
-	if err != nil {
-		return vacctx.CodeContext{}, err
-	}
-	if len(members) != 1 {
-		return vacctx.CodeContext{}, severalRepositories(id, workspace)
-	}
-	return members[0], nil
+// It is the only place that refusal is worded, because all four queries that
+// narrow to one member — trace_calls, get_code and the two comparisons — need
+// the same two things said, and each said them for itself until they could be
+// converged. The two are that the missing thing is an argument the caller can
+// supply, and which repositories it may supply: the caller cannot see the
+// configuration, so told only "several" it has nothing to put in the field it
+// was just asked for.
+//
+// It says a required argument is missing, and deliberately not that this server
+// can only answer a question about one repository — which is what this refusal
+// said before any query took a repository argument, and would now send a caller
+// looking for a different context when the fix is a field it already has. What
+// is left of that older wording is [noRepository], for the workspace where no
+// argument would help because there is nothing in it to name.
+//
+// What each caller needs said for itself is passed in, because a refusal is
+// only actionable in the terms of the query that was refused: subject names the
+// context to narrow, which for a comparison is one of two and so has to say
+// which side; need says what the repository would pick out in that query's own
+// terms, and for trace_calls why there is no walk at all without it; details
+// carries whatever else that query is scoped by. The context and the
+// repositories are added here, and are not the caller's to leave out or
+// overwrite, because they are the half of the refusal every retry depends on.
+func repositoryRequired(tool, subject, id, need string, members []vacctx.CodeContext, details map[string]any) error {
+	repositories := repositoryNames(members)
+	fields := map[string]any{}
+	maps.Copy(fields, details)
+	fields["context"] = id
+	fields["repositories"] = repositories
+	return vacerr.New(
+		vacerr.InvalidArgument,
+		fmt.Sprintf("%s: %s %q names %d repositories (%s), %s",
+			tool, subject, id, len(repositories), strings.Join(repositories, ", "), need),
+		fields,
+	)
 }
 
-// severalRepositories refuses a workspace this server cannot answer a question
-// in: one naming several repositories, or none at all.
+// repositoryNames is what a caller may narrow to: the repositories the members
+// name, in the workspace's own order.
+//
+// Every refusal about the repository argument carries it, because the caller
+// cannot see the configuration and a refusal without it leaves nothing to ask
+// again with. It is collected in one place so that two refusals cannot come to
+// disagree about what the caller is being offered.
+func repositoryNames(members []vacctx.CodeContext) []string {
+	names := make([]string, 0, len(members))
+	for _, member := range members {
+		names = append(names, member.Repository)
+	}
+	return names
+}
+
+// noRepository refuses a workspace with no member at all: whatever the query,
+// there is no version in it to answer in, and nothing the caller can name to
+// make one.
+//
+// It carries no repositories, because there are none to offer — which is what
+// separates it from [repositoryRequired], the refusal of a workspace that has
+// members the caller may choose between and named none of them.
 //
 // The code is [vacerr.InvalidArgument] rather than one of its own. The code set
 // is part of the public tool API — ten codes fixed by the v0.1.0 specification
-// and one added since — so a new one is a change to that API, and it belongs
-// with the work that makes a multi-repository context answerable rather than
-// with the work that makes it configurable. What is true today is that the
-// request named a scope this server cannot answer in, which is what
+// and one added since — so a new one is a change to that API. What is true here
+// is that the request named a scope this server cannot answer in, which is what
 // INVALID_ARGUMENT says, and the message says the rest plainly.
-//
-// The repositories travel with it because the caller cannot see the
-// configuration: told only that its context names several, it cannot tell
-// whether that is the context it meant.
-func severalRepositories(id string, workspace vacctx.Workspace) error {
-	if len(workspace.Members) == 0 {
-		return vacerr.New(
-			vacerr.InvalidArgument,
-			fmt.Sprintf("context %q resolved without a repository, so there is no version to answer in", id),
-			map[string]any{"context": id},
-		)
-	}
-
-	repositories := make([]string, 0, len(workspace.Members))
-	for _, member := range workspace.Members {
-		repositories = append(repositories, member.Repository)
-	}
+func noRepository(id string) error {
 	return vacerr.New(
 		vacerr.InvalidArgument,
-		fmt.Sprintf("context %q names %d repositories (%s), and this server can only answer a question about one",
-			id, len(repositories), strings.Join(repositories, ", ")),
-		map[string]any{"context": id, "repositories": repositories},
+		fmt.Sprintf("context %q resolved without a repository, so there is no version to answer in", id),
+		map[string]any{"context": id},
 	)
 }
 
@@ -640,21 +660,16 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 	// call graphs are two graphs and not a bigger one, so a context naming
 	// several is refused here rather than walked in whichever came first.
 	//
-	// This is spelled out rather than left to [Engine.resolveMember] because of
-	// what the caller has to be told. Reaching here means req.Repository was
-	// blank, so the missing thing is an argument the caller can supply — and a
-	// message about what this server can answer would send someone looking for a
-	// different context when the fix is one field.
+	// Reaching here means req.Repository was blank, so the missing thing is an
+	// argument the caller can supply, which is what [repositoryRequired] says.
+	// Why there is no walk at all — rather than a walk of whichever graph came
+	// first — is this query's own half of that refusal, and no other query can
+	// say it for this one.
 	if len(members) != 1 {
-		repositories := make([]string, 0, len(members))
-		for _, member := range members {
-			repositories = append(repositories, member.Repository)
-		}
-		return TraceCallsResult{}, vacerr.New(
-			vacerr.InvalidArgument,
-			fmt.Sprintf("trace_calls: context %q names %d repositories (%s) and a call graph is one repository's own, so repository is required to say which one to walk",
-				req.Context, len(repositories), strings.Join(repositories, ", ")),
-			map[string]any{"context": req.Context, "repositories": repositories, "symbol": req.Symbol},
+		return TraceCallsResult{}, repositoryRequired(
+			"trace_calls", "context", req.Context,
+			"and a call graph is one repository's own, so repository is required to say which one to walk",
+			members, map[string]any{"symbol": req.Symbol},
 		)
 	}
 	codeCtx := members[0]
@@ -758,20 +773,14 @@ func (e *Engine) GetCode(ctx context.Context, req GetCodeRequest) (GetCodeResult
 	// change. It is the rule selectMembers already keeps for a repository outside
 	// the workspace, on the argument's other failure.
 	if len(members) != 1 {
-		// severalRepositories says the same of a workspace, but for the query
-		// that has no repository argument to be told about; here the caller has
-		// one and left it out, and an error that did not say so would leave it
-		// with nothing to fix. The repositories travel with it for the reason
-		// they do there: the caller cannot see the configuration.
-		repositories := make([]string, 0, len(members))
-		for _, member := range members {
-			repositories = append(repositories, member.Repository)
-		}
-		return GetCodeResult{}, vacerr.New(
-			vacerr.InvalidArgument,
-			fmt.Sprintf("context %q names %d repositories (%s), so get_code needs a repository to say which one to read",
-				req.Context, len(repositories), strings.Join(repositories, ", ")),
-			map[string]any{"context": req.Context, "path": req.Path, "repositories": repositories},
+		// The caller has a repository argument and left it out, so what it is
+		// told is that the argument is missing and which file that repository
+		// would be read from. A refusal that only said the context names several
+		// would leave it with nothing to fix.
+		return GetCodeResult{}, repositoryRequired(
+			"get_code", "context", req.Context,
+			"so repository is required to say which one to read",
+			members, map[string]any{"path": req.Path},
 		)
 	}
 	codeCtx := members[0]

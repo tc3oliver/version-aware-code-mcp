@@ -382,6 +382,101 @@ func TestAContextOfSeveralRepositoriesIsRefusedRatherThanNarrowed(t *testing.T) 
 	}
 }
 
+// The four queries above word that refusal through one function, so what the
+// test before this one pins — the context, the count, the repositories — is now
+// written in one place for all four. This pins the half that is not: what each
+// query says for itself.
+//
+// It is a guard against the convergence, not against the queries. One edit to
+// the shared format string can flatten every message at once, and a caller told
+// only "repository is required" cannot tell what the argument would be used
+// for: which graph to walk, which file to read, or which of a comparison's two
+// contexts is the one it has to narrow. Four separate literals could not be
+// degraded together; one can, so the distinguishing phrase of each is asserted
+// here.
+//
+// The phrases and not the sentences: a refusal that loses its query fails this,
+// and a refusal that moves a comma does not.
+func TestEachRefusalKeepsTheWordsOfTheQueryThatWasRefused(t *testing.T) {
+	second := usable
+	second.Repository = "other"
+	second.Branch = "release/2.x"
+	second.Revision = "2222222222222222222222222222222222222222"
+	second.GraphRef = "other-v2"
+
+	// One context of several repositories and one of a single repository, so a
+	// comparison can be refused on the side under test and not on the other:
+	// the from side is resolved first, so the to side's own wording is only
+	// reachable with a from side that passes.
+	solo := usable
+	solo.ID = "solo@v1"
+	eng := engine.New(mapContexts{
+		usable.ID: over(usable.ID, usable, second),
+		solo.ID:   single(solo),
+	}, &fakeSearch{}, &fakeGraph{}, &fakeSource{})
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		want []string
+		call func() error
+	}{
+		{
+			"trace_calls says a walk is one graph's",
+			[]string{"a call graph is one repository's own", "which one to walk"},
+			func() error {
+				_, err := eng.TraceCalls(ctx, engine.TraceCallsRequest{
+					Context: usable.ID, Symbol: "Process", Direction: provider.Callers, Depth: 1,
+				})
+				return err
+			},
+		},
+		{
+			"get_code says a read is one file's",
+			[]string{"which one to read"},
+			func() error {
+				_, err := eng.GetCode(ctx, engine.GetCodeRequest{
+					Context: usable.ID, Path: "process.go", StartLine: 1, EndLine: 1,
+				})
+				return err
+			},
+		},
+		{
+			"compare_code names the side at fault",
+			[]string{"the from context", "which one to compare"},
+			func() error {
+				_, err := eng.CompareCode(ctx, engine.CompareCodeRequest{
+					FromContext: usable.ID, ToContext: solo.ID, Path: "process.go",
+				})
+				return err
+			},
+		},
+		{
+			"compare_calls names the other side at fault",
+			[]string{"the to context", "which one to compare"},
+			func() error {
+				_, err := eng.CompareCalls(ctx, engine.CompareCallsRequest{
+					FromContext: solo.ID, ToContext: usable.ID,
+					Symbol: "Process", Direction: provider.Callers, Depth: 1,
+				})
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("the query answered in a context naming two repositories with no repository named")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal reads %q, want it to say %q", err, want)
+				}
+			}
+		})
+	}
+}
+
 // A workspace with no member at all is refused the same way, and says the same
 // thing a context missing its repository says: there is no version to answer in.
 // A ContextSource is an interface, so "the configuration rejects this" is not a
