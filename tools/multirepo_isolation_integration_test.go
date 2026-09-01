@@ -36,20 +36,6 @@ import (
 // own) — a fake provider could agree with its own idea of the isolation and
 // prove nothing about whether a query actually reached the wrong engine.
 
-// memberOf returns the member of cfg's demo-multi context named repository, so
-// an assertion can be made against its own configured revision rather than a
-// value copied by hand.
-func memberOf(t *testing.T, cfg *config.Config, repository string) vacctx.CodeContext {
-	t.Helper()
-	for _, member := range cfg.Contexts[demorepo.MultiContext].Members {
-		if member.Repository == repository {
-			return member
-		}
-	}
-	t.Fatalf("%s has no member named %q", demorepo.MultiContext, repository)
-	return vacctx.CodeContext{}
-}
-
 // errorBody decodes a tool's error result into doc-1's error envelope, the
 // same shape every tool fails with regardless of which one was called.
 func errorBody(t *testing.T, raw string) traceCallsErrorWire {
@@ -326,7 +312,7 @@ func TestEveryResultInAMultiMemberWorkspaceCarriesItsRepositoryAndRevision(t *te
 	session := multiRepoSession(t, full)
 
 	for _, repository := range []string{multiRepo1, multiRepo2} {
-		want := memberOf(t, full, repository)
+		want := memberOf(t, full, demorepo.MultiContext, repository)
 
 		t.Run("get_code/"+repository, func(t *testing.T) {
 			res, err := session.CallTool(t.Context(), &mcp.CallToolParams{
@@ -396,7 +382,7 @@ func TestEveryResultInAMultiMemberWorkspaceCarriesItsRepositoryAndRevision(t *te
 		t.Fatalf("search_code(%s, LegacyHandler) = no matches", demorepo.MultiContext)
 	}
 	for _, match := range out.Matches {
-		want := memberOf(t, full, match.Repository)
+		want := memberOf(t, full, demorepo.MultiContext, match.Repository)
 		if match.Repository == "" || match.Revision != want.Revision {
 			t.Errorf("match %+v does not carry its own member's revision %s", match, want.Revision)
 		}
