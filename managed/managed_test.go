@@ -2,6 +2,7 @@ package managed
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/tc3oliver/version-aware-code-mcp/store"
@@ -23,6 +24,18 @@ func openStore(t *testing.T, dataDir string) *store.Store {
 		t.Fatalf("store.Open(%s): %v", dataDir, err)
 	}
 	return s
+}
+
+// oneMember is the member list of a context over a single repository, which is
+// what almost every record in these tests is.
+func oneMember(repository string) []store.ContextMember {
+	return []store.ContextMember{{Repository: repository}}
+}
+
+// sameContext compares two records. A record carries a member list, so it is
+// not one == away.
+func sameContext(a, b store.Context) bool {
+	return a.ID == b.ID && a.State == b.State && a.UpdatedAt.Equal(b.UpdatedAt) && slices.Equal(a.Members, b.Members)
 }
 
 // codeFor returns the vacerr code err carries.

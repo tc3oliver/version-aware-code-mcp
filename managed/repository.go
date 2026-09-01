@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -234,8 +235,12 @@ func (m *RepositoryManager) Remove(name string) error {
 	})
 }
 
-// contextsOf returns the IDs of the contexts backed by the named repository, in
-// the order the store lists them, which is by ID.
+// contextsOf returns the IDs of the contexts the named repository is a member
+// of, in the order the store lists them, which is by ID.
+//
+// Membership and not identity: a context of several repositories depends on
+// every one of them exactly as a context of one depends on its only one, and it
+// is named once however many of its members are in this repository.
 func contextsOf(s *store.Store, repository string) ([]string, error) {
 	contexts, err := s.Contexts()
 	if err != nil {
@@ -243,7 +248,7 @@ func contextsOf(s *store.Store, repository string) ([]string, error) {
 	}
 	var ids []string
 	for _, c := range contexts {
-		if c.Repository == repository {
+		if slices.ContainsFunc(c.Members, func(m store.ContextMember) bool { return m.Repository == repository }) {
 			ids = append(ids, c.ID)
 		}
 	}

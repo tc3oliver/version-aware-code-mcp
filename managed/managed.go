@@ -12,16 +12,17 @@
 // directory — the same one `--data-dir` names, empty meaning the default
 // `~/.vacmcp` — and both hold the same rules the CLI has always held:
 //
-//   - A context is immutable. Its revision is a full commit SHA resolved once,
-//     and no method here writes another one into an existing record: another
-//     version of a repository is another context.
-//   - A context is READY only with every artifact built and checked, and
-//     verification asks the artifacts rather than the record. Anything that
-//     disagrees fails closed.
+//   - A context is immutable. Every member's revision is a full commit SHA
+//     resolved once, and no method here writes another one into an existing
+//     record: another version of a repository is another context.
+//   - A context is READY only with every member's artifacts built and checked,
+//     and verification asks the artifacts rather than the record. Anything
+//     that disagrees fails closed.
 //   - One operation per repository at a time. Every method here that changes a
 //     repository, a context or an artifact of one runs alone under that
 //     repository's lock, against the other methods and against another process
-//     running them.
+//     running them. A context spanning several repositories is one operation on
+//     each of them, and holds all of their locks together, in one order.
 //   - Nothing that changes what a managed server is already serving runs while
 //     one serves the data directory. [ContextManager.Create],
 //     [ContextManager.Retry], [ContextManager.Remove] and
@@ -115,32 +116,60 @@ type RepositoryStatus struct {
 	Contexts []string
 }
 
-// Context is one managed version context: a repository pinned to a revision,
-// and the state its lifecycle has reached.
+// Context is one managed version context: the repositories it names, each
+// pinned to its own revision, and the state its lifecycle has reached.
 //
-// Revision is the full commit SHA the context is pinned to, and it is immutable
-// once resolved. It is empty only for a context that failed before it got that
-// far.
+// There is one state for the whole context and not one per member. READY means
+// every member's artifacts were built and checked; anything less is a context
+// the query plane does not serve at all, because half a workspace answering
+// about half a version is the wrong-version answer this server exists to
+// prevent.
 type Context struct {
-	ID         string
-	Repository string
-	Revision   string
-	State      string
-	UpdatedAt  time.Time
+	ID        string
+	Members   []Member
+	State     string
+	UpdatedAt time.Time
 }
 
-// ContextStatus is a context with the artifacts it owns, for an operator
-// diagnosing one.
+// Member is one repository of a managed context.
+//
+// Revision is the full commit SHA it is pinned to, and it is immutable once
+// resolved. It is empty only for a context that failed before it got that far.
+type Member struct {
+	Repository string
+	Revision   string
+}
+
+// Pin is one repository [ContextManager.Create] is asked to add to a context,
+// and the ref to resolve once and pin it at. The ref is read exactly once, at
+// creation, and is not kept: what the context carries afterwards is the commit
+// it resolved to.
+type Pin struct {
+	Repository string
+	Ref        string
+}
+
+// ContextStatus is a context with the artifacts each of its members owns, for
+// an operator diagnosing one.
 //
 // SearchRef, GraphRef and Worktree are opaque: they say which ref, which graph
-// and which directory this context's answers come out of, so a person can go
-// and look at them. How any of the three is generated or arranged is not part
-// of this contract, and nothing here derives one from a context's name.
+// and which directory that member's answers come out of, so a person can go and
+// look at them. How any of the three is generated or arranged is not part of
+// this contract, and nothing here derives one from a context's name.
 type ContextStatus struct {
 	Context
-	SearchRef string
-	GraphRef  string
-	Worktree  string
+	Artifacts []MemberArtifacts
+}
+
+// MemberArtifacts is one member and where its answers come out of, in the order
+// the members of its context are declared. It repeats the revision so a row of
+// a status report is one value rather than two slices a caller has to line up.
+type MemberArtifacts struct {
+	Repository string
+	Revision   string
+	SearchRef  string
+	GraphRef   string
+	Worktree   string
 }
 
 // RepositoryManager manages the repositories of one data directory.
@@ -205,5 +234,9 @@ func repositoryOf(r store.Repository) Repository {
 }
 
 func contextOf(c store.Context) Context {
-	return Context{ID: c.ID, Repository: c.Repository, Revision: c.Revision, State: c.State, UpdatedAt: c.UpdatedAt}
+	members := make([]Member, 0, len(c.Members))
+	for _, m := range c.Members {
+		members = append(members, Member{Repository: m.Repository, Revision: m.Revision})
+	}
+	return Context{ID: c.ID, Members: members, State: c.State, UpdatedAt: c.UpdatedAt}
 }

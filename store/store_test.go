@@ -239,29 +239,31 @@ func TestContextRoundTrip(t *testing.T) {
 
 	// A context exists before it has a revision: the lifecycle fills the
 	// resolved fields in later, and state is what says whether it may be used.
-	if err := s.PutContext(store.Context{ID: "backend-v2", Repository: "backend", State: "CREATING"}); err != nil {
+	if err := s.PutContext(store.Context{ID: "backend-v2", Members: []store.ContextMember{{Repository: "backend"}}, State: "CREATING"}); err != nil {
 		t.Fatalf("PutContext() error = %v", err)
 	}
 	got, err := s.Context("backend-v2")
 	if err != nil {
 		t.Fatalf("Context() error = %v", err)
 	}
-	if got.Revision != "" || got.State != "CREATING" {
-		t.Errorf("Context() = %+v, want no revision and state CREATING", got)
+	if len(got.Members) != 1 || got.Members[0].Revision != "" || got.State != "CREATING" {
+		t.Errorf("Context() = %+v, want one member with no revision and state CREATING", got)
 	}
 
 	want := store.Context{
-		ID:         "backend-v2",
-		Repository: "backend",
-		Branch:     "vacmcp/backend-v2",
-		Revision:   "94cb8213d7f2b1c9a06e5d43f8b7c21e0d9a4f65",
-		GraphRef:   "backend-v2",
-		State:      "READY",
+		ID: "backend-v2",
+		Members: []store.ContextMember{{
+			Repository: "backend",
+			Branch:     "vacmcp/backend-v2",
+			Revision:   "94cb8213d7f2b1c9a06e5d43f8b7c21e0d9a4f65",
+			GraphRef:   "backend-v2",
+		}},
+		State: "READY",
 	}
 	if err := s.PutContext(want); err != nil {
 		t.Fatalf("PutContext() error = %v", err)
 	}
-	if err := s.PutContext(store.Context{ID: "backend-v1", Repository: "backend", State: "FAILED"}); err != nil {
+	if err := s.PutContext(store.Context{ID: "backend-v1", Members: []store.ContextMember{{Repository: "backend"}}, State: "FAILED"}); err != nil {
 		t.Fatalf("PutContext() error = %v", err)
 	}
 
@@ -270,7 +272,7 @@ func TestContextRoundTrip(t *testing.T) {
 		t.Fatalf("Context() error = %v", err)
 	}
 	got.UpdatedAt = time.Time{}
-	if got != want {
+	if !contextsEqual(got, want) {
 		t.Errorf("Context() = %+v, want %+v", got, want)
 	}
 
@@ -298,6 +300,79 @@ func TestContextRoundTrip(t *testing.T) {
 	}
 	if err := s.DeleteContext("backend-v1"); errCode(t, err) != vacerr.ContextNotFound {
 		t.Errorf("DeleteContext() on an unknown context = %v, want CONTEXT_NOT_FOUND", err)
+	}
+}
+
+// TestMultiMemberContextRoundTrip is the same trip for a context over several
+// repositories: every member keeps its own repository, revision and generated
+// names, and the order they were declared in survives, since it is the order
+// every report of the context is printed in.
+func TestMultiMemberContextRoundTrip(t *testing.T) {
+	s := open(t)
+
+	want := store.Context{
+		ID:    "stack",
+		State: "READY",
+		Members: []store.ContextMember{
+			{Repository: "web", Branch: "vacmcp/web-stack-94cb8213d7f2", Revision: "94cb8213d7f2b1c9a06e5d43f8b7c21e0d9a4f65", GraphRef: "vacmcp-web-stack-94cb8213d7f2"},
+			{Repository: "api", Branch: "vacmcp/api-stack-0f1e2d3c4b5a", Revision: "0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6", GraphRef: "vacmcp-api-stack-0f1e2d3c4b5a"},
+		},
+	}
+	if err := s.PutContext(want); err != nil {
+		t.Fatalf("PutContext() error = %v", err)
+	}
+
+	got, err := s.Context("stack")
+	if err != nil {
+		t.Fatalf("Context() error = %v", err)
+	}
+	got.UpdatedAt = time.Time{}
+	if !contextsEqual(got, want) {
+		t.Errorf("Context() = %+v, want %+v", got, want)
+	}
+
+	// A record's members are checked like the one repository of a single-member
+	// record: every one of them becomes a path element.
+	err = s.PutContext(store.Context{
+		ID:      "stack",
+		Members: []store.ContextMember{{Repository: "web"}, {Repository: "../escape"}},
+		State:   "CREATING",
+	})
+	if errCode(t, err) != vacerr.InvalidArgument {
+		t.Errorf("PutContext() with an unusable member repository = %v, want INVALID_ARGUMENT", err)
+	}
+
+	// And a context with no repository at all is refused: it is not a narrower
+	// scope, it is no scope, and every artifact it would own hangs off a
+	// repository it does not name.
+	if err := s.PutContext(store.Context{ID: "empty", State: "CREATING"}); errCode(t, err) != vacerr.InvalidArgument {
+		t.Errorf("PutContext() with no member = %v, want INVALID_ARGUMENT", err)
+	}
+}
+
+// TestARecordUsingBothSpellingsAtOnceIsRefused is the record nothing writes: a
+// members list beside the inline fields. It was edited by hand or written by
+// something that is not vacmcp, and there is no answer to which half names the
+// revision to serve, so it is not read at all.
+func TestARecordUsingBothSpellingsAtOnceIsRefused(t *testing.T) {
+	s := open(t)
+	const both = `{
+  "id": "stack",
+  "repository": "api",
+  "revision": "94cb8213d7f2b1c9a06e5d43f8b7c21e0d9a4f65",
+  "members": [{"repository": "web", "revision": "0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6"}],
+  "state": "READY",
+  "updated_at": "2026-08-12T09:00:00Z"
+}
+`
+	if err := os.WriteFile(filepath.Join(s.Root(), "contexts", "stack.json"), []byte(both), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := s.Context("stack"); err == nil {
+		t.Error("Context() read a record written both ways at once, want it refused")
+	}
+	if _, err := s.Contexts(); err == nil {
+		t.Error("Contexts() read a record written both ways at once, want it refused")
 	}
 }
 
@@ -342,8 +417,8 @@ func TestRejectsUnsafeNames(t *testing.T) {
 			}{
 				{"PutRepository", s.PutRepository(store.Repository{Name: unsafe.name, State: "READY"})},
 				{"DeleteRepository", s.DeleteRepository(unsafe.name)},
-				{"PutContext", s.PutContext(store.Context{ID: unsafe.name, Repository: "backend", State: "CREATING"})},
-				{"PutContext repository", s.PutContext(store.Context{ID: "backend-v2", Repository: unsafe.name, State: "CREATING"})},
+				{"PutContext", s.PutContext(store.Context{ID: unsafe.name, Members: []store.ContextMember{{Repository: "backend"}}, State: "CREATING"})},
+				{"PutContext repository", s.PutContext(store.Context{ID: "backend-v2", Members: []store.ContextMember{{Repository: unsafe.name}}, State: "CREATING"})},
 				{"DeleteContext", s.DeleteContext(unsafe.name)},
 				{"Repository", readRepoErr},
 				{"Context", readContextErr},

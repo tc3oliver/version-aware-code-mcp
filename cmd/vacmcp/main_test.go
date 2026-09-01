@@ -221,12 +221,14 @@ func TestServeManagedStopsCleanlyWhenTheClientDisconnects(t *testing.T) {
 	}
 	revision := gitOut(t, "-C", source, "rev-parse", "HEAD")
 	if err := openStore(t, data).PutContext(store.Context{
-		ID:         "app",
-		Repository: "demo",
-		Branch:     "vacmcp/app-" + revision[:12],
-		Revision:   revision,
-		GraphRef:   "vacmcp-demo-app-" + revision[:12],
-		State:      managed.ContextReady,
+		ID: "app",
+		Members: []store.ContextMember{{
+			Repository: "demo",
+			Branch:     "vacmcp/app-" + revision[:12],
+			Revision:   revision,
+			GraphRef:   "vacmcp-demo-app-" + revision[:12],
+		}},
+		State: managed.ContextReady,
 	}); err != nil {
 		t.Fatalf("PutContext: %v", err)
 	}

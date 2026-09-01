@@ -119,33 +119,56 @@ func readyContext(s *store.Store, id string) (store.Context, error) {
 	return c, nil
 }
 
-// Create resolves ref to a commit, records a context pinned to it and drives it
-// to READY.
+// Create resolves every pin's ref to a commit, records one context pinned to
+// all of them and drives it to READY.
 //
-// The ref is read exactly once, here. What lands in the record is the full
+// Each ref is read exactly once, here. What lands in the record is the full
 // commit SHA it resolved to, so the branch it came from can move, be rewritten
 // or be deleted afterwards without this context changing.
 //
 // Resolution is the RESOLVING stage, and it runs before the record exists
-// because it is what the record is made of: the pinned revision and the search
-// and graph names derived from it. A ref that does not resolve therefore
-// records nothing at all, which is what leaves the same call runnable again
-// with the ref the user meant — a FAILED record carrying no revision would only
-// be one they had to remove first, and one nothing could ever retry, since the
-// ref that failed is not part of a context.
+// because it is what the record is made of: the pinned revisions and the search
+// and graph names derived from them. A ref that does not resolve therefore
+// records nothing at all — not even the members whose refs did resolve — which
+// is what leaves the same call runnable again with the ref the user meant. A
+// FAILED record carrying no revision would only be one they had to remove
+// first, and one nothing could ever retry, since the ref that failed is not
+// part of a context.
 //
 // Creating over an existing context ID is refused whatever state it is in. That
 // is the same rule [RepositoryManager.Add] follows, and here it is what makes
 // immutability a property of the code rather than a promise: no path in this
 // file writes a revision into a record that already has one.
-func (m *ContextManager) Create(ctx context.Context, id, repository, ref string) (Context, error) {
-	// Both names become path elements. Asking for the worktree path is what
-	// puts the store's check on them in front of everything below, so a name
-	// that is not a usable path element is refused before any git runs and
-	// leaves nothing behind.
-	worktree, err := m.store.WorktreeDir(repository, id)
-	if err != nil {
-		return Context{}, err
+func (m *ContextManager) Create(ctx context.Context, id string, pins []Pin) (Context, error) {
+	if len(pins) == 0 {
+		return Context{}, vacerr.New(
+			vacerr.InvalidArgument,
+			"context create: a context needs at least one repository and the ref to pin it at",
+			map[string]any{"context": id},
+		)
+	}
+	// Every name below becomes a path element. Asking for each member's
+	// worktree path is what puts the store's check on all of them in front of
+	// everything else, so a name that is not a usable path element is refused
+	// before any git runs and leaves nothing behind.
+	seen := map[string]bool{}
+	for _, pin := range pins {
+		if _, err := m.store.WorktreeDir(pin.Repository, id); err != nil {
+			return Context{}, err
+		}
+		// One repository twice in one context is refused rather than
+		// deduplicated, exactly as the configuration refuses it: the two entries
+		// pin two revisions of it and a context answering from both would report
+		// one repository's code twice with no way to say which version each half
+		// came from.
+		if seen[pin.Repository] {
+			return Context{}, vacerr.New(
+				vacerr.InvalidArgument,
+				fmt.Sprintf("context create: repository %q is given twice; a context pins one revision of each repository it names", pin.Repository),
+				map[string]any{"context": id, "repository": pin.Repository},
+			)
+		}
+		seen[pin.Repository] = true
 	}
 	// The store's allowlist has to admit a dot, and the generated search ref
 	// below has to be a legal git ref: ".." is the one sequence that is fine in
@@ -158,8 +181,8 @@ func (m *ContextManager) Create(ctx context.Context, id, repository, ref string)
 		)
 	}
 	// A managed server serving this data directory is the one thing that stops
-	// a context being created here, and it is asked before the repository's own
-	// lock: a create adds a context the running server's snapshot does not
+	// a context being created here, and it is asked before the repositories'
+	// own locks: a create adds a context the running server's snapshot does not
 	// have, and once this id exists it can never mean another revision.
 	release, err := holdManagementLock(m.store, "context create")
 	if err != nil {
@@ -168,12 +191,12 @@ func (m *ContextManager) Create(ctx context.Context, id, repository, ref string)
 	defer release()
 
 	var record store.Context
-	// Everything below reads and writes the repository's clone, its search
-	// index and the records of its other contexts, so it is one operation on
-	// that repository and runs alone. The ref is resolved inside the lock too: a
-	// fetch running underneath it is exactly what would let this pin a commit
-	// that is being replaced.
-	err = withRepositoryLock(m.store, repository, func() error {
+	// Everything below reads and writes each member's clone, its search index
+	// and the records of its other contexts, so it is one operation on every
+	// one of those repositories and runs alone on all of them. The refs are
+	// resolved inside the locks too: a fetch running underneath one is exactly
+	// what would let this pin a commit that is being replaced.
+	err = withRepositoryLocks(m.store, pinnedRepositories(pins), func() error {
 		if _, err := m.store.Context(id); err == nil {
 			return vacerr.New(
 				vacerr.InvalidArgument,
@@ -181,25 +204,30 @@ func (m *ContextManager) Create(ctx context.Context, id, repository, ref string)
 				map[string]any{"context": id},
 			)
 		}
-		if _, err := m.store.Repository(repository); err != nil {
-			return err
-		}
-		repoDir, err := m.store.RepositoryDir(repository)
-		if err != nil {
-			return err
+
+		members := make([]store.ContextMember, 0, len(pins))
+		for _, pin := range pins {
+			if _, err := m.store.Repository(pin.Repository); err != nil {
+				return err
+			}
+			repoDir, err := m.store.RepositoryDir(pin.Repository)
+			if err != nil {
+				return err
+			}
+			revision, err := resolveRevision(ctx, repoDir, pin.Repository, pin.Ref)
+			if err != nil {
+				return err
+			}
+			members = append(members, store.ContextMember{Repository: pin.Repository, Revision: revision})
 		}
 
-		revision, err := resolveRevision(ctx, repoDir, repository, ref)
-		if err != nil {
-			return err
-		}
-		record = store.Context{
-			ID:         id,
-			Repository: repository,
-			Branch:     searchRef(id, revision),
-			Revision:   revision,
-			GraphRef:   graphRef(repository, id, revision),
-			State:      ContextCreating,
+		// The generated names come after the whole member list, because
+		// searchRef reads it: what a member's ref is called depends on whether
+		// this context has one repository or several.
+		record = store.Context{ID: id, Members: members, State: ContextCreating}
+		for i := range record.Members {
+			record.Members[i].Branch = searchRef(record, record.Members[i])
+			record.Members[i].GraphRef = graphRef(record, record.Members[i])
 		}
 		// The record first, the artifacts after: a checkout, a graph or a search
 		// ref that outlived a failed create would be artifacts no record names
@@ -210,14 +238,14 @@ func (m *ContextManager) Create(ctx context.Context, id, repository, ref string)
 			return err
 		}
 
-		// RESOLVING is entered and left in the same breath: the revision was
-		// resolved above, before there was a record to write it into. The state
-		// exists all the same, because the order of the machine is what makes a
-		// stage impossible to skip.
+		// RESOLVING is entered and left in the same breath: the revisions were
+		// resolved above, before there was a record to write them into. The
+		// state exists all the same, because the order of the machine is what
+		// makes a stage impossible to skip.
 		if err := advance(m.store, &record, ContextResolving); err != nil {
 			return err
 		}
-		return buildContext(ctx, m.store, &record, repoDir, worktree)
+		return buildContext(ctx, m.store, &record)
 	})
 	if err != nil {
 		return Context{}, err
@@ -225,29 +253,101 @@ func (m *ContextManager) Create(ctx context.Context, id, repository, ref string)
 	return contextOf(record), nil
 }
 
-// buildContext takes a record that has its revision pinned and drives it to
-// READY, one stage at a time, each one written down before it runs and none of
-// them optional.
+// pinnedRepositories is the repositories a create is about, in the order they
+// were given; withRepositoryLocks is what puts them in the order they are
+// locked in.
+func pinnedRepositories(pins []Pin) []string {
+	names := make([]string, 0, len(pins))
+	for _, pin := range pins {
+		names = append(names, pin.Repository)
+	}
+	return names
+}
+
+// repositoriesOf is the repositories one record's members name, which is the
+// set of locks an operation on that context has to hold.
+func repositoriesOf(c store.Context) []string {
+	names := make([]string, 0, len(c.Members))
+	for _, m := range c.Members {
+		names = append(names, m.Repository)
+	}
+	return names
+}
+
+// memberPaths is where one member's source lives: the clone its revision is in,
+// and the checkout of that revision this context owns.
+//
+// Both carry the repository as well as the context, so the several members of
+// one context land in directories of their own without either name having to
+// know that a context can have more than one.
+func memberPaths(s *store.Store, id string, m store.ContextMember) (repoDir, worktree string, err error) {
+	if repoDir, err = s.RepositoryDir(m.Repository); err != nil {
+		return "", "", err
+	}
+	if worktree, err = s.WorktreeDir(m.Repository, id); err != nil {
+		return "", "", err
+	}
+	return repoDir, worktree, nil
+}
+
+// buildContext takes a record that has every member's revision pinned and
+// drives it to READY, one stage at a time, each one written down before it runs
+// and none of them optional.
 //
 // It is the whole of what a context is made of, and it is one function because
 // a create and a retry build the same context out of the same stages: a retry
 // that rebuilt some other way would be a second definition of what READY means,
 // and the two would drift.
 //
-// The caller holds the repository's lock and has already advanced c to
-// RESOLVING. A context that fails any stage is FAILED rather than a context with
-// some of its artifacts that the query plane would serve anyway.
-func buildContext(ctx context.Context, s *store.Store, c *store.Context, repoDir, worktree string) error {
+// A stage is over every member before the next one begins, and a member that
+// fails any stage fails the whole context. There is deliberately no state in
+// which some members are built: READY is the only thing the query plane serves,
+// and a workspace answering out of the members that happened to work is exactly
+// the partial, silently-wrong answer this server exists to prevent.
+//
+// The caller holds every member repository's lock and has already advanced c to
+// RESOLVING.
+func buildContext(ctx context.Context, s *store.Store, c *store.Context) error {
 	for _, stage := range []struct {
 		state string
 		run   func() error
 	}{
-		{ContextPreparingSource, func() error { return prepareSource(ctx, repoDir, worktree, *c) }},
+		{ContextPreparingSource, func() error {
+			for _, m := range c.Members {
+				repoDir, worktree, err := memberPaths(s, c.ID, m)
+				if err != nil {
+					return err
+				}
+				if err := prepareSource(ctx, repoDir, worktree, c.ID, m); err != nil {
+					return err
+				}
+			}
+			return nil
+		}},
 		// Indexing is driven by the records: it creates the search ref of every
-		// context the repository has, this one now among them, and indexes them
-		// together.
-		{ContextIndexingSearch, func() error { return indexRepository(ctx, s, c.Repository) }},
-		{ContextIndexingGraph, func() error { return indexGraph(ctx, worktree, *c) }},
+		// context the repository has, this one's member now among them, and
+		// indexes them together. One call per repository, because one repository
+		// is one shard however many contexts reach it.
+		{ContextIndexingSearch, func() error {
+			for _, repository := range slices.Sorted(slices.Values(repositoriesOf(*c))) {
+				if err := indexRepository(ctx, s, repository); err != nil {
+					return err
+				}
+			}
+			return nil
+		}},
+		{ContextIndexingGraph, func() error {
+			for _, m := range c.Members {
+				_, worktree, err := memberPaths(s, c.ID, m)
+				if err != nil {
+					return err
+				}
+				if err := indexGraph(ctx, worktree, c.ID, m); err != nil {
+					return err
+				}
+			}
+			return nil
+		}},
 		{ContextVerifying, func() error { return verifyContext(ctx, s, *c) }},
 	} {
 		if err := advance(s, c, stage.state); err != nil {
@@ -265,10 +365,10 @@ func buildContext(ctx context.Context, s *store.Store, c *store.Context, repoDir
 // It is what makes a failure recoverable without an operator going into the
 // data directory by hand: whatever the interrupted run left — no worktree, a
 // worktree on the wrong commit, a graph that was half indexed, a search ref
-// that was never created — is thrown away and made again from the revision the
-// record already pins. The revision is never re-resolved. A retry fixes a
-// context whose artifacts were not built, and there is no ref in it to move a
-// context onto another commit.
+// that was never created — is thrown away, for every member and not only the
+// one that failed, and made again from the revisions the record already pins.
+// No revision is ever re-resolved. A retry fixes a context whose artifacts were
+// not built, and there is no ref in it to move a context onto another commit.
 //
 // Rebuilding from the first stage rather than resuming where it stopped is
 // deliberate. The states say which stage a run was in, not how far into it it
@@ -304,7 +404,7 @@ func (m *ContextManager) Retry(ctx context.Context, id string) (Context, error) 
 	}
 
 	var c store.Context
-	err = withRepositoryLock(m.store, known.Repository, func() error {
+	err = withRepositoryLocks(m.store, repositoriesOf(known), func() error {
 		var err error
 		c, err = m.store.Context(id)
 		if err != nil {
@@ -328,26 +428,26 @@ func (m *ContextManager) Retry(ctx context.Context, id string) (Context, error) 
 				map[string]any{"context": id},
 			)
 		}
-		worktree, err := m.store.WorktreeDir(c.Repository, c.ID)
-		if err != nil {
-			return err
-		}
-		repoDir, err := m.store.RepositoryDir(c.Repository)
-		if err != nil {
-			return err
-		}
-		if _, err := m.store.Repository(c.Repository); err != nil {
-			return err
-		}
-
-		// The partial artifacts go before anything is built, and the record
-		// stays where it is if that fails: a cleanup that could not finish
-		// leaves a context that is still not READY and still retryable, rather
-		// than one that is being rebuilt on top of the leftovers of the last
-		// attempt. The search ref needs nothing here — indexing re-asserts every
+		// Every member's partial artifacts go before anything is built, and the
+		// record stays where it is if that fails: a cleanup that could not
+		// finish leaves a context that is still not READY and still retryable,
+		// rather than one that is being rebuilt on top of the leftovers of the
+		// last attempt. All of them go before any of them is rebuilt, and not
+		// member by member, so a retry that fails part way through has still
+		// thrown away everything the interrupted run left rather than half of
+		// it. The search refs need nothing here — indexing re-asserts every
 		// record's ref from the record, and the record is immutable.
-		if err := discardSource(ctx, repoDir, worktree, c); err != nil {
-			return err
+		for _, member := range c.Members {
+			if _, err := m.store.Repository(member.Repository); err != nil {
+				return err
+			}
+			repoDir, worktree, err := memberPaths(m.store, c.ID, member)
+			if err != nil {
+				return err
+			}
+			if err := discardSource(ctx, repoDir, worktree, c.ID, member); err != nil {
+				return err
+			}
 		}
 
 		// The one place the machine is re-entered. It is not a transition —
@@ -360,7 +460,7 @@ func (m *ContextManager) Retry(ctx context.Context, id string) (Context, error) 
 		if err := m.store.PutContext(c); err != nil {
 			return err
 		}
-		return buildContext(ctx, m.store, &c, repoDir, worktree)
+		return buildContext(ctx, m.store, &c)
 	})
 	if err != nil {
 		return Context{}, err
@@ -377,79 +477,88 @@ func (m *ContextManager) Retry(ctx context.Context, id string) (Context, error) 
 // verification reports what it found, and a record that disagrees with its
 // artifacts is a failure rather than something to quietly adopt.
 //
+// Every member is checked, and the first one that fails fails the context: a
+// workspace is one scope, so a member whose source is not what the record says
+// makes the whole of it unanswerable rather than partly answerable.
+//
 // Every check asks the artifact itself. A create that once succeeded is not
 // evidence: a clone can be replaced, a worktree checked out by hand, a shard
 // deleted and a graph dropped by anything else driving the same CBM store.
 func verifyContext(ctx context.Context, s *store.Store, c store.Context) error {
-	repoDir, err := s.RepositoryDir(c.Repository)
-	if err != nil {
-		return err
-	}
-	// The pinned revision is still a commit this repository has, and still the
-	// same one. Re-resolving it is what catches a clone that was deleted or
-	// replaced under a context.
-	found, err := gitOutput(ctx, "-C", repoDir, "rev-parse", "--verify", "--end-of-options", c.Revision+"^{commit}")
-	if err != nil {
-		return vacerr.New(
-			vacerr.RevisionNotFound,
-			fmt.Sprintf("context %q pins revision %s, which repository %q cannot resolve: %v", c.ID, c.Revision, c.Repository, err),
-			map[string]any{"context": c.ID, "repository": c.Repository, "revision": c.Revision},
-		)
-	}
-	if found != c.Revision {
-		return vacerr.NewSourceMismatch(c.Revision, found, map[string]any{"context": c.ID, "repository": c.Repository})
-	}
+	for _, m := range c.Members {
+		repoDir, worktree, err := memberPaths(s, c.ID, m)
+		if err != nil {
+			return err
+		}
+		// The pinned revision is still a commit this repository has, and still
+		// the same one. Re-resolving it is what catches a clone that was deleted
+		// or replaced under a context.
+		found, err := gitOutput(ctx, "-C", repoDir, "rev-parse", "--verify", "--end-of-options", m.Revision+"^{commit}")
+		if err != nil {
+			return vacerr.New(
+				vacerr.RevisionNotFound,
+				fmt.Sprintf("context %q pins revision %s, which repository %q cannot resolve: %v", c.ID, m.Revision, m.Repository, err),
+				map[string]any{"context": c.ID, "repository": m.Repository, "revision": m.Revision},
+			)
+		}
+		if found != m.Revision {
+			return vacerr.NewSourceMismatch(m.Revision, found, map[string]any{"context": c.ID, "repository": m.Repository})
+		}
 
-	// The checkout is on the pinned commit. Asked here, after the indexing,
-	// this is also the check that the source did not move while it was being
-	// indexed: the same worktree answered the same commit on both sides of it,
-	// so the index and the graph were built from the revision the record pins.
-	worktree, err := s.WorktreeDir(c.Repository, c.ID)
-	if err != nil {
-		return err
-	}
-	if err := verifySource(ctx, worktree, c); err != nil {
-		return err
-	}
-	if err := verifySearchRef(ctx, repoDir, s.ZoektDir(), c); err != nil {
-		return err
-	}
-	if err := verifyGraph(ctx, c); err != nil {
-		return err
+		// The checkout is on the pinned commit. Asked here, after the indexing,
+		// this is also the check that the source did not move while it was being
+		// indexed: the same worktree answered the same commit on both sides of
+		// it, so the index and the graph were built from the revision the record
+		// pins.
+		if err := verifySource(ctx, worktree, c.ID, m); err != nil {
+			return err
+		}
+		if err := verifySearchRef(ctx, repoDir, s.ZoektDir(), c.ID, m); err != nil {
+			return err
+		}
+		if err := verifyGraph(ctx, c.ID, m); err != nil {
+			return err
+		}
 	}
 	return verifyIdentity(c)
 }
 
-// verifyIdentity checks that the four fields the query plane resolves a context
-// into — repository, branch, revision, graph_ref — are the ones this context's
-// own name and revision generate.
+// verifyIdentity checks that the four fields the query plane resolves each
+// member into — repository, branch, revision, graph_ref — are the ones this
+// context's own name and that member's revision generate.
 //
 // They are generated on create and never written again, so this can only fail
 // on a record that was edited by hand or written by another version. It is
 // checked anyway, and fails closed: a search ref or a graph carrying a
 // different revision than the one the record pins is the wrong-version answer
 // this server exists to prevent, and it would be served silently.
+//
+// Member by member, because a context of several repositories has one such
+// quadruple per repository: a single-valued check could not say which clone the
+// ref it recomputed was supposed to be in.
 func verifyIdentity(c store.Context) error {
-	if len(c.Revision) != fullSHA {
-		return vacerr.New(
-			vacerr.SourceMismatch,
-			fmt.Sprintf("context %q pins %q, which is not a full commit SHA", c.ID, c.Revision),
-			map[string]any{"context": c.ID, "repository": c.Repository, "declared_revision": c.Revision},
-		)
-	}
-	if branch := searchRef(c.ID, c.Revision); c.Branch != branch {
-		return vacerr.New(
-			vacerr.SourceMismatch,
-			fmt.Sprintf("context %q is searched on branch %q, but its name and revision %s generate %q: the record names another context's source", c.ID, c.Branch, c.Revision, branch),
-			map[string]any{"context": c.ID, "repository": c.Repository, "declared_revision": c.Revision, "branch": c.Branch},
-		)
-	}
-	if graph := graphRef(c.Repository, c.ID, c.Revision); c.GraphRef != graph {
-		return vacerr.New(
-			vacerr.SourceMismatch,
-			fmt.Sprintf("context %q is traced in graph %q, but its repository, name and revision %s generate %q: the record names another context's graph", c.ID, c.GraphRef, c.Revision, graph),
-			map[string]any{"context": c.ID, "repository": c.Repository, "declared_revision": c.Revision, "graph_ref": c.GraphRef},
-		)
+	for _, m := range c.Members {
+		if len(m.Revision) != fullSHA {
+			return vacerr.New(
+				vacerr.SourceMismatch,
+				fmt.Sprintf("context %q pins %q in repository %q, which is not a full commit SHA", c.ID, m.Revision, m.Repository),
+				map[string]any{"context": c.ID, "repository": m.Repository, "declared_revision": m.Revision},
+			)
+		}
+		if branch := searchRef(c, m); m.Branch != branch {
+			return vacerr.New(
+				vacerr.SourceMismatch,
+				fmt.Sprintf("context %q is searched in repository %q on branch %q, but its name and revision %s generate %q: the record names another context's source", c.ID, m.Repository, m.Branch, m.Revision, branch),
+				map[string]any{"context": c.ID, "repository": m.Repository, "declared_revision": m.Revision, "branch": m.Branch},
+			)
+		}
+		if graph := graphRef(c, m); m.GraphRef != graph {
+			return vacerr.New(
+				vacerr.SourceMismatch,
+				fmt.Sprintf("context %q is traced in graph %q, but its repository %q, name and revision %s generate %q: the record names another context's graph", c.ID, m.GraphRef, m.Repository, m.Revision, graph),
+				map[string]any{"context": c.ID, "repository": m.Repository, "declared_revision": m.Revision, "graph_ref": m.GraphRef},
+			)
+		}
 	}
 	return nil
 }
@@ -467,25 +576,31 @@ func (m *ContextManager) List() ([]Context, error) {
 	return contexts, nil
 }
 
-// Status reports one context, including the names it generated and where its
-// worktree goes. Those are internal — nobody has to type them, and the query
-// plane does not show them — but this is the management plane, where an operator
-// diagnosing a context needs to know which ref and which graph are its.
+// Status reports one context, including the names it generated for each member
+// and where that member's worktree goes. Those are internal — nobody has to type
+// them, and the query plane does not show them — but this is the management
+// plane, where an operator diagnosing a context needs to know which ref and
+// which graph are its, in which repository.
 func (m *ContextManager) Status(id string) (ContextStatus, error) {
 	c, err := m.store.Context(id)
 	if err != nil {
 		return ContextStatus{}, err
 	}
-	worktree, err := m.store.WorktreeDir(c.Repository, c.ID)
-	if err != nil {
-		return ContextStatus{}, err
+	artifacts := make([]MemberArtifacts, 0, len(c.Members))
+	for _, member := range c.Members {
+		worktree, err := m.store.WorktreeDir(member.Repository, c.ID)
+		if err != nil {
+			return ContextStatus{}, err
+		}
+		artifacts = append(artifacts, MemberArtifacts{
+			Repository: member.Repository,
+			Revision:   member.Revision,
+			SearchRef:  member.Branch,
+			GraphRef:   member.GraphRef,
+			Worktree:   worktree,
+		})
 	}
-	return ContextStatus{
-		Context:   contextOf(c),
-		SearchRef: c.Branch,
-		GraphRef:  c.GraphRef,
-		Worktree:  worktree,
-	}, nil
+	return ContextStatus{Context: contextOf(c), Artifacts: artifacts}, nil
 }
 
 // Verify re-runs the checks that made a context READY and writes nothing.
@@ -507,19 +622,20 @@ func (m *ContextManager) Verify(ctx context.Context, id string) (Context, error)
 	return contextOf(c), nil
 }
 
-// Remove forgets a context and deletes the worktree and the graph it owns.
+// Remove forgets a context and deletes every worktree and graph it owns.
 //
-// Nothing but this context's own record, its own directory and its own graph is
-// touched: a worktree is filed under its repository and its own id, so what is
-// deleted is one subtree that no other context of the same repository is
-// inside, the graph is the one its record names, and no other record is read or
-// written.
+// Nothing but this context's own record, its own directories and its own graphs
+// is touched: a worktree is filed under its repository and its own id, so what
+// is deleted is one subtree per member that no other context of the same
+// repository is inside, the graphs are the ones its record names, and no other
+// record is read or written.
 //
 // An artifact that is not there is skipped rather than missed — a context whose
 // worktree was never created, or whose indexing never finished, still has to be
 // removable. That is also what makes this resumable: every step below tolerates
 // having already been taken, so a removal killed part way through is finished by
-// running it again.
+// running it again. It has to be, because a record says the context is being
+// removed and never how far that got: a second run re-attempts every member.
 func (m *ContextManager) Remove(ctx context.Context, id string) error {
 	// The removal decision-6 is written about: a managed server holds the
 	// worktree, the graph and the record this is about to delete in a snapshot
@@ -536,18 +652,11 @@ func (m *ContextManager) Remove(ctx context.Context, id string) error {
 		return err
 	}
 
-	// The removal rebuilds the repository's search index out of the records it
-	// leaves behind, so it is one operation on that repository like a create is.
-	return withRepositoryLock(m.store, known.Repository, func() error {
+	// The removal rebuilds each member repository's search index out of the
+	// records it leaves behind, so it is one operation on every one of them,
+	// like a create is.
+	return withRepositoryLocks(m.store, repositoriesOf(known), func() error {
 		c, err := m.store.Context(id)
-		if err != nil {
-			return err
-		}
-		worktree, err := m.store.WorktreeDir(c.Repository, c.ID)
-		if err != nil {
-			return err
-		}
-		repoDir, err := m.store.RepositoryDir(c.Repository)
 		if err != nil {
 			return err
 		}
@@ -567,22 +676,36 @@ func (m *ContextManager) Remove(ctx context.Context, id string) error {
 		// The artifacts go first: a failure there leaves the record in place, so
 		// the context is still managed and still removable. The other order
 		// would leave a checkout and a graph nothing knows about.
-		if err := discardSource(ctx, repoDir, worktree, c); err != nil {
-			return err
-		}
-		// Then the ref, then the index, and the record last of all. The record
-		// is what a second run finds the context by, so it is what has to
-		// outlive every step that can fail: deleting it before the shard was
-		// rebuilt would leave the removed revision's source in the served index
+		//
+		// Then the refs, then the indexes, and the record last of all. The
+		// record is what a second run finds the context by, so it is what has to
+		// outlive every step that can fail: deleting it before the shards were
+		// rebuilt would leave the removed revisions' source in the served index
 		// with nothing left to name it, and no way to finish the removal but by
 		// hand.
-		if c.Branch != "" {
-			if err := dropSearchRef(ctx, repoDir, c); err != nil {
+		for _, member := range c.Members {
+			repoDir, worktree, err := memberPaths(m.store, c.ID, member)
+			if err != nil {
+				return err
+			}
+			if err := discardSource(ctx, repoDir, worktree, c.ID, member); err != nil {
+				return err
+			}
+			if member.Branch == "" {
+				continue
+			}
+			if err := dropSearchRef(ctx, repoDir, member); err != nil {
 				return err
 			}
 		}
-		if err := indexRepository(ctx, m.store, c.Repository); err != nil {
-			return err
+		// One rebuild per repository and not one per member, because one
+		// repository is one shard: a context with two members in one clone —
+		// which a create refuses and a hand-written record can still say — must
+		// not have the second rebuild undo what the first left out.
+		for _, repository := range slices.Sorted(slices.Values(repositoriesOf(c))) {
+			if err := indexRepository(ctx, m.store, repository); err != nil {
+				return err
+			}
 		}
 		return m.store.DeleteContext(c.ID)
 	})
@@ -618,21 +741,36 @@ func resolveRevision(ctx context.Context, repoDir, repository, ref string) (stri
 	)
 }
 
-// searchRef is the ref inside the clone that carries this context's source for
+// searchRef is the ref inside m's clone that carries this member's source for
 // the search index, and the branch the query plane searches. It is namespaced
 // under vacmcp/ so it can never collide with a branch the repository really has,
 // and it carries the short SHA so two contexts of one repository are never one
 // ref. Nothing else names it: a user creates a context without knowing it
 // exists.
-func searchRef(contextID, revision string) string {
-	return "vacmcp/" + contextID + "-" + revision[:shortSHA]
+//
+// A member of a context that names several repositories carries the repository
+// too, and one of a context that names a single repository does not. That
+// asymmetry is not a style: two members pinned at the same revision would
+// otherwise generate the identical name, which is one name for two sources —
+// while a context of one repository has to keep generating exactly the name
+// v0.4.0 wrote, or every record a v0.4.0 installation left would disagree with
+// the formula [verifyIdentity] recomputes and fail closed on an artifact that is
+// perfectly good. The count is a property of the record and the record is
+// immutable, so a member's name never changes under it.
+func searchRef(c store.Context, m store.ContextMember) string {
+	if len(c.Members) > 1 {
+		return "vacmcp/" + m.Repository + "-" + c.ID + "-" + m.Revision[:shortSHA]
+	}
+	return "vacmcp/" + c.ID + "-" + m.Revision[:shortSHA]
 }
 
-// graphRef is the graph project backing this context. The repository name is in
-// it because graph projects share one namespace across every repository in a
-// data directory, where search refs are scoped to a clone already.
-func graphRef(repository, contextID, revision string) string {
-	return "vacmcp-" + repository + "-" + contextID + "-" + revision[:shortSHA]
+// graphRef is the graph project backing this member. The repository name is in
+// it whatever the context looks like, because graph projects share one
+// namespace across every repository in a data directory, where search refs are
+// scoped to a clone already — which is also what already tells the several
+// members of one context apart here.
+func graphRef(c store.Context, m store.ContextMember) string {
+	return "vacmcp-" + m.Repository + "-" + c.ID + "-" + m.Revision[:shortSHA]
 }
 
 // gitOutput runs one git command and returns its standard output, trimmed. It

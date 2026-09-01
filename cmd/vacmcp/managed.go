@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	yaml "go.yaml.in/yaml/v4"
-
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
@@ -82,35 +80,35 @@ func managedConfig(s *store.Store, zoektURL, cbmCommand string) (*config.Config,
 		Contexts:     map[string]vacctx.Workspace{},
 	}
 	for _, c := range contexts {
-		path, err := s.RepositoryDir(c.Repository)
-		if err != nil {
-			return nil, err
-		}
-		// The local clone and nothing else. The repository record also carries
-		// the remote URL it was cloned from, and that must not travel into a
-		// runtime configuration: the query plane never reaches a remote, so a
-		// URL there would be a credential-adjacent field written into a file for
-		// no reader at all.
-		cfg.Repositories[c.Repository] = config.Repository{Path: path}
-		// One member, because one record is one repository at one revision. A
-		// managed context is built by indexing a single clone, so there is
-		// nothing here that could name a second one.
-		cfg.Contexts[c.ID] = vacctx.Workspace{
-			ID: c.ID,
-			Members: []vacctx.CodeContext{{
+		members := make([]vacctx.CodeContext, 0, len(c.Members))
+		for _, member := range c.Members {
+			path, err := s.RepositoryDir(member.Repository)
+			if err != nil {
+				return nil, err
+			}
+			// The local clone and nothing else. The repository record also
+			// carries the remote URL it was cloned from, and that must not
+			// travel into a runtime configuration: the query plane never reaches
+			// a remote, so a URL there would be a credential-adjacent field
+			// written into a file for no reader at all.
+			cfg.Repositories[member.Repository] = config.Repository{Path: path}
+			members = append(members, vacctx.CodeContext{
 				ID:         c.ID,
-				Repository: c.Repository,
-				Branch:     c.Branch,
-				Revision:   c.Revision,
-				GraphRef:   c.GraphRef,
-			}},
+				Repository: member.Repository,
+				Branch:     member.Branch,
+				Revision:   member.Revision,
+				GraphRef:   member.GraphRef,
+			})
 		}
+		cfg.Contexts[c.ID] = vacctx.Workspace{ID: c.ID, Members: members}
 	}
 
-	// Marshalling config.Config itself, rather than printing the fields, is what
-	// keeps the generated file from drifting away from the shape config.Load
-	// parses.
-	body, err := yaml.Marshal(cfg)
+	// Rendered by config itself, rather than by printing the fields here, is
+	// what keeps the generated file from drifting away from the shape
+	// config.Load parses — including which of the two spellings a context is
+	// written in, which is the record's own shape all over again and is decided
+	// in one place for both.
+	body, err := config.Marshal(&cfg)
 	if err != nil {
 		return nil, fmt.Errorf("serve: cannot generate the configuration of %s: %w", s.Root(), err)
 	}

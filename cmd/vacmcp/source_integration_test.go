@@ -25,7 +25,6 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
-	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
@@ -52,7 +51,7 @@ func cbmOrSkip(t *testing.T) {
 // It asks CBM what it has rather than the lifecycle's own verification, so what
 // a create built and what a removal took away are observed from outside the code
 // that did either.
-func graphExists(ctx context.Context, c store.Context) error {
+func graphExists(ctx context.Context, id string, m store.ContextMember) error {
 	out, err := exec.CommandContext(ctx, managed.CBMCommand, "cli", "list_projects").Output()
 	if err != nil {
 		return fmt.Errorf("%s cli list_projects: %w", managed.CBMCommand, err)
@@ -66,11 +65,11 @@ func graphExists(ctx context.Context, c store.Context) error {
 		return fmt.Errorf("list_projects did not answer with the JSON it promises: %w", err)
 	}
 	for _, project := range body.Projects {
-		if project.Name == c.GraphRef {
+		if project.Name == m.GraphRef {
 			return nil
 		}
 	}
-	return fmt.Errorf("codebase-memory-mcp holds no graph %q for context %q", c.GraphRef, c.ID)
+	return fmt.Errorf("codebase-memory-mcp holds no graph %q for context %q", m.GraphRef, id)
 }
 
 // discardGraphs deletes the graph of every context still recorded in dataDir.
@@ -104,16 +103,20 @@ func discardGraphsIn(dataDir string, logf func(string, ...any)) {
 	// contexts would otherwise spend five subprocess startups on tidying up.
 	var wg sync.WaitGroup
 	for _, c := range contexts {
-		if c.GraphRef == "" {
-			continue
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if out, err := exec.Command(managed.CBMCommand, "cli", "delete_project", "--project", c.GraphRef).CombinedOutput(); err != nil {
-				logf("cleanup: delete_project %s: %v\n%s", c.GraphRef, err, out)
+		// Every member of every context: a graph is one repository at one
+		// revision, so a context over two owns two of them.
+		for _, m := range c.Members {
+			if m.GraphRef == "" {
+				continue
 			}
-		}()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if out, err := exec.Command(managed.CBMCommand, "cli", "delete_project", "--project", m.GraphRef).CombinedOutput(); err != nil {
+					logf("cleanup: delete_project %s: %v\n%s", m.GraphRef, err, out)
+				}
+			}()
+		}
 	}
 	wg.Wait()
 }
@@ -168,17 +171,11 @@ func graphProvider(t *testing.T) *cbmadapter.Provider {
 }
 
 // tracedCallees returns what the context's graph says Process calls.
-func tracedCallees(t *testing.T, p *cbmadapter.Provider, c store.Context) []string {
+func tracedCallees(t *testing.T, p *cbmadapter.Provider, id string, m store.ContextMember) []string {
 	t.Helper()
-	graph, err := p.TraceCalls(t.Context(), vacctx.CodeContext{
-		ID:         c.ID,
-		Repository: c.Repository,
-		Branch:     c.Branch,
-		Revision:   c.Revision,
-		GraphRef:   c.GraphRef,
-	}, provider.TraceRequest{Symbol: "Process", Direction: provider.Callees, Depth: 2})
+	graph, err := p.TraceCalls(t.Context(), scope(id, m), provider.TraceRequest{Symbol: "Process", Direction: provider.Callees, Depth: 2})
 	if err != nil {
-		t.Fatalf("TraceCalls(%s, Process): %v", c.ID, err)
+		t.Fatalf("TraceCalls(%s, Process): %v", id, err)
 	}
 
 	var names []string
@@ -256,19 +253,19 @@ func TestContextCreateBuildsAWorktreeAndAGraphPerContext(t *testing.T) {
 		{"app-v1", legacyHandler, newHandler},
 		{"app-v2", newHandler, legacyHandler},
 	} {
-		c := contextRecord(t, data, tc.id)
-		if err := graphExists(t.Context(), c); err != nil {
+		member := only(t, contextRecord(t, data, tc.id))
+		if err := graphExists(t.Context(), tc.id, member); err != nil {
 			t.Fatalf("%s: the graph was not built: %v", tc.id, err)
 		}
 
-		called := tracedCallees(t, p, c)
+		called := tracedCallees(t, p, tc.id, member)
 		if !slices.Contains(called, tc.want) {
 			t.Errorf("%s: Process calls %v, want it to include %s", tc.id, called, tc.want)
 		}
 		if slices.Contains(called, tc.absent) {
 			t.Errorf("%s: Process calls %v, which is the other version's handler: the graphs are contaminated", tc.id, called)
 		}
-		t.Logf("%s (graph_ref %s) Process -> %v", tc.id, c.GraphRef, called)
+		t.Logf("%s (graph_ref %s) Process -> %v", tc.id, member.GraphRef, called)
 	}
 
 	// AC #2, the other half: the generated name is internal. The MCP tools are
@@ -279,7 +276,7 @@ func TestContextCreateBuildsAWorktreeAndAGraphPerContext(t *testing.T) {
 		t.Fatalf("context list: %v", err)
 	}
 	for _, id := range []string{"app-v1", "app-v2"} {
-		if ref := contextRecord(t, data, id).GraphRef; strings.Contains(out, ref) {
+		if ref := only(t, contextRecord(t, data, id)).GraphRef; strings.Contains(out, ref) {
 			t.Errorf("context list printed the graph reference %q:\n%s", ref, out)
 		}
 	}
@@ -290,7 +287,8 @@ func TestContextCreateBuildsAWorktreeAndAGraphPerContext(t *testing.T) {
 func TestContextRemoveTakesOnlyItsOwnWorktreeAndGraph(t *testing.T) {
 	data, _, second := managedVersions(t, "drop", "keep")
 	clone := filepath.Join(data, "repos", "demo")
-	dropped, kept := contextRecord(t, data, "drop"), contextRecord(t, data, "keep")
+	dropped := only(t, contextRecord(t, data, "drop"))
+	kept := only(t, contextRecord(t, data, "keep"))
 
 	if _, err := contextRun(t, data, "remove", "drop"); err != nil {
 		t.Fatalf("context remove: %v", err)
@@ -306,7 +304,7 @@ func TestContextRemoveTakesOnlyItsOwnWorktreeAndGraph(t *testing.T) {
 	if listed := gitOut(t, "-C", clone, "worktree", "list"); strings.Contains(listed, worktree) {
 		t.Errorf("git worktree list =\n%s\nwant the removed worktree pruned", listed)
 	}
-	if err := graphExists(t.Context(), dropped); err == nil {
+	if err := graphExists(t.Context(), "drop", dropped); err == nil {
 		t.Errorf("CBM still holds the graph %q of the removed context", dropped.GraphRef)
 	}
 
@@ -315,10 +313,10 @@ func TestContextRemoveTakesOnlyItsOwnWorktreeAndGraph(t *testing.T) {
 	if head := gitOut(t, "-C", filepath.Join(data, "worktrees", "demo", "keep"), "rev-parse", "HEAD"); head != second {
 		t.Errorf("keep worktree HEAD = %q after removing drop, want %q", head, second)
 	}
-	if err := graphExists(t.Context(), kept); err != nil {
+	if err := graphExists(t.Context(), "keep", kept); err != nil {
 		t.Fatalf("removing drop took the graph of keep: %v", err)
 	}
-	if called := tracedCallees(t, graphProvider(t), kept); !slices.Contains(called, newHandler) {
+	if called := tracedCallees(t, graphProvider(t), "keep", kept); !slices.Contains(called, newHandler) {
 		t.Errorf("keep: Process calls %v after removing drop, want it to include %s", called, newHandler)
 	}
 
@@ -357,15 +355,15 @@ func TestContextVerifyChecksTheArtifacts(t *testing.T) {
 	if got := codeFor(t, err); got != vacerr.SourceMismatch {
 		t.Errorf("verify of a worktree on another commit: code = %q, want %q", got, vacerr.SourceMismatch)
 	}
-	if c := contextRecord(t, data, "app-v1"); c.Revision != first {
-		t.Errorf("a failed verify repinned the context to %q, want %q", c.Revision, first)
+	if got := only(t, contextRecord(t, data, "app-v1")).Revision; got != first {
+		t.Errorf("a failed verify repinned the context to %q, want %q", got, first)
 	}
 
 	// A graph deleted out from under a context is GRAPH_PROVIDER_UNAVAILABLE
 	// rather than a context that reports itself as fine.
-	kept := contextRecord(t, data, "app-v2")
-	if out, err := exec.Command(managed.CBMCommand, "cli", "delete_project", "--project", kept.GraphRef).CombinedOutput(); err != nil {
-		t.Fatalf("delete_project %s: %v\n%s", kept.GraphRef, err, out)
+	survivor := only(t, contextRecord(t, data, "app-v2"))
+	if out, err := exec.Command(managed.CBMCommand, "cli", "delete_project", "--project", survivor.GraphRef).CombinedOutput(); err != nil {
+		t.Fatalf("delete_project %s: %v\n%s", survivor.GraphRef, err, out)
 	}
 	_, err = contextRun(t, data, "verify", "app-v2")
 	if got := codeFor(t, err); got != vacerr.GraphProviderUnavailable {
@@ -417,14 +415,14 @@ func TestConcurrentContextCreatesIndexIndependentGraphs(t *testing.T) {
 	// the other repository's symbols.
 	p := graphProvider(t)
 	for _, name := range repositories {
-		c := contextRecord(t, data, name+"-ctx")
-		if err := graphExists(t.Context(), c); err != nil {
+		member := only(t, contextRecord(t, data, name+"-ctx"))
+		if err := graphExists(t.Context(), name+"-ctx", member); err != nil {
 			t.Fatalf("%s: concurrent indexing left no graph: %v", name, err)
 		}
-		called := tracedCallees(t, p, c)
+		called := tracedCallees(t, p, name+"-ctx", member)
 		if !slices.Contains(called, newHandler) {
 			t.Errorf("%s: Process calls %v, want it to include %s", name, called, newHandler)
 		}
-		t.Logf("%s (graph_ref %s) Process -> %v", name, c.GraphRef, called)
+		t.Logf("%s (graph_ref %s) Process -> %v", name, member.GraphRef, called)
 	}
 }

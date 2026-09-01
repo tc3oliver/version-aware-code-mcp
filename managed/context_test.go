@@ -91,7 +91,7 @@ func TestContextStateMachineOnlyGoesForwards(t *testing.T) {
 // transition changes nothing.
 func TestAdvanceWritesEveryStateItPassesThrough(t *testing.T) {
 	s := openStore(t, t.TempDir())
-	record := store.Context{ID: "app", Repository: "demo", State: ContextCreating}
+	record := store.Context{ID: "app", Members: oneMember("demo"), State: ContextCreating}
 	if err := s.PutContext(record); err != nil {
 		t.Fatalf("PutContext: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestAdvanceWritesEveryStateItPassesThrough(t *testing.T) {
 	if record.State != ContextReady {
 		t.Errorf("in-memory state = %q after a refused transition, want %q", record.State, ContextReady)
 	}
-	if after := contextRecord(t, s.Root(), "app"); after != before {
+	if after := contextRecord(t, s.Root(), "app"); !sameContext(after, before) {
 		t.Errorf("a refused transition rewrote the record:\n before %+v\n  after %+v", before, after)
 	}
 }
@@ -143,7 +143,7 @@ func TestFailRecordsWhereAContextStopped(t *testing.T) {
 		ContextIndexingGraph,
 		ContextVerifying,
 	} {
-		record := store.Context{ID: "app", Repository: "demo", State: state}
+		record := store.Context{ID: "app", Members: oneMember("demo"), State: state}
 		if err := s.PutContext(record); err != nil {
 			t.Fatalf("PutContext: %v", err)
 		}
@@ -175,7 +175,7 @@ func TestReadyContextIsTheOnlyWayIn(t *testing.T) {
 		ContextFailed,
 		ContextRemoving,
 	} {
-		if err := s.PutContext(store.Context{ID: strings.ToLower(state), Repository: "demo", State: state}); err != nil {
+		if err := s.PutContext(store.Context{ID: strings.ToLower(state), Members: oneMember("demo"), State: state}); err != nil {
 			t.Fatalf("PutContext(%s): %v", state, err)
 		}
 	}
@@ -215,36 +215,150 @@ func TestReadyContextIsTheOnlyWayIn(t *testing.T) {
 	}
 }
 
-// TestVerifyIdentityRefusesARecordThatNamesAnotherContext is the last of the
-// six checks: the four fields the query plane resolves a context into are the
-// ones this context's own name and revision generate, so a record cannot point
-// at another revision's search ref or graph.
-func TestVerifyIdentityRefusesARecordThatNamesAnotherContext(t *testing.T) {
-	const revision = "0123456789abcdef0123456789abcdef01234567"
-	sound := store.Context{
-		ID:         "app",
-		Repository: "demo",
-		Branch:     searchRef("app", revision),
-		Revision:   revision,
-		GraphRef:   graphRef("demo", "app", revision),
-		State:      ContextReady,
+const (
+	// The revision the records below pin, and a second one that is not it.
+	testRevision  = "0123456789abcdef0123456789abcdef01234567"
+	otherRevision = "89abcdef0123456789abcdef0123456789abcdef"
+)
+
+// created returns the record a create of these members would have written: the
+// generated names filled in from the context they are members of, exactly as
+// Create fills them.
+func created(id string, members ...store.ContextMember) store.Context {
+	c := store.Context{ID: id, Members: members, State: ContextReady}
+	for i := range c.Members {
+		c.Members[i].Branch = searchRef(c, c.Members[i])
+		c.Members[i].GraphRef = graphRef(c, c.Members[i])
 	}
-	if err := verifyIdentity(sound); err != nil {
-		t.Fatalf("verifyIdentity of a record as created: %v", err)
+	return c
+}
+
+// TestVerifyIdentityRefusesARecordThatNamesAnotherContext is the last of the
+// six checks, asked of every member: the four fields the query plane resolves a
+// member into are the ones this context's own name and that member's revision
+// generate, so no member can point at another revision's search ref or graph.
+//
+// The two-member cases are why the check is per member and not per record: a
+// context over two repositories has two such quadruples, and a single-valued
+// check could not say which clone the ref it recomputed was supposed to be in.
+// Each of them breaks one member and leaves the other sound, so what is caught
+// is that member and not the context being broken in general.
+func TestVerifyIdentityRefusesARecordThatNamesAnotherContext(t *testing.T) {
+	one := created("app", store.ContextMember{Repository: "demo", Revision: testRevision})
+	two := created("stack",
+		store.ContextMember{Repository: "api", Revision: testRevision},
+		store.ContextMember{Repository: "web", Revision: otherRevision},
+	)
+	for _, sound := range []store.Context{one, two} {
+		if err := verifyIdentity(sound); err != nil {
+			t.Fatalf("verifyIdentity of %s as created: %v", sound.ID, err)
+		}
 	}
 
-	other := "89abcdef0123456789abcdef0123456789abcdef"
-	for name, broken := range map[string]func(c *store.Context){
-		"a revision that is not a full SHA": func(c *store.Context) { c.Revision = revision[:shortSHA] },
-		"another revision's search ref":     func(c *store.Context) { c.Branch = searchRef("app", other) },
-		"another context's search ref":      func(c *store.Context) { c.Branch = searchRef("other", revision) },
-		"another revision's graph":          func(c *store.Context) { c.GraphRef = graphRef("demo", "app", other) },
-		"another repository's graph":        func(c *store.Context) { c.GraphRef = graphRef("other", "app", revision) },
+	for name, broken := range map[string]struct {
+		record store.Context
+		damage func(c *store.Context)
+	}{
+		"a revision that is not a full SHA": {one, func(c *store.Context) { c.Members[0].Revision = testRevision[:shortSHA] }},
+		"another revision's search ref": {one, func(c *store.Context) {
+			c.Members[0].Branch = searchRef(*c, store.ContextMember{Repository: "demo", Revision: otherRevision})
+		}},
+		"another context's search ref": {one, func(c *store.Context) {
+			c.Members[0].Branch = searchRef(store.Context{ID: "other", Members: c.Members}, c.Members[0])
+		}},
+		"another revision's graph": {one, func(c *store.Context) {
+			c.Members[0].GraphRef = graphRef(*c, store.ContextMember{Repository: "demo", Revision: otherRevision})
+		}},
+		"another repository's graph": {one, func(c *store.Context) {
+			c.Members[0].GraphRef = graphRef(*c, store.ContextMember{Repository: "other", Revision: testRevision})
+		}},
+		// The second member of a two-repository context is checked as closely as
+		// the first: a record whose first member is impeccable is not a record
+		// that verifies.
+		"the second member's search ref": {two, func(c *store.Context) {
+			c.Members[1].Branch = searchRef(*c, store.ContextMember{Repository: "web", Revision: testRevision})
+		}},
+		"the second member's graph": {two, func(c *store.Context) {
+			c.Members[1].GraphRef = graphRef(*c, store.ContextMember{Repository: "api", Revision: otherRevision})
+		}},
+		// A member wearing the name the other member's repository generates is
+		// the two of them pointing at one source, which is what the repository in
+		// a multi-member name exists to make impossible.
+		"one member carrying the other's search ref": {two, func(c *store.Context) {
+			c.Members[0].Branch = c.Members[1].Branch
+		}},
+		// And the single-repository spelling inside a context that has two: the
+		// name a v0.4.0 record would carry is the wrong one here, because two
+		// members would generate it identically.
+		"a member named as if it were the only one": {two, func(c *store.Context) {
+			c.Members[0].Branch = "vacmcp/" + c.ID + "-" + c.Members[0].Revision[:shortSHA]
+		}},
 	} {
-		c := sound
-		broken(&c)
+		c := store.Context{ID: broken.record.ID, State: broken.record.State, Members: slices.Clone(broken.record.Members)}
+		broken.damage(&c)
 		if got := codeFor(t, verifyIdentity(c)); got != vacerr.SourceMismatch {
 			t.Errorf("%s: code = %q, want %q", name, got, vacerr.SourceMismatch)
 		}
+	}
+}
+
+// TestGeneratedNamesTellEveryMemberApart is what a context's members may never
+// share: two of them at one revision would otherwise be one search ref, one
+// graph and one checkout, and removing either would take the other's source
+// with it.
+//
+// The pair pinned at the same revision is the case that matters. Nothing else
+// distinguishes those two members — same context, same commit — so if the
+// repository were not in the generated names, every name below would be equal.
+func TestGeneratedNamesTellEveryMemberApart(t *testing.T) {
+	s := openStore(t, t.TempDir())
+	stack := created("stack",
+		store.ContextMember{Repository: "api", Revision: testRevision},
+		store.ContextMember{Repository: "web", Revision: testRevision},
+	)
+	// Another context of the same repositories at the same revision, so what
+	// keeps the names apart is asked across contexts as well as within one.
+	other := created("other",
+		store.ContextMember{Repository: "api", Revision: testRevision},
+		store.ContextMember{Repository: "web", Revision: testRevision},
+	)
+
+	seen := map[string]string{}
+	for _, c := range []store.Context{stack, other} {
+		for _, m := range c.Members {
+			worktree, err := s.WorktreeDir(m.Repository, c.ID)
+			if err != nil {
+				t.Fatalf("WorktreeDir(%s, %s): %v", m.Repository, c.ID, err)
+			}
+			for kind, name := range map[string]string{"search ref": m.Branch, "graph": m.GraphRef, "worktree": worktree} {
+				where := c.ID + " " + m.Repository + " " + kind
+				if first, taken := seen[name]; taken {
+					t.Errorf("%s and %s are both %q", first, where, name)
+				}
+				seen[name] = where
+			}
+		}
+	}
+}
+
+// TestASingleMemberKeepsTheNameV040Generated is the other half of the naming
+// rule, and the reason it is a rule and not a formula: a context over one
+// repository has to keep generating exactly the name v0.4.0 wrote into its
+// records, or verifyIdentity would fail closed on every context an older
+// installation created — over artifacts that are perfectly good.
+func TestASingleMemberKeepsTheNameV040Generated(t *testing.T) {
+	// The two names v0.4.0 generated, spelled out rather than computed: a
+	// formula compared against itself would agree however it changed.
+	const (
+		branch = "vacmcp/app-0123456789ab"
+		graph  = "vacmcp-demo-app-0123456789ab"
+	)
+	v040 := store.Context{
+		ID:      "app",
+		State:   ContextReady,
+		Members: []store.ContextMember{{Repository: "demo", Branch: branch, Revision: testRevision, GraphRef: graph}},
+	}
+	if err := verifyIdentity(v040); err != nil {
+		t.Errorf("verifyIdentity of a record v0.4.0 created: %v", err)
 	}
 }

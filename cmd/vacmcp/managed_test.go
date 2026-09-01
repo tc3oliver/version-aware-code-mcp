@@ -34,12 +34,14 @@ func TestManagedConfigServesTheReadyRecordsAndNoRemoteURL(t *testing.T) {
 	}
 	for id, state := range map[string]string{"app-ready": managed.ContextReady, "app-failed": managed.ContextFailed, "app-building": managed.ContextIndexingGraph} {
 		if err := s.PutContext(store.Context{
-			ID:         id,
-			Repository: "demo",
-			Branch:     "vacmcp/" + id + "-" + revision[:12],
-			Revision:   revision,
-			GraphRef:   "vacmcp-demo-" + id + "-" + revision[:12],
-			State:      state,
+			ID: id,
+			Members: []store.ContextMember{{
+				Repository: "demo",
+				Branch:     "vacmcp/" + id + "-" + revision[:12],
+				Revision:   revision,
+				GraphRef:   "vacmcp-demo-" + id + "-" + revision[:12],
+			}},
+			State: state,
 		}); err != nil {
 			t.Fatalf("PutContext(%s): %v", id, err)
 		}
@@ -85,12 +87,141 @@ func TestManagedConfigServesTheReadyRecordsAndNoRemoteURL(t *testing.T) {
 	}
 }
 
+// TestManagedConfigWritesTheSpellingTheMemberCountDecides is the generated
+// file's shape, which is the record's shape all over again: a context over one
+// repository is written inline, exactly as every configuration before contexts
+// could name several, and only a context over two becomes a members list.
+//
+// That the file is loadable is not a separate check bolted on: managedConfig
+// returns what config.Load makes of the file it wrote, so a spelling Load
+// refused would fail this test by never returning a configuration at all.
+func TestManagedConfigWritesTheSpellingTheMemberCountDecides(t *testing.T) {
+	const apiSHA = "0123456789abcdef0123456789abcdef01234567"
+	const webSHA = "89abcdef0123456789abcdef0123456789abcdef"
+
+	s := openStore(t, t.TempDir())
+	for _, name := range []string{"api", "web"} {
+		if err := s.PutRepository(store.Repository{Name: name, State: managed.RepositoryReady}); err != nil {
+			t.Fatalf("PutRepository(%s): %v", name, err)
+		}
+	}
+	single := store.Context{
+		ID: "api-v1",
+		Members: []store.ContextMember{
+			{Repository: "api", Branch: "vacmcp/api-v1-" + apiSHA[:12], Revision: apiSHA, GraphRef: "vacmcp-api-api-v1-" + apiSHA[:12]},
+		},
+		State: managed.ContextReady,
+	}
+	stack := store.Context{
+		ID: "stack",
+		Members: []store.ContextMember{
+			{Repository: "api", Branch: "vacmcp/api-stack-" + apiSHA[:12], Revision: apiSHA, GraphRef: "vacmcp-api-stack-" + apiSHA[:12]},
+			{Repository: "web", Branch: "vacmcp/web-stack-" + webSHA[:12], Revision: webSHA, GraphRef: "vacmcp-web-stack-" + webSHA[:12]},
+		},
+		State: managed.ContextReady,
+	}
+	for _, c := range []store.Context{single, stack} {
+		if err := s.PutContext(c); err != nil {
+			t.Fatalf("PutContext(%s): %v", c.ID, err)
+		}
+	}
+
+	cfg, err := managedConfig(s, defaultZoektURL, managed.CBMCommand)
+	if err != nil {
+		t.Fatalf("managedConfig: %v", err)
+	}
+
+	// Both contexts came back through config.Load, with every member's own
+	// repository, branch, revision and graph.
+	for _, want := range []store.Context{single, stack} {
+		workspace, served := cfg.Contexts[want.ID]
+		if !served {
+			t.Errorf("the generated configuration does not carry %s", want.ID)
+			continue
+		}
+		if len(workspace.Members) != len(want.Members) {
+			t.Errorf("%s has %d members, want %d: %+v", want.ID, len(workspace.Members), len(want.Members), workspace)
+			continue
+		}
+		for i, member := range workspace.Members {
+			record := want.Members[i]
+			if member.ID != want.ID || member.Repository != record.Repository || member.Branch != record.Branch ||
+				member.Revision != record.Revision || member.GraphRef != record.GraphRef {
+				t.Errorf("%s member %d = %+v, want the record's %+v", want.ID, i, member, record)
+			}
+		}
+	}
+	// Every member's repository is declared, or config.Load would have refused
+	// the file rather than serving a context pointing at nothing.
+	for _, name := range []string{"api", "web"} {
+		clone, err := s.RepositoryDir(name)
+		if err != nil {
+			t.Fatalf("RepositoryDir(%s): %v", name, err)
+		}
+		if got := cfg.Repositories[name].Path; got != clone {
+			t.Errorf("repository %s path = %q, want the local clone %q", name, got, clone)
+		}
+	}
+
+	// And the file itself is written the two ways, which is what keeps a
+	// managed installation of single-repository contexts producing the
+	// configuration it always did.
+	body, err := os.ReadFile(filepath.Join(s.RuntimeDir(), generatedConfig))
+	if err != nil {
+		t.Fatalf("reading the generated configuration: %v", err)
+	}
+	generated := string(body)
+	if !strings.Contains(generated, "api-v1:\n        repository: api") {
+		t.Errorf("the one-repository context is not written inline:\n%s", generated)
+	}
+	if !strings.Contains(generated, "stack:\n        members:") {
+		t.Errorf("the two-repository context is not written as a members list:\n%s", generated)
+	}
+	if strings.Count(generated, "members:") != 1 {
+		t.Errorf("the generated configuration writes %d members lists, want the one the two-repository context needs:\n%s", strings.Count(generated, "members:"), generated)
+	}
+	t.Logf("generated configuration:\n%s", generated)
+}
+
+// TestReadyContextsServesWholeContextsOnly is what the query plane reads,
+// asked of a data directory whose contexts name several repositories: READY is
+// the whole of it, and a context that failed is out of it entirely rather than
+// in it with the members that worked.
+func TestReadyContextsServesWholeContextsOnly(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef01234567"
+
+	s := openStore(t, t.TempDir())
+	for id, state := range map[string]string{"stack-ready": managed.ContextReady, "stack-failed": managed.ContextFailed} {
+		if err := s.PutContext(store.Context{
+			ID: id,
+			Members: []store.ContextMember{
+				{Repository: "api", Branch: "vacmcp/api-" + id + "-" + revision[:12], Revision: revision, GraphRef: "vacmcp-api-" + id + "-" + revision[:12]},
+				{Repository: "web", Branch: "vacmcp/web-" + id + "-" + revision[:12], Revision: revision, GraphRef: "vacmcp-web-" + id + "-" + revision[:12]},
+			},
+			State: state,
+		}); err != nil {
+			t.Fatalf("PutContext(%s): %v", id, err)
+		}
+	}
+
+	ready, err := readyContexts(s)
+	if err != nil {
+		t.Fatalf("readyContexts: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != "stack-ready" {
+		t.Fatalf("the query plane reads %+v, want only the READY context", ready)
+	}
+	if len(ready[0].Members) != 2 {
+		t.Errorf("the READY context is served with %d members, want both", len(ready[0].Members))
+	}
+}
+
 // TestManagedConfigOfADataDirectoryWithNothingReady is the empty case: a data
 // directory whose contexts are all still being built, or all failed, is the
 // server `serve` without a --config gives — no contexts, and no error either.
 func TestManagedConfigOfADataDirectoryWithNothingReady(t *testing.T) {
 	s := openStore(t, t.TempDir())
-	if err := s.PutContext(store.Context{ID: "app", Repository: "demo", State: managed.ContextFailed}); err != nil {
+	if err := s.PutContext(store.Context{ID: "app", Members: []store.ContextMember{{Repository: "demo"}}, State: managed.ContextFailed}); err != nil {
 		t.Fatalf("PutContext: %v", err)
 	}
 
@@ -124,12 +255,14 @@ func TestDoctorManagedReportsTheRepositoriesAndTheContexts(t *testing.T) {
 	s := openStore(t, data)
 	for id, state := range map[string]string{"app-ready": managed.ContextReady, "app-failed": managed.ContextFailed, "app-building": managed.ContextIndexingGraph} {
 		if err := s.PutContext(store.Context{
-			ID:         id,
-			Repository: "demo",
-			Branch:     "vacmcp/" + id + "-" + revision[:12],
-			Revision:   revision,
-			GraphRef:   "vacmcp-demo-" + id + "-" + revision[:12],
-			State:      state,
+			ID: id,
+			Members: []store.ContextMember{{
+				Repository: "demo",
+				Branch:     "vacmcp/" + id + "-" + revision[:12],
+				Revision:   revision,
+				GraphRef:   "vacmcp-demo-" + id + "-" + revision[:12],
+			}},
+			State: state,
 		}); err != nil {
 			t.Fatalf("PutContext(%s): %v", id, err)
 		}

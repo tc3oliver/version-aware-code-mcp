@@ -99,22 +99,127 @@ type Repository struct {
 
 // Context is the record of one version context managed in this data directory.
 //
-// Revision is the full commit SHA the context is pinned to, and it is immutable
-// once resolved: another version of the same repository is another context, not
-// an edit of this one. Branch is the ref inside the clone whose search index
-// serves this context, and GraphRef is the graph project backing it; both are
-// generated, never typed by a user. The fields that a context only has once its
-// lifecycle has got that far — Revision, Branch, GraphRef — are empty until
-// then, which is why State, not the presence of a field, decides whether a
-// context may be served.
+// A context is one or more repositories, each pinned to its own revision, and
+// one State for all of them: a context is built or it is not, and there is no
+// state in which some of its members may be answered from. Members is therefore
+// a list at every length, exactly as [github.com/tc3oliver/version-aware-code-mcp/vacctx.Workspace]
+// is — one member and several are the same value, so no code above here has a
+// single-repository path to keep correct beside a multi-repository one.
 type Context struct {
-	ID         string    `json:"id"`
-	Repository string    `json:"repository"`
-	Branch     string    `json:"branch,omitempty"`
-	Revision   string    `json:"revision,omitempty"`
-	GraphRef   string    `json:"graph_ref,omitempty"`
-	State      string    `json:"state"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID        string
+	Members   []ContextMember
+	State     string
+	UpdatedAt time.Time
+}
+
+// ContextMember is one repository of a context, pinned to one revision of it.
+//
+// Revision is the full commit SHA, and it is immutable once resolved: another
+// version of the same repository is another context, not an edit of this one.
+// Branch is the ref inside that repository's clone whose search index serves
+// this member, and GraphRef is the graph project backing it; both are
+// generated, never typed by a user. The three are empty until the context's
+// lifecycle has got that far, which is why State, not the presence of a field,
+// decides whether a context may be served.
+type ContextMember struct {
+	Repository string `json:"repository"`
+	Branch     string `json:"branch,omitempty"`
+	Revision   string `json:"revision,omitempty"`
+	GraphRef   string `json:"graph_ref,omitempty"`
+}
+
+// contextRecord is a context as it is written down, which is not quite the
+// context as used: there are two spellings and one meaning, the same way the
+// configuration file has two.
+//
+// A context over a single repository writes that repository's fields directly
+// under the record — the only spelling v0.4.0 ever wrote, and still what almost
+// every record says — and a context over several writes them as members
+// instead. That is what lets a data directory built by v0.4.0 be read and
+// served here with no conversion of any kind: a record with one member is
+// byte-for-byte the record v0.4.0 wrote.
+//
+// The repository field is a JSON string in the first spelling and the empty
+// JSON array in the second, and that difference is deliberate rather than
+// decorative. A v0.4.0 binary decodes this field into a string; handed a
+// multi-member record it would otherwise read a context with no repository at
+// all, keep it, and hand it to code that decides on repository equality —
+// `repo remove` would then find no context depending on a clone two members are
+// pinned in and delete it. Making the field an array means such a binary fails
+// on the type instead, loudly, before the record is anything to it. The array
+// is always empty, so it carries nothing that could disagree with members.
+type contextRecord struct {
+	ID string `json:"id"`
+	// Raw, because its type is what says which spelling this is.
+	Repository json.RawMessage `json:"repository"`
+	Branch     string          `json:"branch,omitempty"`
+	Revision   string          `json:"revision,omitempty"`
+	GraphRef   string          `json:"graph_ref,omitempty"`
+	Members    []ContextMember `json:"members,omitempty"`
+	State      string          `json:"state"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+}
+
+// noRepository is what the repository field of a multi-member record holds: not
+// one repository, and nothing an older decoder can read as one.
+const noRepository = "[]"
+
+// MarshalJSON writes the spelling this context's member count decides.
+func (c Context) MarshalJSON() ([]byte, error) {
+	record := contextRecord{ID: c.ID, State: c.State, UpdatedAt: c.UpdatedAt}
+	if len(c.Members) == 1 {
+		m := c.Members[0]
+		name, err := json.Marshal(m.Repository)
+		if err != nil {
+			return nil, fmt.Errorf("store: cannot encode the repository of context %q: %w", c.ID, err)
+		}
+		record.Repository = name
+		record.Branch, record.Revision, record.GraphRef = m.Branch, m.Revision, m.GraphRef
+	} else {
+		record.Repository = json.RawMessage(noRepository)
+		record.Members = c.Members
+	}
+	return json.Marshal(record)
+}
+
+// UnmarshalJSON reads either spelling into the one member list everything above
+// works on.
+//
+// A record that uses both at once is refused rather than merged: it is not
+// something any version of vacmcp writes, so it was edited by hand or written
+// by something that is not vacmcp, and guessing which half to believe is
+// guessing which revision to answer from.
+func (c *Context) UnmarshalJSON(data []byte) error {
+	var record contextRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+	c.ID, c.State, c.UpdatedAt = record.ID, record.State, record.UpdatedAt
+
+	if len(record.Members) > 0 {
+		var none []string
+		if err := json.Unmarshal(record.Repository, &none); err != nil || len(none) != 0 ||
+			record.Branch != "" || record.Revision != "" || record.GraphRef != "" {
+			return fmt.Errorf("store: context %q is written as one repository and as a members list at once", record.ID)
+		}
+		c.Members = record.Members
+		return nil
+	}
+
+	if len(record.Repository) == 0 {
+		return fmt.Errorf("store: context %q names no repository", record.ID)
+	}
+	var repository string
+	if err := json.Unmarshal(record.Repository, &repository); err != nil {
+		return fmt.Errorf("store: context %q: %w", record.ID, err)
+	}
+	c.Members = []ContextMember{{
+		Repository: repository,
+		Branch:     record.Branch,
+		Revision:   record.Revision,
+		GraphRef:   record.GraphRef,
+	}}
+	return nil
 }
 
 // Store is one data directory.
@@ -267,16 +372,29 @@ func (s *Store) DeleteRepository(name string) error {
 }
 
 // PutContext writes c, replacing any record filed under the same ID. Both the
-// context ID and the repository it names are validated: the repository name is
-// a path element everywhere else in the layout, so a record may not carry one
-// that could not be written down safely.
+// context ID and the repository every member names are validated: a repository
+// name is a path element everywhere else in the layout, so a record may not
+// carry one that could not be written down safely.
+//
+// A context with no member is refused for the same reason the configuration
+// refuses one: it is not a narrower scope, it is no scope, and every artifact
+// this record would own hangs off a repository it does not name.
 func (s *Store) PutContext(c Context) error {
 	path, err := s.recordPath(contextsDir, "context", c.ID)
 	if err != nil {
 		return err
 	}
-	if err := validateName("repository", c.Repository); err != nil {
-		return err
+	if len(c.Members) == 0 {
+		return vacerr.New(
+			vacerr.InvalidArgument,
+			fmt.Sprintf("store: context %q names no repository", c.ID),
+			map[string]any{"context": c.ID},
+		)
+	}
+	for _, m := range c.Members {
+		if err := validateName("repository", m.Repository); err != nil {
+			return err
+		}
 	}
 	c.UpdatedAt = time.Now().UTC()
 	return writeRecord(path, c)

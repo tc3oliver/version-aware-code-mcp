@@ -190,29 +190,35 @@ func preparedFingerprint(data string) (string, error) {
 
 	var state []string
 	graphs := map[string]bool{}
+	// Member by member: a context owns a checkout, a search ref and a graph per
+	// repository it names, so a fingerprint over the first of them would miss
+	// exactly what a test operating on a later one changed.
 	for _, c := range contexts {
-		state = append(state, fmt.Sprintf("context %s %s %s %s %s %s", c.ID, c.Repository, c.Revision, c.State, c.Branch, c.GraphRef))
-		graphs[c.GraphRef] = false
+		state = append(state, fmt.Sprintf("context %s %s", c.ID, c.State))
+		for _, m := range c.Members {
+			state = append(state, fmt.Sprintf("member %s %s %s %s %s", c.ID, m.Repository, m.Revision, m.Branch, m.GraphRef))
+			graphs[m.GraphRef] = false
 
-		worktree, err := s.WorktreeDir(c.Repository, c.ID)
-		if err != nil {
-			return "", fmt.Errorf("WorktreeDir(%s): %w", c.ID, err)
-		}
-		head, err := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
-		if err != nil {
-			return "", fmt.Errorf("git rev-parse HEAD in %s: %w", worktree, err)
-		}
-		state = append(state, fmt.Sprintf("worktree %s %s", c.ID, strings.TrimSpace(string(head))))
+			worktree, err := s.WorktreeDir(m.Repository, c.ID)
+			if err != nil {
+				return "", fmt.Errorf("WorktreeDir(%s): %w", c.ID, err)
+			}
+			head, err := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
+			if err != nil {
+				return "", fmt.Errorf("git rev-parse HEAD in %s: %w", worktree, err)
+			}
+			state = append(state, fmt.Sprintf("worktree %s %s %s", c.ID, m.Repository, strings.TrimSpace(string(head))))
 
-		clone, err := s.RepositoryDir(c.Repository)
-		if err != nil {
-			return "", fmt.Errorf("RepositoryDir(%s): %w", c.Repository, err)
+			clone, err := s.RepositoryDir(m.Repository)
+			if err != nil {
+				return "", fmt.Errorf("RepositoryDir(%s): %w", m.Repository, err)
+			}
+			refs, err := exec.Command("git", "-C", clone, "for-each-ref", "--format=%(objectname) %(refname)").Output()
+			if err != nil {
+				return "", fmt.Errorf("git for-each-ref in %s: %w", clone, err)
+			}
+			state = append(state, "refs "+m.Repository+" "+strings.Join(strings.Fields(string(refs)), " "))
 		}
-		refs, err := exec.Command("git", "-C", clone, "for-each-ref", "--format=%(objectname) %(refname)").Output()
-		if err != nil {
-			return "", fmt.Errorf("git for-each-ref in %s: %w", clone, err)
-		}
-		state = append(state, "refs "+c.Repository+" "+strings.Join(strings.Fields(string(refs)), " "))
 	}
 
 	// The shards themselves, so an index rebuilt behind a test that only read
