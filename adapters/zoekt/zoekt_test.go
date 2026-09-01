@@ -82,6 +82,54 @@ func TestSearchDropsMatchesOutsideTheContext(t *testing.T) {
 	}
 }
 
+// TestSearchDropsAnotherWorkspaceMembersMatchEvenThoughItIsNotAStranger pins
+// TASK-86 AC #2 at the line that decides it. A multi-member workspace's engine
+// issues one query per member, each carrying that member's own
+// [vacctx.CodeContext] ([github.com/tc3oliver/version-aware-code-mcp/engine.Engine.SearchCode]),
+// and this adapter never sees the workspace a member belongs to — Search only
+// ever compares a returned match's repository and branch against the one
+// member it was asked about.
+//
+// The regression this pins is decision-11 §3's named risk: if that comparison
+// were ever loosened from "is this member's own repository" to "is this a
+// repository of the workspace this member belongs to", a match that reached
+// the wrong member's query would stop being dropped and would be reported —
+// stamped with the *asking* member's own repository and revision by the
+// engine, which trusts this adapter completely. second-demo-repo is not a
+// stranger to demo-multi the way "someone-elses-repo" above is: it really is a
+// member of the same workspace, just not the one this query was scoped to,
+// which is exactly what would make the mistake easy to introduce and hard to
+// notice.
+func TestSearchDropsAnotherWorkspaceMembersMatchEvenThoughItIsNotAStranger(t *testing.T) {
+	const body = `{"Result":{"Files":[
+		{"FileName":"handler.go","Repository":"versioned-demo-repo","Branches":["release/v1"],
+		 "LineMatches":[{"Line":"ZnVuYyBMZWdhY3lIYW5kbGVyKCkgew==","LineNumber":4,"FileName":false}]},
+		{"FileName":"handler.go","Repository":"second-demo-repo","Branches":["main"],
+		 "LineMatches":[{"Line":"ZnVuYyBMZWdhY3lIYW5kbGVyKCkgew==","LineNumber":6,"FileName":false}]}]}}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+
+	p := zoektadapter.New(&config.Config{Providers: config.Providers{Zoekt: config.Zoekt{URL: server.URL}}})
+	// This query was scoped to versioned-demo-repo's release/v1: that is the
+	// member it was asked about, and the only one its answer may cite.
+	repo1 := vacctx.CodeContext{ID: "demo-multi", Repository: "versioned-demo-repo", Branch: "release/v1", Revision: "HEAD", GraphRef: "vacmcp-demo-v1"}
+
+	got, err := p.Search(t.Context(), repo1, provider.SearchQuery{Query: "LegacyHandler"})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	// Only the match Zoekt reports as versioned-demo-repo's own survives. The
+	// second-demo-repo entry is a real member of the same workspace, but not of
+	// this query's own repository, and that is what has to keep it out.
+	want := []provider.SearchResult{{Path: "handler.go", Line: 4, Snippet: "func LegacyHandler() {"}}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("Search() = %+v, want %+v: a fellow workspace member's match must not be attributed to this one", got, want)
+	}
+}
+
 // TestSearchProviderUnavailable is AC #4. The condition is real rather than
 // simulated: the address is one nobody is listening on, so the adapter meets
 // the same refused connection an operator does when Zoekt is not running.

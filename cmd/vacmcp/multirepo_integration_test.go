@@ -703,3 +703,84 @@ func TestAV040DataDirectoryIsServedWithoutConversion(t *testing.T) {
 		t.Errorf("serving rewrote the record:\n before %+v\n  after %+v", before, after)
 	}
 }
+
+// TestServeManagedRefusesEveryToolForANonReadyMultiMemberContext is TASK-86
+// AC #10: a multi-member context that never reached READY — here because one
+// member's graph could not be built, which is enough to fail the whole
+// context rather than only that member (decision-4/managed.go: one state for
+// the whole context, not one per member) — is CONTEXT_NOT_FOUND for every
+// tool that takes a context id, and answers no differently than an id this
+// data directory never had a record for at all.
+// TestServeManagedServesExactlyTheReadyContexts (managed_integration_test.go)
+// is the single-repository version of the same guarantee; decision-11 §1
+// gives a workspace of several repositories no second code path to resolve a
+// context id through, and this is what holds that to being true rather than
+// assumed.
+func TestServeManagedRefusesEveryToolForANonReadyMultiMemberContext(t *testing.T) {
+	data, _, _ := twoManagedRepositories(t)
+
+	t.Run("a context whose graph cannot be built", func(t *testing.T) {
+		t.Setenv("PATH", brokenCBM(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if _, err := contextRun(t, data, "create", "stack", "--repo", "api", "--ref", "main", "--repo", "web", "--ref", "main"); err == nil {
+			t.Fatal("context create over two repositories with a failing graph engine returned nil, want an error")
+		}
+	})
+	if got := contextRecord(t, data, "stack").State; got != managed.ContextFailed {
+		t.Fatalf("stack is in state %q, want %s", got, managed.ContextFailed)
+	}
+
+	session, _ := serveManaged(t, data, demorepo.StartZoekt(t, filepath.Join(data, "zoekt")))
+
+	// list_contexts is not one of the six calls below: it takes no context id
+	// to narrow, so its half of this guarantee is that a non-READY id is
+	// simply absent from what it lists — already the shape
+	// TestServeManagedServesExactlyTheReadyContexts checks AC #1 with, held
+	// here for a multi-member id.
+	if got := listedContexts(t, session); slices.Contains(got, "stack") {
+		t.Errorf("list_contexts = %v, want the non-READY multi-member context stack excluded", got)
+	}
+
+	calls := map[string]map[string]any{
+		"search_code": {"context": "stack", "query": "AnySymbol"},
+		"get_code":    {"context": "stack", "repository": "api", "path": "api.go", "start_line": 1, "end_line": 1},
+		"trace_calls": {"context": "stack", "repository": "api", "symbol": "AnySymbol", "direction": "callers", "depth": 1},
+		"compare_code": {
+			"from_context": "stack", "to_context": "stack", "repository": "api", "path": "api.go",
+		},
+		"compare_calls": {
+			"from_context": "stack", "to_context": "stack",
+			"repository": "api", "symbol": "AnySymbol", "direction": "callers", "depth": 1,
+		},
+	}
+	for tool, args := range calls {
+		t.Run(tool, func(t *testing.T) {
+			failed := callTool(t, session, tool, args)
+			if !failed.IsError {
+				t.Fatalf("%s(context=stack) over a non-READY multi-member context succeeded, want CONTEXT_NOT_FOUND: %s", tool, resultText(t, failed))
+			}
+			if code := errorCode(t, failed); code != vacerr.ContextNotFound {
+				t.Errorf("%s(context=stack) code = %q, want %q: %s", tool, code, vacerr.ContextNotFound, resultText(t, failed))
+			}
+
+			// The same call, over an id this data directory never had a
+			// record for at all: a FAILED context must not be told apart
+			// from one that was never managed.
+			never := map[string]any{}
+			for k, v := range args {
+				never[k] = v
+			}
+			for _, field := range []string{"context", "from_context", "to_context"} {
+				if _, ok := never[field]; ok {
+					never[field] = "never-managed-multi"
+				}
+			}
+			absent := callTool(t, session, tool, never)
+			if !absent.IsError {
+				t.Fatalf("%s(context=never-managed-multi) succeeded, want CONTEXT_NOT_FOUND: %s", tool, resultText(t, absent))
+			}
+			if code := errorCode(t, absent); code != vacerr.ContextNotFound {
+				t.Errorf("%s(context=never-managed-multi) code = %q, want %q: %s", tool, code, vacerr.ContextNotFound, resultText(t, absent))
+			}
+		})
+	}
+}
