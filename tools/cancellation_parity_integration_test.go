@@ -14,6 +14,7 @@ import (
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/engine"
+	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
@@ -219,6 +220,62 @@ func TestEngineAndMCPCancelIdentically(t *testing.T) {
 	}
 }
 
+// TestEngineAndMCPCancelSearchOverAMultiMemberWorkspaceIdentically is AC #3: a
+// search cancelled mid-flight over a workspace of several repositories leaves
+// the members it had not yet reached exactly that — never queried — rather
+// than merely abandoned once already in flight.
+//
+// engine.SearchCode queries demo-multi's two members one after another and
+// returns as soon as one errors (engine/engine.go), so a cancellation caught
+// on the first member's provider call never lets the loop start the second.
+// That is the scenario the task's own analysis names: a context of N members
+// turns one search_code call into up to N provider calls, so the count a
+// cancelled call reaches has to be named and checked rather than assumed to
+// always be the one call a single-repository cancellation makes. Naming it
+// with assertBlockedCalls's want parameter (AC #8) is what proves the second
+// member was never reached, instead of taking the sequential, early-returning
+// loop on trust.
+func TestEngineAndMCPCancelSearchOverAMultiMemberWorkspaceIdentically(t *testing.T) {
+	cfg := parityFixture(t)
+
+	call := func(ctx context.Context, eng *engine.Engine) error {
+		_, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: demorepo.MultiContext, Query: "LegacyHandler"})
+		return err
+	}
+	args := map[string]any{"context": demorepo.MultiContext, "query": "LegacyHandler"}
+
+	directBlocked := newCancelBlocker()
+	t.Cleanup(func() { close(directBlocked.release) })
+	eng := engine.New(resolver.New(cfg), directBlocked, directBlocked, directBlocked)
+	direct := cancelMidCall(t, "the engine's search_code", directBlocked, func(ctx context.Context) error {
+		return call(ctx, eng)
+	})
+
+	mcpBlocked := newCancelBlocker()
+	session := cancelSession(t, cfg, mcpBlocked)
+	viaMCP := cancelMidCall(t, "the search_code tool", mcpBlocked, func(ctx context.Context) error {
+		_, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "search_code", Arguments: args})
+		return err
+	})
+
+	want := cancelOutcome{Cancelled: true, Answered: false, Stopped: true}
+	if direct != want {
+		t.Errorf("cancelling the engine's search_code over %s gave %+v, want %+v", demorepo.MultiContext, direct, want)
+	}
+	if viaMCP != direct {
+		t.Errorf("cancelling search_code over %s gave %+v through the engine and %+v through MCP", demorepo.MultiContext, direct, viaMCP)
+	}
+
+	// The member that was blocked and cancelled is the whole count: the
+	// second member of demo-multi is queried only after the first one
+	// returns, and the first one returned with the caller's cancellation as
+	// its error, so the loop in engine.SearchCode never started the second.
+	assertBlockedCalls(t, "the engine's search_code", directBlocked, 1)
+	assertBlockedCalls(t, "the search_code tool", mcpBlocked, 1)
+	t.Logf("search_code over %s: both sides answered a mid-call cancellation with %+v, leaving the second member unqueried",
+		demorepo.MultiContext, direct)
+}
+
 // TestEngineAndMCPCancelComparisonsIdentically is the cancellation gate for the
 // two comparison tools, and it asks one thing more than the test above.
 //
@@ -233,7 +290,8 @@ func TestEngineAndMCPCancelComparisonsIdentically(t *testing.T) {
 	cfg := parityFixture(t)
 
 	cases := []struct {
-		name   string
+		name   string // the subtest label, and what a failure names.
+		tool   string // the MCP tool actually registered under this name.
 		direct func(context.Context, *engine.Engine) error
 		args   map[string]any
 	}{
@@ -242,6 +300,7 @@ func TestEngineAndMCPCancelComparisonsIdentically(t *testing.T) {
 			// contexts and asked for the difference. There is no second side to
 			// reach, so what has to stop is the diff itself.
 			name: "compare_code",
+			tool: "compare_code",
 			direct: func(ctx context.Context, eng *engine.Engine) error {
 				_, err := eng.CompareCode(ctx, engine.CompareCodeRequest{
 					FromContext: v1, ToContext: v2, Path: "processor.go",
@@ -254,6 +313,7 @@ func TestEngineAndMCPCancelComparisonsIdentically(t *testing.T) {
 			// Two provider calls, and the from side is the one blocked here: the
 			// to side must never be walked at all.
 			name: "compare_calls",
+			tool: "compare_calls",
 			direct: func(ctx context.Context, eng *engine.Engine) error {
 				_, err := eng.CompareCalls(ctx, engine.CompareCallsRequest{
 					FromContext: v1, ToContext: v2, Symbol: "Process", Direction: provider.Callees, Depth: 1,
@@ -262,6 +322,48 @@ func TestEngineAndMCPCancelComparisonsIdentically(t *testing.T) {
 			},
 			args: map[string]any{
 				"from_context": v1, "to_context": v2,
+				"symbol": "Process", "direction": "callees", "depth": 1,
+			},
+		},
+		// AC #4 asked of a comparison narrowed out of a multi-member workspace:
+		// the from side is demo-multi's own versioned-demo-repo member, picked
+		// by repository exactly as decision-11 §4 requires, rather than a
+		// second single-repository context. Member selection happens before
+		// the provider is ever reached, so cancelling here still has to catch
+		// the diff itself and never let it run to completion for a caller who
+		// left.
+		//
+		// name and tool diverge here: the subtest is labelled
+		// "compare_code_multi_member" to tell it apart from the single-member
+		// case above, but the tool registered on the session is still
+		// compare_code — there is no second tool for a multi-member workspace,
+		// only a repository argument.
+		{
+			name: "compare_code_multi_member",
+			tool: "compare_code",
+			direct: func(ctx context.Context, eng *engine.Engine) error {
+				_, err := eng.CompareCode(ctx, engine.CompareCodeRequest{
+					FromContext: demorepo.MultiContext, Repository: multiRepo1, ToContext: v2, Path: "processor.go",
+				})
+				return err
+			},
+			args: map[string]any{
+				"from_context": demorepo.MultiContext, "repository": multiRepo1,
+				"to_context": v2, "path": "processor.go",
+			},
+		},
+		{
+			name: "compare_calls_multi_member",
+			tool: "compare_calls",
+			direct: func(ctx context.Context, eng *engine.Engine) error {
+				_, err := eng.CompareCalls(ctx, engine.CompareCallsRequest{
+					FromContext: demorepo.MultiContext, Repository: multiRepo1, ToContext: v2,
+					Symbol: "Process", Direction: provider.Callees, Depth: 1,
+				})
+				return err
+			},
+			args: map[string]any{
+				"from_context": demorepo.MultiContext, "repository": multiRepo1, "to_context": v2,
 				"symbol": "Process", "direction": "callees", "depth": 1,
 			},
 		},
@@ -279,7 +381,7 @@ func TestEngineAndMCPCancelComparisonsIdentically(t *testing.T) {
 			mcpBlocked := newCancelBlocker()
 			session := cancelSession(t, cfg, mcpBlocked)
 			viaMCP := cancelMidCall(t, "the "+testCase.name+" tool", mcpBlocked, func(ctx context.Context) error {
-				_, err := session.CallTool(ctx, &mcp.CallToolParams{Name: testCase.name, Arguments: testCase.args})
+				_, err := session.CallTool(ctx, &mcp.CallToolParams{Name: testCase.tool, Arguments: testCase.args})
 				return err
 			})
 
@@ -294,9 +396,14 @@ func TestEngineAndMCPCancelComparisonsIdentically(t *testing.T) {
 			// The whole comparison stopped, not just the side that was blocked.
 			// A second query here is the failure this test exists for: one side
 			// abandoned and the other still running in a version nobody is
-			// waiting on an answer from.
-			assertNoSecondSide(t, "the engine's "+testCase.name, directBlocked)
-			assertNoSecondSide(t, "the "+testCase.name+" tool", mcpBlocked)
+			// waiting on an answer from. One provider call is what every case
+			// in this table expects, single-member or multi: repository picks
+			// exactly one member on each side before a provider is ever
+			// reached, so a comparison narrowed out of demo-multi has no more
+			// calls to make than one narrowed out of two single-repository
+			// contexts.
+			assertBlockedCalls(t, "the engine's "+testCase.name, directBlocked, 1)
+			assertBlockedCalls(t, "the "+testCase.name+" tool", mcpBlocked, 1)
 			t.Logf("%s: both sides answered a mid-call cancellation with %+v", testCase.name, direct)
 		})
 	}
@@ -365,18 +472,30 @@ func TestEngineAndMCPCancelTheSecondSideIdentically(t *testing.T) {
 		if !side.blocked.answered.Load() {
 			t.Errorf("%s never got past its from side, so it was not the to side that was cancelled", side.what)
 		}
-		assertNoSecondSide(t, side.what, side.blocked)
+		assertBlockedCalls(t, side.what, side.blocked, 1)
 	}
 	t.Logf("compare_calls: both sides answered a cancellation of the to side with %+v", direct)
 }
 
-// assertNoSecondSide requires the provider to have been blocked exactly once.
-// More than that is a comparison that went on to its second version after its
-// caller had already gone.
-func assertNoSecondSide(t *testing.T, what string, blocked *cancelBlocker) {
+// assertBlockedCalls requires the provider to have been reached exactly want
+// times.
+//
+// It used to be assertNoSecondSide and take no count: every case it checked
+// was a comparison, and a comparison always has exactly one provider call left
+// to make once its blocked side is cancelled, so "no second side" and "exactly
+// once" were the same fact. A workspace of several members does not change
+// that count — engine.SearchCode still queries one member at a time and
+// engine.CompareCode and engine.CompareCalls still resolve to exactly one
+// member per side before a provider is ever reached — but TestEngineAndMCP
+// CancelSearchOverAMultiMemberWorkspaceIdentically checks the same property on
+// a search across two members rather than on a comparison's two sides, and
+// naming the count it expects, rather than assuming the comparisons' "once" as
+// a law every caller shares, is what lets that be the same helper instead of a
+// second one that says the same thing about a different tool.
+func assertBlockedCalls(t *testing.T, what string, blocked *cancelBlocker, want int64) {
 	t.Helper()
-	if got := blocked.blocked.Load(); got != 1 {
-		t.Errorf("%s reached the provider %d times, want 1: the cancelled comparison ran a second query", what, got)
+	if got := blocked.blocked.Load(); got != want {
+		t.Errorf("%s reached the provider %d times, want %d", what, got, want)
 	}
 }
 
