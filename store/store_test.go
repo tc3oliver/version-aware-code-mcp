@@ -376,6 +376,36 @@ func TestARecordUsingBothSpellingsAtOnceIsRefused(t *testing.T) {
 	}
 }
 
+// TestAMembersRecordWithNoRepositoryKeyIsReadAsMembers pins the other side of
+// the check above. Only a record that fills in the single-repository fields uses
+// both spellings; one that leaves the repository key out altogether uses one,
+// and reporting it as using both would send whoever is reading a hand-edited
+// file looking for a conflict that is not there.
+//
+// The empty array this version writes stays the spelling of record: it is what a
+// v0.4.0 binary fails on, and [TestAV040DecoderRefusesAMultiMemberRecord] holds
+// that. This is only about what is read back.
+func TestAMembersRecordWithNoRepositoryKeyIsReadAsMembers(t *testing.T) {
+	s := open(t)
+	const noKey = `{
+  "id": "stack",
+  "members": [{"repository": "web", "revision": "0f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6"}],
+  "state": "READY",
+  "updated_at": "2026-08-12T09:00:00Z"
+}
+`
+	if err := os.WriteFile(filepath.Join(s.Root(), "contexts", "stack.json"), []byte(noKey), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	got, err := s.Context("stack")
+	if err != nil {
+		t.Fatalf("Context() refused a members record with no repository key: %v", err)
+	}
+	if len(got.Members) != 1 || got.Members[0].Repository != "web" {
+		t.Errorf("Context() = %+v, want the one member the record names", got)
+	}
+}
+
 // TestRejectsUnsafeNames is the path traversal defence: a name that is not a
 // plain path element is refused before anything is written, and refusing it
 // leaves the data directory byte for byte as it was.

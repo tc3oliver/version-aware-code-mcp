@@ -197,9 +197,18 @@ func (c *Context) UnmarshalJSON(data []byte) error {
 	c.ID, c.State, c.UpdatedAt = record.ID, record.State, record.UpdatedAt
 
 	if len(record.Members) > 0 {
-		var none []string
-		if err := json.Unmarshal(record.Repository, &none); err != nil || len(none) != 0 ||
-			record.Branch != "" || record.Revision != "" || record.GraphRef != "" {
+		// A multi-member record this version writes carries "repository": [],
+		// which is what makes a v0.4.0 binary fail on the field's type rather
+		// than read a context naming no repository. An absent repository key
+		// says the same thing without the trap, so it is read the same way —
+		// refusing it here would report a record as using both spellings when
+		// it used one.
+		named := true
+		if len(record.Repository) > 0 {
+			var none []string
+			named = json.Unmarshal(record.Repository, &none) == nil && len(none) == 0
+		}
+		if !named || record.Branch != "" || record.Revision != "" || record.GraphRef != "" {
 			return fmt.Errorf("store: context %q is written as one repository and as a members list at once", record.ID)
 		}
 		c.Members = record.Members

@@ -3,10 +3,12 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -69,16 +71,30 @@ var v040Calls = map[string]mcp.CallToolParams{
 // repository must reach a client as the document v0.4.0 sent, byte for byte, so
 // an agent written against that release reads the same answer from this one.
 //
-// The golden files are not hand-written and were not copied out of a passing
-// run of this tree. They were produced by running this same harness against the
-// commit before these six tools learned about workspaces — the whole file
-// compiles there unchanged, which is why it uses no identifier this task added —
-// so what they hold is what the previous implementation put on the wire.
+// The golden files are not hand-written and were not copied out of a passing run
+// of this tree. They were produced by running this same harness at the v0.4.0
+// tag, so what they hold is what that release actually put on the wire:
+//
+//	git worktree add /tmp/v040 v0.4.0
+//	cp tools/v040_wire_test.go /tmp/v040/tools/
+//	# plus a shim defining single() as the identity and copying wiredSearch,
+//	# neither of which exists at v0.4.0
+//	cd /tmp/v040 && VACMCP_WRITE_V040_GOLDEN=1 go test -run TestSingleMember ./tools/
+//
+// They were first generated against an intermediate commit of this series
+// instead, which was wrong in exactly one way and worth recording: search_code
+// had already stopped declaring an output schema by then, and that declaration
+// is what decides the key order below. Five goldens were unaffected and are
+// byte-identical either way; search_code's was the post-change document being
+// compared against itself, so the one tool whose bytes changed was the one the
+// gate could not have caught.
 //
 // The text block is compared rather than the decoded structured content, and the
 // whole of it rather than a field at a time. A decoded comparison would pass an
 // added key, a dropped omitempty, a null where a [] was and a reordered object,
-// and each of those is a change to what a client receives.
+// and the first three of those are changes to what a client receives.
+//
+// search_code is the documented exception, and [v040KeyOrderOnly] says why.
 func TestSingleMemberToolsMatchV040Bytes(t *testing.T) {
 	session := v040Session(t)
 
@@ -107,9 +123,11 @@ func TestSingleMemberToolsMatchV040Bytes(t *testing.T) {
 
 			golden := filepath.Join("testdata", "v0.4.0", name+".json")
 			if os.Getenv("VACMCP_WRITE_V040_GOLDEN") != "" {
-				// Only ever run against the pre-change tree. Writing these from the
-				// tree they are meant to constrain would turn the test into a record
-				// of what this code does, which is what it already is without them.
+				// Only ever run at the v0.4.0 tag. Writing these from the tree they
+				// are meant to constrain would turn the test into a record of what
+				// this code does, which is what it already is without them — and
+				// writing them from anywhere in between is the mistake described
+				// above, which cost the search_code golden its meaning.
 				if err := os.MkdirAll(filepath.Dir(golden), 0o750); err != nil {
 					t.Fatalf("MkdirAll: %v", err)
 				}
@@ -122,10 +140,52 @@ func TestSingleMemberToolsMatchV040Bytes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadFile: %v", err)
 			}
-			if !bytes.Equal([]byte(block.Text), bytes.TrimSuffix(want, []byte("\n"))) {
+			want = bytes.TrimSuffix(want, []byte("\n"))
+			if name == v040KeyOrderOnly {
+				assertSameDocument(t, name, []byte(block.Text), want)
+				return
+			}
+			if !bytes.Equal([]byte(block.Text), want) {
 				t.Errorf("%s emitted\n%s\nwant the v0.4.0 bytes\n%s", name, block.Text, want)
 			}
 		})
+	}
+}
+
+// v040KeyOrderOnly is the one tool whose bytes this release changed, and the
+// only one this file does not hold to byte equality.
+//
+// v0.4.0's search_code declared an output schema. The SDK validates a result
+// against a resolved schema by decoding it into a map and marshalling it again,
+// and that round trip sorts every object's keys — so v0.4.0 sent
+// {"context":{"branch":…,"id":…}} where this release sends the declaration order
+// {"context":{"id":…,"branch":…}}. Dropping that schema was deliberate: it was
+// inferred from the flat single-member shape and rejected a valid several-member
+// result as a protocol error. See the CHANGELOG entry for it.
+//
+// So the guarantee for this one tool is weaker by exactly one property, and
+// naming it here is the point — a client that decodes the JSON reads the same
+// document, and object key order is not semantic in JSON. Everything else the
+// byte comparison would have caught, [assertSameDocument] still catches: an
+// added key, a dropped omitempty, and a null where a [] was all survive
+// decoding as a difference.
+const v040KeyOrderOnly = "search_code"
+
+// assertSameDocument fails unless got and want decode to the same JSON document.
+// It is byte equality minus object key order, and nothing else: encoding/json
+// decodes null to nil and [] to an empty slice, so those stay distinguishable.
+func assertSameDocument(t *testing.T, name string, got, want []byte) {
+	t.Helper()
+
+	var gotDoc, wantDoc any
+	if err := json.Unmarshal(got, &gotDoc); err != nil {
+		t.Fatalf("%s emitted undecodable JSON: %v\n%s", name, err, got)
+	}
+	if err := json.Unmarshal(want, &wantDoc); err != nil {
+		t.Fatalf("%s golden is undecodable: %v", name, err)
+	}
+	if !reflect.DeepEqual(gotDoc, wantDoc) {
+		t.Errorf("%s emitted\n%s\nwhich is a different document from v0.4.0's\n%s", name, got, want)
 	}
 }
 

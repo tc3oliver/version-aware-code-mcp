@@ -54,7 +54,9 @@ v0.5.0 does not:
   graph and verified, and one that fails anywhere is `FAILED` whole rather
   than half servable.
 - Wire shape follows member count: a workspace of one member marshals to
-  exactly the bytes v0.4.0 emitted; a workspace of several carries its context
+  exactly the bytes v0.4.0 emitted, `search_code` excepted — see the
+  `outputSchema` entry below, which changed its key order and nothing else; a
+  workspace of several carries its context
   as `{id, members: [...]}` instead of the flat fields, and every match and
   every citation carries its own `repository` and `revision`. Only
   `list_contexts` and `search_code` ever emit the several-member shape — the
@@ -118,8 +120,16 @@ v0.5.0 does not:
   protocol error rather than an answer; the wire shape is decided by the
   response actually sent, as `get_code`, `trace_calls`, `compare_code` and
   `compare_calls` already did. This is a visible change for a client that
-  reads `tools/list` to validate results ahead of time — the schema is gone —
-  but `structuredContent` on a call result is unaffected.
+  reads `tools/list` to validate results ahead of time — the schema is gone.
+  It also changes `search_code`'s bytes, which is the one place a
+  single-repository context does not answer with exactly what v0.4.0 sent: the
+  SDK validates a result against a declared schema by decoding it and
+  marshalling it again, and that round trip sorted every object's keys, so
+  v0.4.0 sent `{"context":{"branch":…,"id":…}}` where this release sends the
+  declaration order `{"context":{"id":…,"branch":…}}`. The decoded document is
+  identical — same keys, same values, same types — and JSON object key order is
+  not semantic, so a client that parses the response sees no difference. One
+  that compares raw bytes does.
 
 ## [0.4.0] - 2026-08-16
 
