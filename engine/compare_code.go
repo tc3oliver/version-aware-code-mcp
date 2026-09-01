@@ -12,16 +12,27 @@ import (
 // CompareCodeRequest is one file in two version contexts, asked for so the two
 // can be set against each other.
 //
-// It names its scope with two context IDs and nothing else, for the reason every
-// request here does: the repository and the revision of each side come from the
-// configuration those IDs name, so a caller cannot compare a version it was not
-// granted. The path is asked of both sides identically — there is deliberately
-// no way to read one file on the from side and another on the to side, because a
-// difference produced by asking about two different files is not a difference
-// between the two versions.
+// It names its scope with two context IDs, for the reason every request here
+// does: the repository and the revision of each side come from the configuration
+// those IDs name, so a caller cannot compare a version it was not granted.
+//
+// Repository picks the one repository of those contexts the comparison is made
+// in. It selects, it does not scope — a repository a context does not name is
+// refused rather than compared, so the answer is bounded by the configuration
+// either way, and it can no more redirect a side than a branch field it does not
+// have could. It is what a context over a single repository never needs to fill
+// in, and what a context naming several cannot be compared without: there is no
+// default member, because answering in one repository under the name of a context
+// covering two is the answer this server exists not to give. See [selectMembers].
+//
+// Repository and Path are both asked of the two sides identically. There is
+// deliberately no way to read one repository, or one file, on the from side and
+// another on the to side, because a difference produced by asking two different
+// questions is not a difference between the two versions.
 type CompareCodeRequest struct {
 	FromContext string
 	ToContext   string
+	Repository  string
 	Path        string
 }
 
@@ -105,7 +116,8 @@ func codeChange(change provider.DiffChange) (CodeChange, bool) {
 // hunks behind it — is then the backend's answer, translated here and not
 // second-guessed.
 //
-// Both contexts must name the same repository. Two repositories have no shared
+// Both sides must name the same repository, once req.Repository has selected
+// which member of each context is the side. Two repositories have no shared
 // history, so a diff across them is not a comparison that means anything: it is
 // [vacerr.InvalidArgument], refused here before any provider is reached rather
 // than left to whichever backend would happen to notice.
@@ -118,11 +130,11 @@ func (e *Engine) CompareCode(ctx context.Context, req CompareCodeRequest) (Compa
 	// for: an ID naming no configured version has no file to read, and a
 	// comparison that read one side first would report the other's failure after
 	// doing work in a version the caller may not have meant.
-	fromCtx, err := e.resolveMember(ctx, req.FromContext, "")
+	fromCtx, err := e.memberToCompare(ctx, "compare_code", "from", req.FromContext, req.Repository)
 	if err != nil {
 		return CompareCodeResult{}, err
 	}
-	toCtx, err := e.resolveMember(ctx, req.ToContext, "")
+	toCtx, err := e.memberToCompare(ctx, "compare_code", "to", req.ToContext, req.Repository)
 	if err != nil {
 		return CompareCodeResult{}, err
 	}

@@ -94,17 +94,23 @@ func compareCodeRequest() engine.CompareCodeRequest {
 	}
 }
 
-// Acceptance criterion 1: a code comparison names its scope with two context IDs
-// and the file, and nothing else. A repository, branch or revision field here
-// would let a caller compare a version the configuration never granted it, which
-// is the whole guarantee given away in a struct literal.
+// Acceptance criterion 1: a code comparison names its scope with two context
+// IDs, the repository they are narrowed to and the file, and nothing else. A
+// branch or revision field here would let a caller compare a version the
+// configuration never granted it, which is the whole guarantee given away in a
+// struct literal.
+//
+// Repository is not such a field, which is why it is the one addition this list
+// admits: it can only pick one of the repositories a context already names, so
+// it narrows what the two IDs granted and can reach nothing they did not — see
+// TestCompareCodeRefusesARepositoryASideDoesNotName.
 func TestCompareCodeRequestIsScopedByContextIDsAlone(t *testing.T) {
 	typ := reflect.TypeOf(engine.CompareCodeRequest{})
 	var got []string
 	for i := range typ.NumField() {
 		got = append(got, typ.Field(i).Name)
 	}
-	want := []string{"FromContext", "ToContext", "Path"}
+	want := []string{"FromContext", "ToContext", "Repository", "Path"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("CompareCodeRequest has the fields %v, want exactly %v", got, want)
 	}
