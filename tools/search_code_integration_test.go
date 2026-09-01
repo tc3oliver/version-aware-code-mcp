@@ -18,6 +18,7 @@ import (
 	zoektadapter "github.com/tc3oliver/version-aware-code-mcp/adapters/zoekt"
 	"github.com/tc3oliver/version-aware-code-mcp/config"
 	"github.com/tc3oliver/version-aware-code-mcp/engine"
+	"github.com/tc3oliver/version-aware-code-mcp/evidence"
 	"github.com/tc3oliver/version-aware-code-mcp/internal/demorepo"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
@@ -330,6 +331,23 @@ func searchSession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	}
 	t.Cleanup(func() { _ = clientSession.Close() })
 	return clientSession
+}
+
+// searchCodeOutput is the whole document a successful search emits, as these
+// tests decode it: the flat one-member shape, which is the only one the fixture
+// below can produce because every context it configures names one repository.
+//
+// It lives in the test rather than beside the tool on purpose. A mirror of what
+// [evidence.Output] puts on the wire is worth having — it is what pins the field
+// names, since a wrong json tag leaves the field it should have filled empty —
+// but only somewhere a drifted copy fails a test. Declared on the tool as an
+// output schema it is enforced by the SDK against every result instead, which is
+// how the several-member shape came to be rejected on its way to a client; see
+// AddSearchCode.
+type searchCodeOutput struct {
+	Context  listedContext       `json:"context"`
+	Evidence []evidence.Evidence `json:"evidence"`
+	Matches  []searchMatch       `json:"matches"`
 }
 
 // searchCode calls the tool and decodes a successful result, failing the test

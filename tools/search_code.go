@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tc3oliver/version-aware-code-mcp/engine"
@@ -26,22 +25,16 @@ type searchMatch struct {
 	Snippet string `json:"snippet" jsonschema:"the matched line"`
 }
 
-// searchCodeOutput is the whole successful result.
-//
-// The value on the wire is built by the evidence package rather than from this
-// type: [evidence.Output] merges its context and evidence over the payload it
-// is given, which is why the zero Context and Evidence handed to WithResult
-// below never reach a client. This type exists so the schema an agent reads
-// before calling describes the same three keys, and because the SDK validates
-// every result against that schema, the two cannot drift apart unnoticed.
+// searchCodeResult is the tool-specific half of the payload. The other half —
+// the context every match is confined to and the citation backing each one — is
+// what [evidence.Output] puts next to it, which is why this struct does not
+// repeat them.
 //
 // matches and evidence carry the same facts on purpose: for a search the match
 // is its own citation, and doc-1 asks for both — §5 for the matches, §6 for the
 // evidence that makes the answer checkable.
-type searchCodeOutput struct {
-	Context  listedContext       `json:"context" jsonschema:"the version context every match is confined to"`
-	Evidence []evidence.Evidence `json:"evidence" jsonschema:"one citation per match, so every result can be checked at its source"`
-	Matches  []searchMatch       `json:"matches" jsonschema:"the matches in the engine's ranked order, empty when the query matches nothing in this context"`
+type searchCodeResult struct {
+	Matches []searchMatch `json:"matches"`
 }
 
 // AddSearchCode registers the search_code tool on srv, answered by eng.
@@ -59,14 +52,26 @@ type searchCodeOutput struct {
 // unanswerable question with an empty result, which would read as "this version
 // has no such code".
 func AddSearchCode(srv *mcp.Server, eng *engine.Engine) {
+	// Out is any and no output schema is declared, as for get_code and the two
+	// comparison tools: the shape on the wire is [evidence.Output]'s to define,
+	// and a mirror of it here would not only drift, it would be enforced — the
+	// SDK validates output against a declared schema, so a stale copy starts
+	// rejecting valid results.
+	//
+	// This tool did declare one, inferred from a struct whose context block was
+	// the flat four-field one. That is exactly the copy the warning is about, and
+	// a workspace of several repositories is what went stale under it: its
+	// context block carries members instead, and the schema refused the result on
+	// the way out — a protocol fault in place of an answer, carrying none of this
+	// server's error model. The evidence package decides what a context block
+	// looks like, in one place, and this is the tool that used to disagree.
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:  "search_code",
 		Title: "Search code in a version context",
 		Description: "Search the code of one version context. The context decides the repository and the branch searched, " +
 			"so every match belongs to that version and no other; call list_contexts first to see which ids exist. " +
 			"Supports Zoekt's sym:, file: and lang: filters. Returns the matches with the context and the evidence backing them.",
-		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
-		OutputSchema: searchCodeSchema(),
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchCodeInput) (*mcp.CallToolResult, any, error) {
 		result, err := eng.SearchCode(ctx, engine.SearchCodeRequest{Context: in.Context, Query: in.Query})
 		if err != nil {
@@ -93,24 +98,6 @@ func AddSearchCode(srv *mcp.Server, eng *engine.Engine) {
 			// ignored: an output that cannot be scoped must not be sent.
 			return failed(err)
 		}
-		return nil, out.WithResult(searchCodeOutput{Matches: matches}), nil
+		return nil, out.WithResult(searchCodeResult{Matches: matches}), nil
 	})
-}
-
-// searchCodeSchema is the schema inferred from [searchCodeOutput], with the two
-// lists made non-nullable for the same reason list_contexts does it: inference
-// maps every Go slice to ["null", "array"] because a nil slice marshals to
-// null, and neither of these is ever null. "No matches on this branch" is [],
-// and an agent reading the schema should learn that.
-func searchCodeSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[searchCodeOutput](nil)
-	if err != nil {
-		// Inference fails only on a type this package declares, which makes it
-		// a programming error rather than a runtime one. mcp.AddTool panics on
-		// a bad tool for the same reason.
-		panic("tools: cannot infer the search_code output schema: " + err.Error())
-	}
-	schema.Properties["evidence"].Types = []string{"array"}
-	schema.Properties["matches"].Types = []string{"array"}
-	return schema
 }
