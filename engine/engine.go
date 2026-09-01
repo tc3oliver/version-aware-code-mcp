@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 
@@ -432,11 +433,23 @@ func (r SearchCodeResult) Matches() []Match { return r.matches }
 
 // TraceCallsRequest is a walk of the call graph around one symbol, inside one
 // version context.
+//
+// Repository picks the one repository of the context whose graph is walked, and
+// is the only thing a request may say about where to look. A context over a
+// single repository never needs to fill it in; a context naming several has no
+// walk without it, because a call graph is one repository's own and there is no
+// union of two to walk. It selects, it does not scope: a repository the context
+// does not name is refused rather than walked. See [selectMembers].
+//
+// It is a field of its own and never a prefix folded into Symbol: the graph
+// resolves Symbol as the source writes it, so a repository smuggled into that
+// string would be looked up as part of a function name and found nowhere.
 type TraceCallsRequest struct {
-	Context   string
-	Symbol    string
-	Direction provider.Direction
-	Depth     int
+	Context    string
+	Repository string
+	Symbol     string
+	Direction  provider.Direction
+	Depth      int
 }
 
 // TraceCallsResult is the traversal with the version it was traced in, cited at
@@ -590,8 +603,8 @@ func (e *Engine) SearchCode(ctx context.Context, req SearchCodeRequest) (SearchC
 	return SearchCodeResult{answer{searched, cited}, matches}, nil
 }
 
-// TraceCalls walks the call graph around req.Symbol in the graph the context
-// names, and no other.
+// TraceCalls walks the call graph around req.Symbol in the graph of the one
+// repository req.Repository picks out of the context, and no other.
 //
 // Depth is checked here rather than passed on, because it crosses a trust
 // boundary and doc-1 bounds it at 1 to 5: quietly clamping an out-of-range
@@ -599,6 +612,12 @@ func (e *Engine) SearchCode(ctx context.Context, req SearchCodeRequest) (SearchC
 // so. Everything else about the request — the symbol, the direction, whether
 // the symbol names exactly one function — is checked downstream, in the same
 // error model, and is not second-guessed here.
+//
+// The walk runs in exactly one member's graph, so a symbol two repositories both
+// declare is not ambiguous: the repository was decided before the symbol was
+// looked up, and nothing here matches one repository's names against another's.
+// That is also why no edge of the result can cross repositories — there is one
+// graph in the answer because there was one graph in the question.
 func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCallsResult, error) {
 	if req.Depth < minDepth || req.Depth > maxDepth {
 		return TraceCallsResult{}, vacerr.New(
@@ -608,12 +627,37 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 		)
 	}
 
-	// One member, because a walk is answered in one graph: a context naming
-	// several repositories is refused here rather than walked in one of them.
-	codeCtx, err := e.resolveMember(ctx, req.Context, "")
+	workspace, err := e.resolve(ctx, req.Context)
 	if err != nil {
 		return TraceCallsResult{}, err
 	}
+	members, err := selectMembers(req.Context, req.Repository, workspace)
+	if err != nil {
+		return TraceCallsResult{}, err
+	}
+
+	// One member, because a walk is answered in one graph: two repositories'
+	// call graphs are two graphs and not a bigger one, so a context naming
+	// several is refused here rather than walked in whichever came first.
+	//
+	// This is spelled out rather than left to [Engine.resolveMember] because of
+	// what the caller has to be told. Reaching here means req.Repository was
+	// blank, so the missing thing is an argument the caller can supply — and a
+	// message about what this server can answer would send someone looking for a
+	// different context when the fix is one field.
+	if len(members) != 1 {
+		repositories := make([]string, 0, len(members))
+		for _, member := range members {
+			repositories = append(repositories, member.Repository)
+		}
+		return TraceCallsResult{}, vacerr.New(
+			vacerr.InvalidArgument,
+			fmt.Sprintf("trace_calls: context %q names %d repositories (%s) and a call graph is one repository's own, so repository is required to say which one to walk",
+				req.Context, len(repositories), strings.Join(repositories, ", ")),
+			map[string]any{"context": req.Context, "repositories": repositories, "symbol": req.Symbol},
+		)
+	}
+	codeCtx := members[0]
 
 	if e.graph == nil {
 		return TraceCallsResult{}, vacerr.New(
@@ -637,6 +681,22 @@ func (e *Engine) TraceCalls(ctx context.Context, req TraceCallsRequest) (TraceCa
 		Depth:     req.Depth,
 	})
 	if err != nil {
+		// An ambiguity is the one failure the caller is expected to act on, and
+		// acting on it means asking again with one of the candidates — in the
+		// repository this walk was narrowed to. A graph backend is handed one
+		// member and knows which project it was asked about, not which member of
+		// which context that was, so the repository is added here, where the
+		// selection was made. The code, the message and the candidates are the
+		// provider's own and are carried across untouched: this says where the
+		// ambiguity was, it does not reclassify it. [Engine.traceSide] adds the
+		// side of a comparison the same way and for the same reason.
+		var vErr *vacerr.Error
+		if errors.As(err, &vErr) && vErr.Code == vacerr.SymbolAmbiguous {
+			details := map[string]any{}
+			maps.Copy(details, vErr.Details)
+			details["repository"] = codeCtx.Repository
+			return TraceCallsResult{}, vacerr.New(vacerr.SymbolAmbiguous, vErr.Message, details)
+		}
 		return TraceCallsResult{}, err
 	}
 
