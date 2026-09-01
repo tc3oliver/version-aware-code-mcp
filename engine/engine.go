@@ -524,10 +524,11 @@ func (r GetCodeResult) Source() provider.SourceContent { return r.source }
 // have got wrong. The error is the source's own and nothing else: a source that
 // could not say which contexts exist has not said there are none.
 //
-// A workspace naming several repositories is listed like any other, even though
-// no query can be answered in it yet: what exists in the configuration and what
-// this server can currently answer are two different facts, and hiding the first
-// behind the second would leave a caller unable to see the context it wrote.
+// A workspace naming several repositories is listed like any other, carrying
+// its members rather than the flat repository, branch and revision a workspace
+// of one carries. That members list is not decoration: it is where a caller
+// learns the only values the other queries' repository argument will accept,
+// which all but SearchCode require once a workspace names more than one.
 func (e *Engine) ListContexts(ctx context.Context) ([]vacctx.Workspace, error) {
 	contexts, err := e.contexts.Contexts(ctx)
 	if err != nil {

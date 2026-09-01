@@ -458,8 +458,10 @@ what v0.4.0 did and several emitting the array instead, never both at once.
 Every result's `context` block and every citation follow the same rule: a
 single-member answer's evidence carries no `repository` or `revision` of its
 own, as before, and a several-member answer's evidence — and `search_code`'s
-matches — each carry the repository and revision they were found in. The
-[Tools](#tools) examples below show both shapes.
+matches — each carry the repository and revision they were found in. Only
+`search_code` and `list_contexts` ever emit the several-member shape; the other
+four narrow to one member before they answer, so their `context` block is always
+the flat one, and so is every example in [Tools](#tools) below.
 
 `repository` is the one argument a request may use to say which member it
 means, and it only narrows what the context already names — a repository the

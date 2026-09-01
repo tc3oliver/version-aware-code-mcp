@@ -92,7 +92,8 @@ func AddListContexts(srv *mcp.Server, eng *engine.Engine) {
 			"Call this first to discover which versions exist, then pass a context id to the other tools. " +
 			"A context over one repository carries repository, branch and revision directly; " +
 			"a context over several carries a members array instead, one entry per repository with its own branch and revision. " +
-			"Those member repositories are the only legal values of the other tools' repository argument, which they require when the context names several. " +
+			"Those member repositories are the only legal values of the other tools' repository argument. " +
+			"When the context names several, get_code, trace_calls, compare_code and compare_calls require it; search_code searches every member without it. " +
 			"Returns an empty list when no context is configured.",
 		Annotations:  &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 		OutputSchema: outputSchema(),

@@ -12,15 +12,19 @@ one, each still pinned to its own revision. A context naming one repository —
 every context before this release — answers exactly as it did in v0.4.0: same
 arguments, same wire shape, same error codes. A context naming several is a
 *workspace*; `search_code` is the only tool that spans it by default, and the
-other five narrow to one repository, required by a new `repository` argument
-once a context names more than one.
+other four that answer inside a context — `get_code`, `trace_calls`,
+`compare_code`, `compare_calls` — narrow to one repository, required by a new
+`repository` argument once a context names more than one. `list_contexts` takes
+no such argument: it is the call that reports which repositories a context has.
 
 v0.5.0 does not:
 
 - build, infer or claim a call edge between two repositories;
 - compare a whole workspace to another (no member-added/member-removed report,
   no workspace-level diff);
-- deduplicate artifacts two workspaces share the same repository and revision;
+- deduplicate the artifacts of two workspaces that name the same repository at
+  the same revision — each context still gets its own worktree, index and graph
+  project;
 - detect a rename or move, in a comparison;
 - resolve symbol identity semantically, in a comparison.
 
@@ -49,10 +53,14 @@ v0.5.0 does not:
   `READY` only once every member has been checked out, indexed, given its
   graph and verified, and one that fails anywhere is `FAILED` whole rather
   than half servable.
-- Wire shape follows member count, on every tool: a workspace of one member
-  marshals to exactly the bytes v0.4.0 emitted; a workspace of several carries
-  its context as `{id, members: [...]}` instead of the flat fields, and every
-  match and every citation carries its own `repository` and `revision`.
+- Wire shape follows member count: a workspace of one member marshals to
+  exactly the bytes v0.4.0 emitted; a workspace of several carries its context
+  as `{id, members: [...]}` instead of the flat fields, and every match and
+  every citation carries its own `repository` and `revision`. Only
+  `list_contexts` and `search_code` ever emit the several-member shape — the
+  other four narrow to one member before they answer, so their context block is
+  always the flat one, whether the context named one repository or was told
+  which of several to use.
 
 ### Changed
 
@@ -74,6 +82,36 @@ v0.5.0 does not:
   instead, would let an existing third-party `ContextSource` keep compiling
   while answering with an empty `Repository` — a wrong version served
   silently, rather than a build failure caught before it ships.
+- **Breaking (embedding API):** `ContextSource` is not the only signature that
+  moved from one `vacctx.CodeContext` to a `vacctx.Workspace`. An embedder
+  wrapping only `ContextSource` will still fail to build, so the rest are named
+  here rather than found one compiler error at a time. All are in the packages
+  the README lists as the supported embedding API:
+  | Symbol | v0.4.0 | v0.5.0 |
+  | --- | --- | --- |
+  | `engine.Engine.ListContexts` | `(context.Context) []vacctx.CodeContext` | `(context.Context) ([]vacctx.Workspace, error)` |
+  | `Context()` on every result and on `ComparisonSide` | `vacctx.CodeContext` | `vacctx.Workspace` |
+  | `Evidence()` on the same | `[]evidence.Evidence` | `[][]evidence.Evidence`, one list per member |
+  | `engine.SearchCodeResult.Matches` | `[]provider.SearchResult` | `[]engine.Match`, grouped by member, no ranking across groups |
+  | `resolver.Resolver.Contexts` | `() []vacctx.CodeContext` | `(context.Context) ([]vacctx.Workspace, error)` |
+  | `managed.ContextManager.Create` | `(ctx, id, repository, ref string)` | `(ctx, id string, pins []Pin)` |
+  | `managed.Context` | `Repository`, `Revision` fields | `Members []Member` |
+  | `managed.ContextStatus` | `SearchRef`, `GraphRef`, `Worktree` fields | `Artifacts []MemberArtifacts` |
+  `ListContexts` and `Contexts` returning an error is the same fail-closed
+  reasoning as the interface change: a source that could not say which contexts
+  exist has not said there are none.
+- `vacmcp context list`, `context status`, `context create`, `context verify`,
+  `context retry` and `vacmcp doctor` print one row per member. A
+  single-repository context still prints one row, so its output is unchanged;
+  anything parsing this output for a multi-repository context gets several.
+- The managed data directory's on-disk record changed for multi-repository
+  contexts only. A record v0.4.0 wrote is read and rewritten byte-for-byte, and
+  a single-repository context this release writes is a record v0.4.0 reads as
+  its own. A record with several members is deliberately unreadable by v0.4.0 —
+  it writes `"repository"` as an array, so that binary fails on the type rather
+  than decoding a context with an empty repository and serving it. Downgrading
+  after creating a multi-repository context therefore fails closed rather than
+  silently dropping members.
 - `search_code` no longer declares an `outputSchema` in `tools/list`. Its
   context block already changes shape with member count, and a schema
   inferred from the old flat shape rejected a valid several-member result as a
