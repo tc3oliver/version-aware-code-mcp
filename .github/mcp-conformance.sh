@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # doc-1's protocol layer, checked with the reference client: MCP Inspector's CLI
-# drives the built vacmcp binary over STDIO and calls all four tools for real.
+# drives the built vacmcp binary over STDIO and calls all six tools for real.
+#
+# All six, not just the ones tools/list reports. Listing a tool proves it was
+# registered; only calling it proves a third-party client can invoke it, and
+# compare_code and compare_calls went two releases listed but never called.
+# One of the six calls is made against a multi-repository context, because a
+# fixture that merely contains one is not a fixture that exercised it.
 #
 # Real is the point. An in-process test can register a tool and call it without
 # ever proving that a third-party MCP client can discover and invoke it, and the
@@ -97,6 +103,17 @@ inspect trace_calls --method tools/call --tool-name trace_calls \
 	--tool-arg context=demo-v2 symbol=Process direction=callees depth=3
 inspect get_code --method tools/call --tool-name get_code \
 	--tool-arg context=demo-v2 path=processor.go start_line=1 end_line=6
+inspect compare_code --method tools/call --tool-name compare_code \
+	--tool-arg from_context=demo-v1 to_context=demo-v2 path=handler.go
+inspect compare_calls --method tools/call --tool-name compare_calls \
+	--tool-arg from_context=demo-v1 to_context=demo-v2 symbol=Process \
+	direction=callees depth=3
+# The same path and the same symbol name live in both members of demo-multi, so
+# a read that names the second one is only right if the answer is that member's
+# file — and it is the wire shape v0.5 added, reaching a real client for once.
+inspect get_code_multi --method tools/call --tool-name get_code \
+	--tool-arg context=demo-multi repository=second-demo-repo path=handler.go \
+	start_line=1 end_line=9
 
 # Every call is checked for what it was supposed to prove: that the answer came
 # back over 2026-07-28, and that it is release/v2's answer. A tool that returned
@@ -151,11 +168,24 @@ if tools:
 
 contexts = structured("list_contexts")
 if contexts:
-    got = sorted(c["id"] for c in contexts["contexts"])
+    by_id = {c["id"]: c for c in contexts["contexts"]}
     check(
         "list_contexts",
-        got == ["demo-multi", "demo-v1", "demo-v2"],
-        f"contexts are {got}",
+        sorted(by_id) == ["demo-multi", "demo-v1", "demo-v2"],
+        f"contexts are {sorted(by_id)}",
+    )
+    # The members array is the shape v0.5 added, and the only way a client
+    # learns which repository names the other tools will accept. A demo-multi
+    # reported in the flat single-repository shape would leave the multi-repo
+    # calls below arguing over a value the client was never told.
+    multi_context = by_id.get("demo-multi", {})
+    check(
+        "list_contexts/demo-multi",
+        [m["repository"] for m in multi_context.get("members", [])]
+        == ["versioned-demo-repo", "second-demo-repo"]
+        and "repository" not in multi_context,
+        f"demo-multi is {json.dumps(multi_context)}, want its two members and"
+        " no top-level repository",
     )
 
 search = structured("search_code")
@@ -186,6 +216,55 @@ if code:
         " carry v2's handler",
     )
 
+compare_code = structured("compare_code")
+if compare_code:
+    hunks = compare_code["hunks"]
+    added = [
+        line["content"]
+        for h in hunks
+        for line in h["lines"]
+        if line["kind"] == "ADDED"
+    ]
+    check(
+        "compare_code",
+        compare_code["change"] == "MODIFIED"
+        and any("NewHandler" in line for line in added),
+        f"change is {compare_code['change']!r} with added lines {added}, want"
+        " MODIFIED introducing NewHandler",
+    )
+
+compare_calls = structured("compare_calls")
+if compare_calls:
+    added = [(c["caller"], c["callee"]) for c in compare_calls["added"]]
+    removed = [(c["caller"], c["callee"]) for c in compare_calls["removed"]]
+    check(
+        "compare_calls",
+        compare_calls["presence"] == "BOTH"
+        and ("Process", "NewHandler") in added
+        and ("Process", "LegacyHandler") in removed,
+        f"presence {compare_calls['presence']!r}, added {added}, removed"
+        f" {removed}; want v1's LegacyHandler call replaced by v2's NewHandler",
+    )
+
+# Both members of demo-multi have a handler.go declaring LegacyHandler, so
+# answering from the first one would look like a successful read. The content
+# is what says which member answered. A read narrowed to one repository is
+# reported in the flat single-repository shape, naming the member it resolved
+# to — the members array belongs to answers that span them, as list_contexts's
+# own check above requires of demo-multi.
+multi = structured("get_code_multi")
+if multi:
+    context = multi["context"]
+    check(
+        "get_code_multi",
+        context.get("repository") == "second-demo-repo"
+        and context.get("branch") == "main"
+        and "second: " in multi["content"],
+        f"context is {json.dumps(context)} and content is"
+        f" {multi['content']!r}; want second-demo-repo's own handler.go, not"
+        " the colliding one in versioned-demo-repo",
+    )
+
 if failures:
     print("\nmcp-conformance: FAILED", file=sys.stderr)
     for failure in failures:
@@ -193,5 +272,6 @@ if failures:
     sys.exit(1)
 
 print("\nmcp-conformance: 2026-07-28 negotiated by server/discover; "
-      "list_contexts, search_code, trace_calls and get_code all invoked")
+      "list_contexts, search_code, trace_calls, get_code, compare_code and "
+      "compare_calls all invoked, get_code again on a multi-repository context")
 PY
