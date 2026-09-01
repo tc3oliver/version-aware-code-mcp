@@ -20,6 +20,7 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -123,6 +124,145 @@ func TestManagedContextSurvivesTheRemoteMoving(t *testing.T) {
 	assertVersionIsolation(t, serveManaged(t, binary, data), before, after)
 }
 
+// TestManagedMultiMemberContextSurvivesEachMembersRemoteMoving is TASK-86
+// AC #11: decision-11 §3's pin-per-member guarantee, over two repositories
+// instead of one, and checked the way an agent would notice a failure of it —
+// through what the query tools actually serve, not only the record
+// cmd/vacmcp's own TestRepoSyncMovesNoMemberOfAMultiRepositoryContext reads
+// back. Both remotes move after the context is created, `repo sync --all`
+// fetches both, and each member still has to answer with the commit it was
+// pinned to and find none of what only the moved commit carries.
+func TestManagedMultiMemberContextSurvivesEachMembersRemoteMoving(t *testing.T) {
+	binary, data := installation(t)
+
+	const r1, r2 = "r1", "r2"
+	const r1Token, r2Token = "R1OnlySymbol", "R2OnlySymbol"
+	remotes := map[string]string{
+		r1: soloRemote(t, r1, r1Token),
+		r2: soloRemote(t, r2, r2Token),
+	}
+	for _, name := range []string{r1, r2} {
+		vacmcpRun(t, binary, data, "repo", "add", name, "--url", remotes[name])
+	}
+
+	pinned := createMultiContext(t, binary, data, "multi", managedPin{r1, "main"}, managedPin{r2, "main"})
+
+	moved := map[string]string{}
+	movedToken := map[string]string{r1: "R1LaterSymbol", r2: "R2LaterSymbol"}
+	for _, name := range []string{r1, r2} {
+		moved[name] = advanceGenericRemote(t, remotes[name], "main", name, movedToken[name])
+		if moved[name] == pinned[name] {
+			t.Fatalf("the remote's %s main did not move, so nothing below would be under test", name)
+		}
+	}
+	vacmcpRun(t, binary, data, "repo", "sync", "--all")
+
+	for _, name := range []string{r1, r2} {
+		clone := filepath.Join(data, "repos", name)
+		if got := gitOut(t, "-C", clone, "rev-parse", "--verify", moved[name]+"^{commit}"); got != moved[name] {
+			t.Fatalf("the clone of %s resolves %s to %q after `repo sync --all`, want the moved commit fetched", name, moved[name], got)
+		}
+	}
+
+	ownToken := map[string]string{r1: r1Token, r2: r2Token}
+	v := serveManaged(t, binary, data)
+	for _, name := range []string{r1, r2} {
+		found := searchIn(t, v, 11, "multi", name, ownToken[name])
+		if found.Context.Repository != name || found.Context.Revision != pinned[name] {
+			t.Errorf(`LIFECYCLE GATE FAIL — decision-11 §3, member %s: `+
+				"\n  member %s was pinned to %s at context creation"+
+				"\n  its remote's main then moved to %s and `repo sync --all` fetched it"+
+				"\n  search_code(context=multi, repository=%s) now answers with context %+v"+
+				"\ndecision-11 §3: a remote moving after a member is pinned must not move what that member answers.",
+				name, name, pinned[name], moved[name], name, found.Context)
+		}
+		if len(found.Matches) == 0 {
+			t.Errorf("search_code(context=multi, repository=%s, %s) = no matches, want %s's own symbol", name, ownToken[name], name)
+		}
+
+		// The commit `repo sync` fetched carries a token this member's own
+		// pinned revision never had: it must stay unreachable through this
+		// context, the same isolation check 1 above makes for a single
+		// repository's branches.
+		leaked := searchIn(t, v, 11, "multi", name, movedToken[name])
+		if len(leaked.Matches) != 0 {
+			t.Errorf("search_code(context=multi, repository=%s, %s) = %+v, want 0: %s is only on the commit `repo sync` fetched, which this member must not have moved onto", name, movedToken[name], leaked.Matches, movedToken[name])
+		}
+	}
+}
+
+// soloRemote returns a bare repository a `repo add` can point at: one commit,
+// on main, declaring one function named token — this workspace member's own
+// version-differentiating symbol, independent of the shared demo repository
+// so a two-repository workspace can be built from scratch rather than reusing
+// one repository's two branches.
+func soloRemote(t *testing.T, name, token string) string {
+	t.Helper()
+	work := filepath.Join(t.TempDir(), name)
+	mustGit(t, "init", "-q", "-b", "main", work)
+	if err := os.WriteFile(filepath.Join(work, "go.mod"), []byte("module "+name+"\n\ngo 1.26\n"), 0o600); err != nil {
+		t.Fatalf("writing %s/go.mod: %v", name, err)
+	}
+	if err := os.WriteFile(filepath.Join(work, name+".go"), []byte("package "+name+"\n\nfunc "+token+"() {}\n"), 0o600); err != nil {
+		t.Fatalf("writing %s/%s.go: %v", name, name, err)
+	}
+	mustGit(t, "-C", work, "add", "-A")
+	mustGit(t, "-C", work,
+		"-c", "user.name=vacmcp gate", "-c", "user.email=gate@example.invalid", "-c", "commit.gpgsign=false",
+		"commit", "--no-verify", "-q", "-m", "Add "+token)
+
+	remote := filepath.Join(t.TempDir(), name+".git")
+	mustGit(t, "clone", "--bare", "--quiet", work, remote)
+	return remote
+}
+
+// advanceGenericRemote is [advanceRemote] for a repository [soloRemote] built:
+// one commit added to branch of remote, declaring a function named token, and
+// returns the commit branch now points at.
+func advanceGenericRemote(t *testing.T, remote, branch, pkg, token string) string {
+	t.Helper()
+	work := filepath.Join(t.TempDir(), "work")
+	mustGit(t, "clone", "--quiet", "--branch", branch, remote, work)
+	if err := os.WriteFile(filepath.Join(work, "later.go"), []byte("package "+pkg+"\n\nfunc "+token+"() {}\n"), 0o600); err != nil {
+		t.Fatalf("writing later.go: %v", err)
+	}
+	mustGit(t, "-C", work, "add", "-A")
+	mustGit(t, "-C", work,
+		"-c", "user.name=vacmcp gate", "-c", "user.email=gate@example.invalid", "-c", "commit.gpgsign=false",
+		"commit", "--no-verify", "-q", "-m", "Add "+token)
+	mustGit(t, "-C", work, "push", "--quiet", "origin", branch)
+	return gitOut(t, "-C", work, "rev-parse", "HEAD")
+}
+
+// createMultiContext is [createContext] for a context over several
+// repositories: every printed row is read, not only the first, so the caller
+// gets back each member's own pinned revision rather than only the first
+// one's.
+func createMultiContext(t *testing.T, binary, data, id string, pins ...managedPin) map[string]string {
+	t.Helper()
+	args := []string{"context", "create", id}
+	for _, p := range pins {
+		args = append(args, "--repo", p.repo, "--ref", p.ref)
+	}
+	out := vacmcpRun(t, binary, data, args...)
+
+	revisions := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 || fields[0] != id {
+			t.Fatalf("context create %s printed %q, want the id, state, repository and revision on each line", id, out)
+		}
+		if fields[1] != "READY" {
+			t.Fatalf("context create %s left member %s in state %s, want READY: a context the query plane will not serve", id, fields[2], fields[1])
+		}
+		revisions[fields[2]] = fields[3]
+	}
+	if len(revisions) != len(pins) {
+		t.Fatalf("context create %s printed %d distinct members, want one per repository (%d): %q", id, len(revisions), len(pins), out)
+	}
+	return revisions
+}
+
 // assertVersionIsolation is doc-1 §15's four checks, asked of any two contexts
 // whose source differs by which handler Process calls.
 //
@@ -133,7 +273,7 @@ func assertVersionIsolation(t *testing.T, v vacmcp, legacy, modern string) {
 	t.Helper()
 
 	t.Run("check 1: "+legacy+" does not see NewHandler", func(t *testing.T) {
-		found := searchIn(t, v, 1, legacy, newHandler)
+		found := searchIn(t, v, 1, legacy, "", newHandler)
 		if len(found.Matches) != 0 {
 			managedGateFail(t, 1, legacy, fmt.Sprintf(
 				"search_code returned %d matches for %s, want 0. Every line below reached this context from the revision %s pins, which it never asked for:\n%s",
@@ -144,7 +284,7 @@ func assertVersionIsolation(t *testing.T, v vacmcp, legacy, modern string) {
 	// What keeps check 1 honest: a context that answers nothing passes it for
 	// free.
 	t.Run("check 2: "+modern+" does see NewHandler", func(t *testing.T) {
-		found := searchIn(t, v, 2, modern, newHandler)
+		found := searchIn(t, v, 2, modern, "", newHandler)
 		if len(found.Matches) == 0 {
 			managedGateFail(t, 2, modern, fmt.Sprintf(
 				"search_code returned 0 matches for %s, want at least one: the revision this context pins does contain it. The context is being searched on another revision's ref, or on an index that never got this one — and it empties check 1 of meaning.",
@@ -186,13 +326,21 @@ func assertManagedTrace(t *testing.T, check int, traced traceResult, want, absen
 // gate uses, because a failure has to be reported against a record: those quote
 // the configuration file a managed server does not have, and point at the
 // static fixture's index and graph to reproduce with.
-func searchIn(t *testing.T, v vacmcp, check int, contextID, query string) searchResult {
+// repository narrows the search to one member, as get_code and trace_calls'
+// own repository argument does; left blank, the context is searched exactly
+// as before repository existed, so every caller of this outside the new
+// multi-member gate is unaffected.
+func searchIn(t *testing.T, v vacmcp, check int, contextID, repository, query string) searchResult {
 	t.Helper()
 
-	raw, isError := v.call(t, "search_code", map[string]any{"context": contextID, "query": query})
+	args := map[string]any{"context": contextID, "query": query}
+	if repository != "" {
+		args["repository"] = repository
+	}
+	raw, isError := v.call(t, "search_code", args)
 	if isError {
 		managedGateFail(t, check, contextID, fmt.Sprintf(
-			"search_code(context=%s, query=%s) refused to answer, so this check never got to run:\n%s", contextID, query, raw))
+			"search_code(context=%s, repository=%s, query=%s) refused to answer, so this check never got to run:\n%s", contextID, repository, query, raw))
 		t.FailNow()
 	}
 
@@ -366,11 +514,18 @@ func serveManaged(t *testing.T, binary, data string) vacmcp {
 // is a real failure of it rather than of a shortcut this test took.
 func discardGraphs(t *testing.T, binary, data string) {
 	t.Helper()
+	// `context list` prints one row per member, not one per context — a
+	// multi-member context's id repeats, once per repository it names. Each
+	// id is only removed once: a second `context remove` of the same id has
+	// nothing left to remove and would report CONTEXT_NOT_FOUND for a
+	// context this loop already took care of, not a graph left behind.
+	removed := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(runOut(t, binary, data, "context", "list")), "\n") {
 		id, _, found := strings.Cut(line, "\t")
-		if !found {
+		if !found || removed[id] {
 			continue
 		}
+		removed[id] = true
 		if out, err := exec.Command(binary, "context", "remove", id, "--data-dir", data).CombinedOutput(); err != nil {
 			t.Errorf("cleanup: vacmcp context remove %s left its graph in CBM's store: %v\n%s", id, err, out)
 		}

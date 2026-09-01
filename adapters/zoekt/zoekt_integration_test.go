@@ -242,6 +242,105 @@ func TestSearchRejectsUnusableQueries(t *testing.T) {
 	}
 }
 
+// multiRepoProvider is [searchProvider] for demo-multi's two real members
+// instead of the single-repository contexts: versioned-demo-repo's
+// release/v1 (the same repository and branch v1/v2 above are, indexed
+// alongside it in the one Zoekt shard) paired with second-demo-repo, which
+// testdata/gen-second-demo-repo.sh makes collide with it on purpose — same
+// path, same symbol name, different content. TASK-86 AC #1 through #3 need
+// exactly that collision, indexed for real, to prove a query scoped to one of
+// them cannot come back stamped as the other's.
+func multiRepoProvider(t *testing.T) (p *zoektadapter.Provider, repo1, repo2 vacctx.CodeContext) {
+	t.Helper()
+	fixture := demorepo.Prepared(t)
+	cfg, err := config.Load(fixture.Config)
+	if err != nil {
+		t.Fatalf("config.Load(%s) error = %v", fixture.Config, err)
+	}
+	cfg.Providers.Zoekt.URL = startZoekt(t, fixture.ZoektIndex)
+
+	members := cfg.Contexts[demorepo.MultiContext].Members
+	for _, m := range members {
+		switch m.Repository {
+		case "versioned-demo-repo":
+			repo1 = m
+		case demorepo.Repo2:
+			repo2 = m
+		}
+	}
+	if repo1.Repository == "" || repo2.Repository == "" {
+		t.Fatalf("%s members = %+v, want versioned-demo-repo and %s", demorepo.MultiContext, members, demorepo.Repo2)
+	}
+	return zoektadapter.New(cfg), repo1, repo2
+}
+
+// TestSearchStaysInsideItsRepositoryEvenWhenTheQueryTriesToEscape is TASK-86
+// AC #1 through #3, asked of the real engine that indexes both of demo-multi's
+// members in one shard. It is [TestSearchStaysInsideItsBranch] generalized
+// from an escape across branches of one repository to an escape across
+// repositories of one workspace: the same style of query, that adapter's own
+// wrapping parentheses have to stay closed inside, would — if it worked — put
+// its second arm outside the repo: filter entirely rather than merely outside
+// the branch: one, reaching second-demo-repo's real "second: " content from a
+// query scoped to versioned-demo-repo.
+func TestSearchStaysInsideItsRepositoryEvenWhenTheQueryTriesToEscape(t *testing.T) {
+	p, repo1, repo2 := multiRepoProvider(t)
+
+	for _, query := range []string{
+		"LegacyHandler) or (LegacyHandler",
+		"LegacyHandler) or (second:",
+		") or (LegacyHandler",
+		"LegacyHandler)",
+	} {
+		t.Run(query, func(t *testing.T) {
+			got, err := p.Search(t.Context(), repo1, provider.SearchQuery{Query: query})
+			if err == nil {
+				t.Fatalf("Search(%s, %q) = %+v, want INVALID_ARGUMENT: an escaping query must never reach Zoekt scoped to less than the whole workspace", repo1.Repository, query, got)
+			}
+			if code := errorOf(t, err).Code; code != vacerr.InvalidArgument {
+				t.Errorf("code = %q, want INVALID_ARGUMENT", code)
+			}
+			if got != nil {
+				t.Errorf("Search() = %+v, want no results alongside the error", got)
+			}
+		})
+	}
+
+	// A query that legitimately groups and ors is still confined to repo1: the
+	// or can reach nothing repo2 has, even though repo2's LegacyHandler is
+	// sitting in the same index under the same file name.
+	confined, err := p.Search(t.Context(), repo1, provider.SearchQuery{Query: "LegacyHandler or LegacyHandler"})
+	if err != nil {
+		t.Fatalf("Search(%s, LegacyHandler or LegacyHandler) error = %v", repo1.Repository, err)
+	}
+	if len(confined) == 0 {
+		t.Fatalf("Search(%s, LegacyHandler or LegacyHandler) = no results, want %s's own LegacyHandler", repo1.Repository, repo1.Repository)
+	}
+	for _, r := range confined {
+		if strings.Contains(r.Snippet, "second: ") {
+			t.Errorf("Search(%s, ...) returned %s:%d:%s, which is %s's content: the query reached the wrong member", repo1.Repository, r.Path, r.Line, r.Snippet, repo2.Repository)
+		}
+	}
+
+	// The mirror query, scoped to repo2, so the isolation is proven both
+	// directions and not one member simply answering nothing for everything.
+	mirror, err := p.Search(t.Context(), repo2, provider.SearchQuery{Query: "LegacyHandler"})
+	if err != nil {
+		t.Fatalf("Search(%s, LegacyHandler) error = %v", repo2.Repository, err)
+	}
+	if len(mirror) == 0 {
+		t.Fatalf("Search(%s, LegacyHandler) = no results, want %s's own LegacyHandler", repo2.Repository, repo2.Repository)
+	}
+	for _, r := range mirror {
+		if strings.Contains(r.Snippet, "legacy: ") {
+			t.Errorf("Search(%s, LegacyHandler) returned %s:%d:%s, which is %s's content: the query reached the wrong member", repo2.Repository, r.Path, r.Line, r.Snippet, repo1.Repository)
+		}
+	}
+
+	t.Logf("%s LegacyHandler or LegacyHandler = %+v", repo1.Repository, confined)
+	t.Logf("%s LegacyHandler = %+v", repo2.Repository, mirror)
+}
+
 // startZoekt runs a Zoekt web server over indexDir for the duration of the
 // test and returns its base URL. -rpc turns on the JSON API the adapter uses;
 // the HTML interface is off because nothing here reads it.
