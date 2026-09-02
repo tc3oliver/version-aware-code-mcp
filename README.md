@@ -745,16 +745,73 @@ no source equivalent, and adding one would change the public tool API.
 `CompareCode` with no source provider fails exactly as `GetCode` does. A source
 provider that is there but cannot compare two versions is a different answer
 again, `SOURCE_DIFF_UNAVAILABLE`, and the next section is where that capability
-is implemented.
+is implemented. `SearchHistory` follows the same pattern once more: a source
+provider that cannot walk history fails with `SOURCE_HISTORY_UNAVAILABLE`.
+
+### Commit history
+
+`SearchHistory` answers what changed in a version, and the version is the whole
+scope of it:
+
+```go
+result, err := eng.SearchHistory(ctx, engine.SearchHistoryRequest{
+    Context: "backend-v1",
+    Query:   "timeout",           // commit message contains this
+    Symbol:  "ResetWatchdog",     // git pickaxe: this string's count changed
+    Path:    "src/watchdog.c",    // only commits touching this path
+    Limit:   20,
+})
+for _, c := range result.Commits() {
+    fmt.Println(c.Repository, c.Commit, c.Path, c.Timestamp, c.Message)
+}
+```
+
+**Version scope.** The walk starts at the commit the context pins, not at HEAD
+and not at the default branch. A context pinned to an older commit does not see
+the commits made after it, whatever the worktree is currently checked out to.
+This is what makes the answer version-aware rather than merely repository-aware,
+and it is why the same query against two contexts gives two answers.
+
+**Multi-repo.** History is search-like: with no `Repository` it spans every
+repository the context names, and each result carries the repository it came
+from. With one, it answers in that repository alone; a repository the context
+does not name is `INVALID_ARGUMENT` rather than a guess. If any searched member
+cannot answer, the whole request fails — a history that quietly omitted one
+repository would look like a complete answer for the context.
+
+**Filters.** `Query` is a literal, case-insensitive substring test of the commit
+message: no regular expression, no ranking, no relevance model. `Symbol` is
+git's `-S` pickaxe, which selects the commits where the number of occurrences of
+that exact string changed — it is string history, not symbol resolution, so it
+does not parse the language, does not know two spellings name one function, and
+does not follow a rename. It is deliberately not `-G`: a commit that edits the
+line a symbol sits on without adding or removing an occurrence of it has not
+changed the count and is not reported. `Path` restricts both the walk and the
+reported entries to that path. All three combine with AND, and a filter matching
+nothing yields an empty result rather than being dropped.
+
+**Results.** A `Commit` is one commit-path occurrence. A commit that touched
+several paths produces one entry per path, so a multi-file commit keeps every
+file's provenance rather than being attributed to an arbitrary one; asking for a
+`Path` reports only that path. Entries are ordered by member, then git's own
+newest-first order, then the paths of a commit as git lists them, and `Limit` is
+applied to that order so a capped answer is the prefix of the uncapped one. A
+`Limit` of 0 means the provider's own bound rather than "everything"; a negative
+one is refused. Commit ids are always the full 40 characters, and timestamps are
+RFC3339 in UTC.
+
+**Read-only.** History never fetches, syncs, re-indexes, changes a context or
+checks a revision out. It reads the local object database.
 
 A request names its scope with context ids: no request type has a branch or
 revision field, and the `Repository` field some of them have —
 `SearchCodeRequest.Repository`, and its equivalent on `TraceCallsRequest`,
-`GetCodeRequest`, `CompareCodeRequest` and `CompareCallsRequest` — narrows a
+`GetCodeRequest`, `CompareCodeRequest`, `CompareCallsRequest` and
+`SearchHistoryRequest` — narrows a
 query to one of the repositories its context already names rather than
 reaching outside them; a context naming one repository never needs it, and a
-context naming several has no query without it except `SearchCode`, which
-spans every member unless narrowed. Every successful result carries the
+context naming several has no query without it except `SearchCode` and
+`SearchHistory`, which span every member unless narrowed. Every successful result carries the
 version it was answered in together with its evidence, because the result
 types have no exported fields and only a method on the engine builds one. The
 version guarantee is inherited by embedding rather than re-implemented.

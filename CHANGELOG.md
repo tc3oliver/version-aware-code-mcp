@@ -5,6 +5,62 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-02
+
+Version-scoped commit history: a context can now be asked what changed in it,
+and the answer is bounded by the commit that context pins. `search_history`
+walks from the pinned revision rather than from HEAD or the default branch, so a
+context pinned to an older commit does not see the commits made after it — the
+same question asked of two versions gives two answers. It is additive: every
+existing query answers exactly as it did in v0.5.0, and `engine.New` keeps its
+signature.
+
+v0.6.0 does not:
+
+- resolve symbol identity semantically — `symbol` is git's pickaxe over an exact
+  string, so it does not parse the language, does not know two spellings name one
+  function, and does not follow a rename;
+- rank, score or otherwise order results by relevance — `query` is a literal,
+  case-insensitive substring test of the commit message;
+- parse issue, pull-request or merge-request references out of a commit;
+- report a partial history — a workspace member whose history cannot be read
+  fails the whole request rather than being skipped.
+
+### Added
+
+- `provider.HistoryProvider`: the optional capability of walking a repository's
+  commit history, discovered by type assertion on the source provider exactly as
+  `provider.SourceDiffer` is. A backend that reads a revision's bytes cannot
+  necessarily walk its history, and a caller is told so by an error naming the
+  missing interface rather than by an empty history that reads as "this version
+  has no commits".
+- `provider.HistoryQuery` and `provider.HistoryEntry`. A `HistoryEntry` is one
+  **commit-path occurrence**: a commit that touched several paths produces one
+  entry per path, so a multi-file commit keeps every file's provenance instead of
+  being attributed to whichever path git happened to print first.
+- `engine.SearchHistory`, `engine.SearchHistoryRequest`, `engine.SearchHistoryResult`
+  and `engine.Commit`. Like `SearchCode`, history spans every repository a context
+  names unless `repository` narrows it to one, and each result carries the
+  repository it was found in.
+- `adapters/git` implements `HistoryProvider` with `git log` over the pinned
+  commit. `query`, `symbol` and `path` combine with AND: a filter that matches
+  nothing yields an empty result rather than being dropped, because widening a
+  search nobody asked to widen answers a different question.
+- `vacerr.SourceHistoryUnavailable` (`SOURCE_HISTORY_UNAVAILABLE`): the history
+  counterpart of `SOURCE_DIFF_UNAVAILABLE`.
+
+### Notes
+
+- A query with no `limit` is bounded by a provider default rather than reading a
+  large repository's whole history to answer a question the caller did not scope.
+  A negative limit is `INVALID_ARGUMENT`, not "unbounded".
+- Timestamps are RFC3339 in UTC, so the same commit reports the same bytes
+  whatever the reader's timezone is. Commit ids are always the full 40-character
+  id — never a branch, a tag, HEAD or an abbreviation.
+- History is read-only: it never fetches, syncs, re-indexes, changes a context or
+  checks a revision out. It reads the local object database, so the worktree
+  sitting on a later commit is the normal case rather than a problem.
+
 ## [0.5.0] - 2026-09-01
 
 Multi-repo contexts: a context id can now name several repositories instead of

@@ -190,3 +190,76 @@ const (
 	// LineRemoved: the line is only in the from revision.
 	LineRemoved DiffLineKind = "REMOVED"
 )
+
+// HistoryProvider is the optional capability of reading a repository's commit
+// history. It is separate from [SourceProvider] for the reason [SourceDiffer]
+// is: a source backend that can read a revision's bytes cannot necessarily walk
+// its history, and a caller should be told so by a type assertion that fails
+// rather than by an empty answer that looks like "this version has no history".
+//
+// Like every provider here it is handed ONE [vacctx.CodeContext] per call, and
+// that context's Revision is the whole scope of the walk: history is read as of
+// the commit the context pins, never as of the checkout or the default branch.
+// Walking from HEAD would report commits that are not in the version being
+// asked about, which is the wrong-version answer this server exists to prevent.
+type HistoryProvider interface {
+	SearchHistory(ctx context.Context, codeCtx vacctx.CodeContext, req HistoryQuery) ([]HistoryEntry, error)
+}
+
+// HistoryQuery is a search of one version's commit history. Every field is
+// optional, and the ones that are set are combined with AND: a commit has to
+// satisfy all of them to be reported. Nothing is relaxed when a filter matches
+// nothing — an empty result is an answer ("no commit in this version matches"),
+// not a reason to widen the search and answer a question nobody asked.
+type HistoryQuery struct {
+	// Query is a free-text search of the commit message, subject and body. It is
+	// a literal, case-insensitive substring test, deterministic and repeatable —
+	// there is no ranking, embedding or relevance model anywhere in it.
+	Query string
+	// Symbol is a git pickaxe search: it selects the commits where the number of
+	// occurrences of this exact string changed.
+	//
+	// This is STRING history, not symbol resolution. It does not parse the
+	// language, does not know that two spellings name one function, and does not
+	// follow a rename.
+	//
+	// It is git's -S, the count test, and not -G, the touched-line test: a commit
+	// that edits the line a symbol is declared on WITHOUT adding or removing an
+	// occurrence of it — reformatting it, or changing a comment beside it — does
+	// not change the count and is not reported. -S answers "where did this name
+	// come and go", which is the question a history search is for; -G answers
+	// "which commits touched a line mentioning it", which matches far more
+	// commits and is not the same question.
+	Symbol string
+	// Path restricts the walk to commits that touched this path, and the reported
+	// entries to that path. It is relative to the repository root.
+	Path string
+	// Limit caps how many entries are returned, applied after ordering so the cap
+	// is reproducible. 0 means the provider's own default bound; a negative value
+	// is refused rather than treated as unbounded.
+	Limit int
+}
+
+// HistoryEntry is ONE COMMIT-PATH OCCURRENCE: a commit together with one of the
+// paths it changed.
+//
+// A commit that touches several paths therefore produces several entries, one
+// per path, rather than one entry naming an arbitrary "the" path. Picking one
+// file out of a multi-file commit would silently drop the provenance of the
+// rest, and which file got picked would depend on the order git happened to
+// print them.
+type HistoryEntry struct {
+	// Commit is the full immutable commit id. It is never a branch, a tag, HEAD
+	// or an abbreviation: an answer has to keep naming the same commit later.
+	Commit string
+	// Path is the one path of this commit that this entry reports.
+	Path string
+	// Author is the commit's author name and email.
+	Author string
+	// Timestamp is the author date in RFC3339, so two runs of the same query on
+	// the same repository produce the same bytes regardless of the reader's
+	// locale or timezone settings.
+	Timestamp string
+	// Message is the commit message, subject and body, as git stored it.
+	Message string
+}

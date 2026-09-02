@@ -35,11 +35,14 @@ var codes = []struct {
 
 	// Added after v0.1.0, for compare_code.
 	{vacerr.SourceDiffUnavailable, "SOURCE_DIFF_UNAVAILABLE"},
+
+	// Added after v0.5.0, for search_history.
+	{vacerr.SourceHistoryUnavailable, "SOURCE_HISTORY_UNAVAILABLE"},
 }
 
 func TestEveryCodeSerialisesToSpecShape(t *testing.T) {
-	if len(codes) != 11 {
-		t.Fatalf("expected the 10 v0.1.0 codes and the one added after them, got %d", len(codes))
+	if len(codes) != 12 {
+		t.Fatalf("expected the 10 v0.1.0 codes and the two added after them, got %d", len(codes))
 	}
 	for _, c := range codes {
 		t.Run(c.want, func(t *testing.T) {
@@ -90,10 +93,18 @@ func TestEveryDeclaredCodeIsDocumentedAndPinned(t *testing.T) {
 		t.Fatalf("vacerr.go declares %v, the list above pins %v", wire, pinned)
 	}
 
-	doc := declared["SourceDiffUnavailable"].doc
-	for _, want := range []string{"compare_code", "SourceDiffer"} {
-		if !strings.Contains(doc, want) {
-			t.Errorf("SourceDiffUnavailable's doc comment does not mention %q, so it does not say when it is produced:\n%s", want, doc)
+	// Each code added after the specification has to say which tool produces it
+	// and which optional interface it reports missing, exactly as the ten before
+	// them do.
+	for name, wants := range map[string][]string{
+		"SourceDiffUnavailable":    {"compare_code", "SourceDiffer"},
+		"SourceHistoryUnavailable": {"search_history", "HistoryProvider"},
+	} {
+		doc := declared[name].doc
+		for _, want := range wants {
+			if !strings.Contains(doc, want) {
+				t.Errorf("%s's doc comment does not mention %q, so it does not say when it is produced:\n%s", name, want, doc)
+			}
 		}
 	}
 }

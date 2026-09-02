@@ -147,3 +147,17 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 		Error wireBody `json:"error"`
 	}{wireBody{Code: e.Code, Message: e.Message, Details: details}})
 }
+
+// SourceHistoryUnavailable: search_history asked a source provider that does not
+// implement [github.com/tc3oliver/version-aware-code-mcp/provider.HistoryProvider],
+// so this server can read a revision's bytes but cannot walk its commit history.
+//
+// It is the history counterpart of [SourceDiffUnavailable], and separate from it
+// for the same reason: a caller asking for history is told that this server
+// cannot answer that kind of question here, rather than being handed an empty
+// history that reads as "this version has no commits". A provider that can walk
+// history but fails reports its own error unchanged.
+//
+// It is added after v0.5.0: searching a version's history is a query v0.5.0 did
+// not have.
+const SourceHistoryUnavailable Code = "SOURCE_HISTORY_UNAVAILABLE"
