@@ -331,9 +331,15 @@ On Unix-like systems both of these hold across processes: repository lifecycle
 operations take turns, and a management command really is refused while a
 managed server runs.
 
-On Windows, Managed Mode currently provides in-process locking only. Do not run
-vacmcp management commands against a data directory that another vacmcp
-management command, or a running `vacmcp serve --managed`, is using.
+On Windows, Managed Mode currently provides in-process locking only, and that
+applies to the server as much as to the commands: `vacmcp serve --managed`
+starts without holding a cross-process lock on its data directory, so the
+refusal above does not happen there — a `context` or `repo` command run against
+the directory it is serving is allowed through and can change the artifacts
+underneath it. Do not run vacmcp management commands against a data directory
+that another vacmcp management command, or a running `vacmcp serve --managed`,
+is using. All three commands say so themselves on Windows, on stderr, at the
+moment they start.
 
 Static Mode is unaffected.
 

@@ -121,6 +121,12 @@ func serve(args []string) error {
 
 	cfg := &config.Config{}
 	if *managedMode {
+		// Before the lock is taken, because on the platform this warns about
+		// taking it succeeds without locking anything — so the warning has to
+		// be what marks that, rather than a failure that never comes. stderr
+		// because in STDIO mode stdout is the protocol stream.
+		warnOnWindows(os.Stderr, serveManagedCommand)
+
 		s, err := store.Open(*dataDir)
 		if err != nil {
 			return err
