@@ -9,7 +9,9 @@ import (
 	"io"
 	"maps"
 	"os"
+	"os/signal"
 	"slices"
+	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -162,14 +164,34 @@ func serve(args []string) error {
 	})
 	listen := listenAddress(*address, explicit, cfg)
 
+	// SIGINT and SIGTERM end the run the same way a client disconnecting does:
+	// by making the serve call below return, so every defer this function has
+	// already registered gets to run. Without this they did not run at all — a
+	// signal ended the process where it stood, which in managed mode left the
+	// server lock file behind and, with it, a management plane that refuses
+	// every command it guards.
+	//
+	// stop() is called again as soon as the context is done, which is what
+	// makes a second signal work: it puts SIGINT and SIGTERM back to their
+	// default disposition, so an operator who decides the drain is taking too
+	// long can end the process rather than wait for it. The first signal asks;
+	// the second insists.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+
 	srv := server.New(version)
 	eng := addTools(srv, cfg)
-	// Deferred, not called after ServeStdio/ServeHTTP return normally: both
-	// only return once the server has stopped, so this is the graceful
-	// shutdown path either way, including the CBM session addTools started
-	// that nothing else was closing. A failure here is reported to stderr
-	// rather than returned: the server already answered its whole run, and
-	// STDIO mode's stdout carries the protocol stream, not this.
+	// Deferred, not called after the serve call returns: it returns once the
+	// server has stopped, whether that was a client disconnecting, the listener
+	// failing or a signal, so this is the shutdown path for all three —
+	// including the CBM session addTools started that nothing else was closing.
+	// A failure here is reported to stderr rather than returned: the server
+	// already answered its whole run, and STDIO mode's stdout carries the
+	// protocol stream, not this.
 	defer func() {
 		if err := eng.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "vacmcp: %v\n", err)
@@ -179,9 +201,25 @@ func serve(args []string) error {
 	// Nothing may write to stdout in STDIO mode: it carries the protocol
 	// stream. Errors go to stderr, and only after the server has stopped.
 	if *stdio {
-		return server.ServeStdio(context.Background(), srv)
+		return stopped(ctx, server.ServeStdio(ctx, srv))
 	}
-	return server.ServeHTTP(srv, listen)
+	return stopped(ctx, server.ServeHTTPContext(ctx, srv, listen))
+}
+
+// stopped reports a shutdown that happened because it was asked for as the
+// success it is.
+//
+// The STDIO transport reports a cancelled context by returning it, which is the
+// right answer to "why did Run stop" and the wrong exit status for a server
+// that was told to stop: an operator sending SIGTERM, or a supervisor stopping
+// a container, would read a failed process. Only the error the context itself
+// ended with is swallowed, and only once that context really is done, so a
+// cancellation coming from anywhere else still comes back as a failure.
+func stopped(ctx context.Context, err error) error {
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return nil
+	}
+	return err
 }
 
 // listenAddress resolves the Streamable HTTP listen address the way serve does,

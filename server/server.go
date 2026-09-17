@@ -12,8 +12,10 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -50,10 +52,76 @@ func ServeStdio(ctx context.Context, srv *mcp.Server) error {
 	return srv.Run(ctx, &mcp.StdioTransport{})
 }
 
+// drainTimeout bounds how long [ServeHTTPContext] waits for the requests that
+// were already in flight when shutdown was asked for.
+//
+// It is a budget for finishing work, not for starting any: the listener is
+// closed first, so nothing new arrives while it runs. A query this server
+// answers is bounded by its providers rather than by a client's patience, and
+// the slowest of them is a CBM cold start measured at over ten seconds — so a
+// budget under that would routinely sever the one request shutdown is supposed
+// to protect. When it expires, Shutdown reports the deadline and the remaining
+// connections are dropped rather than waited on for ever.
+const drainTimeout = 30 * time.Second
+
 // ServeHTTP serves srv over Streamable HTTP on addr, or on [DefaultAddress]
 // when addr is empty. It blocks until the listener fails.
+//
+// It never returns on a signal, because it has no context to be told about one
+// through. A caller that wants to stop this server cleanly wants
+// [ServeHTTPContext].
 func ServeHTTP(srv *mcp.Server, addr string) error {
-	return http.ListenAndServe(listenAddress(addr), Handler(srv))
+	return ServeHTTPContext(context.Background(), srv, addr)
+}
+
+// ServeHTTPContext serves srv over Streamable HTTP on addr, or on
+// [DefaultAddress] when addr is empty, until the listener fails or ctx is done.
+//
+// When ctx is done it stops the way an HTTP server is supposed to: the listener
+// closes so nothing new is accepted, the requests already in flight are given
+// [drainTimeout] to finish and answer their clients, and only then does this
+// return. That is the whole reason it exists — http.ListenAndServe cannot be
+// asked to stop, so a server built on it has no way to let a caller's deferred
+// cleanup run before the process goes.
+//
+// A drain that does not finish inside the budget is reported, not hidden: the
+// error is Shutdown's, so a caller that logs it learns that connections were
+// dropped rather than being told the shutdown was clean.
+func ServeHTTPContext(ctx context.Context, srv *mcp.Server, addr string) error {
+	httpSrv := &http.Server{Addr: listenAddress(addr), Handler: Handler(srv)}
+
+	// Cancelled on the way out so the watcher below cannot outlive this call
+	// when the listener is what failed — otherwise a ServeHTTPContext that
+	// never got as far as serving would leave a goroutine parked on a context
+	// that may never be done.
+	watch, stopWatching := context.WithCancel(ctx)
+	defer stopWatching()
+
+	drained := make(chan error, 1)
+	go func() {
+		<-watch.Done()
+		if ctx.Err() == nil {
+			// Not a shutdown: the listener returned on its own and the defer
+			// above released this goroutine. There is nothing to drain.
+			drained <- nil
+			return
+		}
+		// WithoutCancel because this budget starts where ctx stopped: a
+		// deadline inherited from an already-cancelled context would expire
+		// before the first in-flight request got a millisecond of it.
+		grace, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainTimeout)
+		defer cancel()
+		drained <- httpSrv.Shutdown(grace)
+	}()
+
+	err := httpSrv.ListenAndServe()
+	stopWatching()
+	if errors.Is(err, http.ErrServerClosed) {
+		// Shutdown is what closed it, so what this call reports is what the
+		// drain did rather than the sentinel saying it was asked to stop.
+		return <-drained
+	}
+	return err
 }
 
 // Handler mounts srv on a Streamable HTTP handler in stateless mode. It is
