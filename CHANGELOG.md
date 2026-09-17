@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `serve` now stops on SIGINT and SIGTERM instead of dying where it stood. The
+  signal makes the serve call return, so the cleanup `serve` had already
+  registered runs: the engine is closed, the CBM session with it, and in managed
+  mode the server lock is released. Before this a container stop or a `systemctl
+  stop` left that lock held, and with it a management plane that refused every
+  command it guards until someone reasoned about a lock file.
+- Streamable HTTP drains. The listener closes first so nothing new is accepted,
+  and the requests already in flight are given 30 seconds to finish and answer
+  their clients. A drain that does not finish inside that budget is reported
+  rather than hidden.
+- A shutdown that was asked for exits 0. The STDIO transport reports a cancelled
+  context by returning it, which `serve` used to pass up as a failed run.
+
+### Added
+
+- `server.ServeHTTPContext`, which is `server.ServeHTTP` with a context to be
+  told about a shutdown through. `ServeHTTP` keeps its signature and its
+  behaviour, and is now a call to it with a background context.
+
+### Notes
+
+- A second SIGINT or SIGTERM ends the process. Once the first one has been
+  handled the two signals go back to their default disposition, so an operator
+  who decides a drain is taking too long is not made to wait for it.
+- Nothing about the shutdown is written to stdout. In STDIO mode that stream is
+  the protocol, and it stays that way to the last byte.
+
 ## [0.6.0] - 2026-09-02
 
 Version-scoped commit history: a context can now be asked what changed in it,
