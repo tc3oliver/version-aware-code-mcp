@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   told about a shutdown through. `ServeHTTP` keeps its signature and its
   behaviour, and is now a call to it with a background context.
 
+- `serve --managed` now carries the Windows locking warning that `repo` and
+  `context` already did. On Windows both managed locks are no-ops, so the server
+  starts holding no cross-process lock on its data directory and the refusal
+  that keeps management commands away from a running server does not happen —
+  the one command that holds the lock for its whole run was the one saying
+  nothing about the lock not being there. No lock mechanism changed; this makes
+  an existing limitation audible where it was silent.
+
 ### Notes
 
 - A second SIGINT or SIGTERM ends the process. Once the first one has been
