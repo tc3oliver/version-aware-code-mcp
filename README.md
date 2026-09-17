@@ -717,7 +717,7 @@ can be marked flaky.
 ## Embedding Guide
 
 The seven tools are a thin MCP layer over a Go package you can call directly.
-`engine.Engine` answers all six queries with no server, no transport and no
+`engine.Engine` answers all seven queries with no server, no transport and no
 wire schema in the way, so a gateway of your own holds the same version
 isolation this server does — and can be tested without a server in front of it.
 

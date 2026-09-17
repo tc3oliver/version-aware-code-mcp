@@ -26,13 +26,18 @@ import (
 // yields an empty result rather than being dropped — widening a search nobody
 // asked to widen answers a different question. What each one means is
 // [provider.HistoryQuery]'s to define and is not re-stated differently here.
+//
+// Limit is that contract too, unchanged: it caps entries — commit-path
+// occurrences — not commits, so a multi-file commit spends one of the budget per
+// path. Nothing here re-counts it, because a wire-level cap on commits would be
+// a second, disagreeing meaning for the same field.
 type searchHistoryInput struct {
 	Context    string `json:"context" jsonschema:"the id of the version context to search the history of, as listed by list_contexts"`
 	Repository string `json:"repository,omitempty" jsonschema:"one of the repositories the context names, as listed by list_contexts, to search only that one's history; leave it out to search every repository the context names"`
 	Query      string `json:"query,omitempty" jsonschema:"match commits whose message contains this text, case-insensitively; a literal substring test, not a pattern and not a ranking"`
 	Symbol     string `json:"symbol,omitempty" jsonschema:"match commits that changed the number of occurrences of this exact string (git's pickaxe); it is not resolved semantically and does not follow a rename"`
 	Path       string `json:"path,omitempty" jsonschema:"match only commits touching this path, relative to the repository root"`
-	Limit      int    `json:"limit,omitempty" jsonschema:"the most commits to return per repository; leave it out for the provider's default bound, and a negative value is an error rather than 'unbounded'"`
+	Limit      int    `json:"limit,omitempty" jsonschema:"the most entries to return per repository, counted in commit-path occurrences rather than commits, so a multi-file commit spends one per path; leave it out for the provider's default bound, and a negative value is an error rather than 'unbounded'"`
 }
 
 // historyCommit is one commit-path occurrence: a commit that touched several
@@ -100,7 +105,9 @@ func AddSearchHistory(srv *mcp.Server, eng *engine.Engine) {
 			"pass repository — one of the members list_contexts reports for that context — to search only one of them. " +
 			"query matches the commit message as a literal substring, symbol is git's pickaxe over an exact string, and path restricts the walk to one file; " +
 			"they combine with AND. It resolves no symbol semantically, follows no rename and ranks nothing. " +
-			"Returns the commits with the context and the evidence backing them.",
+			"Each entry is one commit-path occurrence, so a commit that touched several paths is returned once per path, repeating its commit id — " +
+			"that is the provenance of every file it changed, not a duplicate to collapse, and limit counts those entries rather than commits. " +
+			"Returns the entries with the context and the evidence backing them.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true},
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in searchHistoryInput) (*mcp.CallToolResult, any, error) {
 		result, err := eng.SearchHistory(ctx, engine.SearchHistoryRequest{

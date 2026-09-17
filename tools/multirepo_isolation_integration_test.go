@@ -496,10 +496,10 @@ func unreachableAddress(t *testing.T) string {
 	return address
 }
 
-// allToolsSession is [multiRepoSession] with compare_code and compare_calls
-// added, for the tests that need the full six-tool surface (list_contexts
-// takes no repository argument, so it is registered but not exercised by
-// AC #4).
+// allToolsSession is [multiRepoSession] with compare_code, compare_calls and
+// search_history added, for the tests that need the full tool surface
+// (list_contexts takes no repository argument, so it is registered but not
+// exercised by AC #4).
 func allToolsSession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	t.Helper()
 	if _, err := exec.LookPath(cfg.Providers.CBM.Command); err != nil {
@@ -515,6 +515,7 @@ func allToolsSession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	AddTraceCalls(srv, eng)
 	AddCompareCode(srv, eng)
 	AddCompareCalls(srv, eng)
+	AddSearchHistory(srv, eng)
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },

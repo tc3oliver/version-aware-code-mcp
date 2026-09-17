@@ -179,6 +179,92 @@ func TestSearchHistoryReportsTheWholeRecord(t *testing.T) {
 	}
 }
 
+// TestSearchHistoryReturnsOneEntryPerCommitPathOccurrence is the wire contract
+// this tool is most likely to be "tidied" out of: a commit that touched several
+// paths comes back once per path, repeating its commit id, and the entries are
+// neither deduplicated nor collapsed into one entry with a paths array.
+//
+// That repetition is the provenance of every file the commit changed. Grouping
+// it away would silently pick one path for a multi-file commit — the shape
+// [provider.HistoryEntry] exists to avoid — and would make the citations stop
+// lining up one-to-one with the entries they back. Locking it here means a
+// future change to a paths array has to come past this test rather than through
+// it.
+func TestSearchHistoryReturnsOneEntryPerCommitPathOccurrence(t *testing.T) {
+	session := historySession(t, historyConfig(t))
+
+	// "Switch Process to the v2 handler" edits three files in one commit, so it
+	// is the fixture's own multi-file commit and needs no new one invented.
+	got, raw := historyCall(t, session, map[string]any{"context": "demo-v2", "query": "v2 handler"})
+
+	pathsByCommit := map[string][]string{}
+	for _, commit := range got.Commits {
+		pathsByCommit[commit.Commit] = append(pathsByCommit[commit.Commit], commit.Path)
+	}
+	if len(pathsByCommit) != 1 {
+		t.Fatalf("the query matched %d commits, want exactly the one multi-file commit: %s", len(pathsByCommit), raw)
+	}
+
+	var sha string
+	var paths []string
+	for commit, touched := range pathsByCommit {
+		sha, paths = commit, touched
+	}
+	if len(paths) < 2 {
+		t.Fatalf("commit %s came back with paths %v; the fixture's multi-file commit must produce several entries", sha, paths)
+	}
+
+	// Distinct paths, not the same one repeated.
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if seen[path] {
+			t.Errorf("commit %s reported path %q twice; each entry is one distinct commit-path occurrence", sha, path)
+		}
+		seen[path] = true
+	}
+
+	// The same id on every one of them: entries are occurrences, so repeating the
+	// commit id is the contract rather than a duplicate.
+	for _, commit := range got.Commits {
+		if commit.Commit != sha {
+			t.Errorf("entry for %q carries commit %s, want the one commit the query matched (%s)", commit.Path, commit.Commit, sha)
+		}
+	}
+
+	// Not grouped: no entry carries a paths array, and the flat path field is
+	// what every entry is keyed on.
+	if strings.Contains(raw, `"paths"`) {
+		t.Errorf("the result carries a paths array, want one entry per commit-path occurrence: %s", raw)
+	}
+
+	// One citation per occurrence, in the same order, each naming that entry's
+	// own path — which is what stops the evidence from being collapsed either.
+	if len(got.Evidence) != len(got.Commits) {
+		t.Fatalf("%d entries but %d citations, want one each: %s", len(got.Commits), len(got.Evidence), raw)
+	}
+	for i, cited := range got.Evidence {
+		if cited.Location.Path != got.Commits[i].Path {
+			t.Errorf("citation %d names %q, want entry %d's own path %q", i, cited.Location.Path, i, got.Commits[i].Path)
+		}
+		// No invented line range: the change is the whole file's difference at
+		// that commit.
+		if cited.Location.StartLine != 0 || cited.Location.EndLine != 0 {
+			t.Errorf("citation %d carries lines %d-%d, want no range for a commit citation",
+				i, cited.Location.StartLine, cited.Location.EndLine)
+		}
+	}
+
+	// limit counts entries, not commits: one below the occurrence count returns
+	// that many entries of the same commit rather than the whole commit.
+	capped, cappedRaw := historyCall(t, session, map[string]any{
+		"context": "demo-v2", "query": "v2 handler", "limit": len(paths) - 1,
+	})
+	if len(capped.Commits) != len(paths)-1 {
+		t.Errorf("limit=%d returned %d entries, want %d — limit caps occurrences, not commits: %s",
+			len(paths)-1, len(capped.Commits), len(paths)-1, cappedRaw)
+	}
+}
+
 // TestSearchHistoryFiltersCombineWithAnd covers the three filters and the rule
 // that a filter matching nothing narrows to nothing rather than being dropped —
 // widening a search nobody asked to widen answers a different question.
@@ -221,7 +307,10 @@ func TestSearchHistoryFiltersCombineWithAnd(t *testing.T) {
 }
 
 // TestSearchHistoryLimitBoundsEachRepository covers the bound and the one value
-// that is an error rather than a meaning.
+// that is an error rather than a meaning. The bound is on entries — commit-path
+// occurrences — which is [provider.HistoryQuery.Limit]'s own meaning, unchanged
+// by this tool; TestSearchHistoryReturnsOneEntryPerCommitPathOccurrence is where
+// that distinction is pinned.
 func TestSearchHistoryLimitBoundsEachRepository(t *testing.T) {
 	session := historySession(t, historyConfig(t))
 
@@ -232,7 +321,7 @@ func TestSearchHistoryLimitBoundsEachRepository(t *testing.T) {
 
 	bounded, _ := historyCall(t, session, map[string]any{"context": "demo-v2", "limit": 1})
 	if len(bounded.Commits) != 1 {
-		t.Errorf("limit=1 returned %d commits, want 1", len(bounded.Commits))
+		t.Errorf("limit=1 returned %d entries, want 1", len(bounded.Commits))
 	}
 
 	// Not "unbounded": a negative limit is a caller's mistake and is said so.

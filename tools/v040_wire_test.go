@@ -21,7 +21,9 @@ import (
 )
 
 // v040Source is a source backend that both reads and diffs, so one server can
-// serve all six tools at once. The two other fakes this file needs already exist
+// serve every tool v0.4.0 had at once. It deliberately does not walk history:
+// search_history is registered alongside them by [serveTools] but is not one of
+// v0.4.0's tools and no golden here covers it. The two other fakes this file needs already exist
 // — [wiredSearch] answers one match per repository and [compareGraph] holds one
 // call graph per version — and reusing them is what keeps the answers below
 // fixed strings rather than whatever a repository on the machine happens to say.
@@ -116,7 +118,8 @@ func TestSingleMemberToolsMatchV040Bytes(t *testing.T) {
 			}
 
 			// The graph reference is internal in every shape, and this is the one
-			// document where all six tools can be checked for it at once.
+			// document where all six of v0.4.0's tools can be checked for it at
+			// once.
 			if strings.Contains(block.Text, "graph") {
 				t.Errorf("%s leaked a graph reference: %s", name, block.Text)
 			}
