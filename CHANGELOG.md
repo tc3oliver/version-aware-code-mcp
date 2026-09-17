@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `search_history` is now an MCP tool. The engine capability, the
+  `provider.HistoryProvider` interface and the `adapters/git` implementation all
+  shipped in v0.6.0, but nothing registered a tool for them — the feature was
+  reachable only by embedding the Go package, while the release notes described
+  it in tool voice. It takes `context`, and optionally `repository`, `query`,
+  `symbol`, `path` and `limit`; it answers with the commits, the context they
+  were found in and one citation per commit-path occurrence. Behaviour is the
+  engine's unchanged: the walk starts at the commit the context pins, history
+  spans every member of a workspace unless `repository` narrows it to one, a
+  member that cannot answer fails the whole request, and a source provider that
+  cannot walk history is refused with `SOURCE_HISTORY_UNAVAILABLE`.
 - `server.ServeHTTPContext`, which is `server.ServeHTTP` with a context to be
   told about a shutdown through. `ServeHTTP` keeps its signature and its
   behaviour, and is now a call to it with a background context.

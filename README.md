@@ -227,7 +227,7 @@ configuration, and `vacmcp serve --config FILE` serves what you wrote. Managed
 mode does that part for you. `vacmcp repo add` clones a repository into a data
 directory, `vacmcp context create` pins a ref to a commit and builds that
 commit's index and graph, and `vacmcp serve --managed` serves the contexts that
-came out ready. Same engines, same six tools, same isolation — no configuration
+came out ready. Same engines, same seven tools, same isolation — no configuration
 file and no `zoekt-git-index`, `git worktree` or `index_repository` by hand.
 
 ```bash
@@ -479,6 +479,7 @@ context does not have is refused, never reached:
 | `get_code` | unchanged | `repository` required — two members could both have the path, so nothing else says which one was meant |
 | `trace_calls` | unchanged | `repository` required — a call graph is one repository's own, so there is no walk without it |
 | `compare_code` / `compare_calls` | unchanged | `repository` required on both sides, and it must name a repository both contexts have |
+| `search_history` | unchanged | searches every member unless `repository` narrows it to one, exactly as `search_code` does |
 
 Nothing is inferred even when only one member happens to have a match today:
 the same request would silently change meaning the day a second member
@@ -515,6 +516,7 @@ v0.5.0 does not:
 | `get_code` | `context`, `path`, `start_line`, `end_line`, `repository`? | those lines as they are at that context's revision |
 | `compare_code` | `from_context`, `to_context`, `path`, `repository`? | what happened to that file between the two revisions — `ADDED`, `REMOVED`, `MODIFIED` or `UNCHANGED` — with the changed regions as hunks |
 | `compare_calls` | `from_context`, `to_context`, `symbol`, `direction`, `depth`, `repository`? | which versions had the symbol, and the call relations added, removed and unchanged between them |
+| `search_history` | `context`, `query`?, `symbol`?, `path`?, `limit`?, `repository`? | the commits reachable from that context's pinned revision, one entry per commit-path occurrence, with author, timestamp and message |
 
 `repository` is marked `?` because it is optional to the schema, not because it
 is always optional: a context naming one repository never needs it, and a context
@@ -714,7 +716,7 @@ can be marked flaky.
 
 ## Embedding Guide
 
-The six tools are a thin MCP layer over a Go package you can call directly.
+The seven tools are a thin MCP layer over a Go package you can call directly.
 `engine.Engine` answers all six queries with no server, no transport and no
 wire schema in the way, so a gateway of your own holds the same version
 isolation this server does — and can be tested without a server in front of it.

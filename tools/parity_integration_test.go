@@ -73,6 +73,9 @@ type parityWire struct {
 	StartLine int    `json:"start_line"`
 	EndLine   int    `json:"end_line"`
 	Content   string `json:"content"`
+
+	// search_history's payload.
+	Commits []historyCommit `json:"commits"`
 }
 
 // parityEvidence is one citation as a client receives it, in whichever of
@@ -178,6 +181,7 @@ func TestEngineAndMCPAnswerIdentically(t *testing.T) {
 			t.Run("search_code", func(t *testing.T) { paritySearchCode(t, cfg, eng, session, version.id, version.own, version.other) })
 			t.Run("trace_calls", func(t *testing.T) { parityTraceCalls(t, cfg, eng, session, version.id, version.own, version.other) })
 			t.Run("get_code", func(t *testing.T) { parityGetCode(t, cfg, eng, session, version.id, version.own, version.other) })
+			t.Run("search_history", func(t *testing.T) { paritySearchHistory(t, cfg, eng, session, version.id) })
 		})
 	}
 }
@@ -227,6 +231,67 @@ func paritySearchCode(t *testing.T, cfg *config.Config, eng *engine.Engine, sess
 	_, err := eng.SearchCode(t.Context(), engine.SearchCodeRequest{Context: "demo-v3", Query: own})
 	assertCodeParity(t, "search_code(demo-v3)", directCode(t, err),
 		parityErrorCode(t, session, "search_code", map[string]any{"context": "demo-v3", "query": own}),
+		vacerr.ContextNotFound)
+}
+
+// paritySearchHistory compares the two paths through search_history: a walk that
+// finds commits, a filter that finds none, and the refusal an unconfigured
+// context gets.
+//
+// The empty case is this tool's version of decision-8's: a filter matching
+// nothing is an answer — "no commit in this version says that" — and it has to
+// be equally empty through both paths. A tool that dropped a filter it could not
+// satisfy, or an engine that did, would answer this one with a full history.
+func paritySearchHistory(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession, contextID string) {
+	t.Helper()
+
+	walk := func(what string, req engine.SearchHistoryRequest, args map[string]any) parityWire {
+		t.Helper()
+		result, err := eng.SearchHistory(t.Context(), req)
+		if err != nil {
+			t.Fatalf("engine.SearchHistory(%s): %v", what, err)
+		}
+		assertScoped(t, result.Context(), contextID)
+
+		commits := make([]historyCommit, 0, len(result.Commits()))
+		for _, commit := range result.Commits() {
+			commits = append(commits, historyCommit{
+				Commit:    commit.Commit,
+				Path:      commit.Path,
+				Author:    commit.Author,
+				Timestamp: commit.Timestamp,
+				Message:   commit.Message,
+			})
+		}
+		direct := parityWire{
+			Context:  onTheWire(t, result.Context()),
+			Evidence: evidenceOnTheWire(t, result.Context(), result.Evidence()),
+			Commits:  commits,
+		}
+		wire, raw := parityResult(t, cfg, session, "search_history", args)
+		return assertParity(t, "search_history("+what+")", direct, wire, raw)
+	}
+
+	// The whole history of this version. Both sides walk it, and walk the same
+	// commits in the same order.
+	if found := walk(contextID, engine.SearchHistoryRequest{Context: contextID},
+		map[string]any{"context": contextID}); len(found.Commits) == 0 {
+		t.Errorf("search_history(%s) found nothing on either side, so agreeing on it proves nothing", contextID)
+	}
+
+	// A message no commit in this fixture carries.
+	if absent := walk(contextID+", nonexistent-message",
+		engine.SearchHistoryRequest{Context: contextID, Query: "nonexistent-message"},
+		map[string]any{"context": contextID, "query": "nonexistent-message"}); len(absent.Commits) != 0 {
+		t.Errorf("search_history(%s, nonexistent-message) = %+v, want no commits", contextID, absent.Commits)
+	}
+
+	// A context that does not exist, refused identically. An empty history here
+	// would read as "this version has no such commit", which is a claim about
+	// history the server has no version to make.
+	_, err := eng.SearchHistory(t.Context(), engine.SearchHistoryRequest{Context: "demo-v3"})
+	assertCodeParity(t, "search_history(demo-v3)", directCode(t, err),
+		parityErrorCode(t, session, "search_history", map[string]any{"context": "demo-v3"}),
 		vacerr.ContextNotFound)
 }
 
@@ -396,6 +461,116 @@ func TestEngineAndMCPAnswerIdenticallyOverAMultiMemberWorkspace(t *testing.T) {
 	// of a second single-repository one.
 	t.Run("compare_code_repository_"+multiRepo1, func(t *testing.T) { parityMultiCompareCode(t, cfg, eng, session) })
 	t.Run("compare_calls_repository_"+multiRepo1, func(t *testing.T) { parityMultiCompareCalls(t, cfg, eng, session) })
+
+	// search_history spans the workspace by default, like search_code, so it has
+	// both shapes to hold: the members one unnarrowed, and the flat one once
+	// repository picks a member out. Both members are narrowed to, for the reason
+	// the searches above are: a narrowing that answered from whichever member
+	// happened to be first would pass for one of them.
+	t.Run("search_history_whole_workspace", func(t *testing.T) { parityMultiSearchHistory(t, cfg, eng, session) })
+	for _, repository := range []string{multiRepo1, multiRepo2} {
+		t.Run("search_history_repository_"+repository, func(t *testing.T) {
+			parityMultiSearchHistoryNarrowed(t, cfg, eng, session, repository)
+		})
+	}
+}
+
+// parityMultiSearchHistory compares the two paths through search_history left
+// unnarrowed over demo-multi: the members shape, where each commit and each
+// citation says which repository it came from.
+func parityMultiSearchHistory(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession) {
+	t.Helper()
+
+	result, err := eng.SearchHistory(t.Context(), engine.SearchHistoryRequest{Context: demorepo.MultiContext})
+	if err != nil {
+		t.Fatalf("engine.SearchHistory(%s): %v", demorepo.MultiContext, err)
+	}
+	workspace := result.Context()
+	if len(workspace.Members) != 2 {
+		t.Fatalf("SearchHistory(%s) answered with members %+v, want the two it names", demorepo.MultiContext, workspace.Members)
+	}
+
+	commits := make([]historyCommit, 0, len(result.Commits()))
+	for _, commit := range result.Commits() {
+		commits = append(commits, historyCommit{
+			Commit: commit.Commit, Path: commit.Path, Author: commit.Author,
+			Timestamp: commit.Timestamp, Message: commit.Message,
+			Repository: commit.Repository,
+		})
+	}
+	direct := parityWire{
+		// list is production's own per-workspace projection, reused rather than
+		// duplicated, for the reason parityMultiSearch gives.
+		Context:  list([]vacctx.Workspace{workspace})[0],
+		Evidence: evidenceOnTheWire(t, workspace, result.Evidence()),
+		Commits:  commits,
+	}
+	wire, raw := parityResult(t, cfg, session, "search_history", map[string]any{"context": demorepo.MultiContext})
+	walked := assertParity(t, "search_history("+demorepo.MultiContext+")", direct, wire, raw)
+
+	// Agreement on an answer that covered one member would be agreement on the
+	// wrong answer, so what the two sides agreed on has to be both members'.
+	seen := map[string]bool{}
+	for _, commit := range walked.Commits {
+		if commit.Repository == "" {
+			t.Errorf("commit %s carries no repository in a spanning answer: %s", commit.Commit, raw)
+		}
+		seen[commit.Repository] = true
+	}
+	for _, repository := range []string{multiRepo1, multiRepo2} {
+		if !seen[repository] {
+			t.Errorf("a spanning history covered %v, want it to include %s", seen, repository)
+		}
+	}
+}
+
+// parityMultiSearchHistoryNarrowed compares the two paths through
+// search_history narrowed to one member: the flat shape, naming the member it
+// resolved to and carrying no members array and no per-commit repository.
+func parityMultiSearchHistoryNarrowed(t *testing.T, cfg *config.Config, eng *engine.Engine, session *mcp.ClientSession, repository string) {
+	t.Helper()
+
+	req := engine.SearchHistoryRequest{Context: demorepo.MultiContext, Repository: repository}
+	result, err := eng.SearchHistory(t.Context(), req)
+	if err != nil {
+		t.Fatalf("engine.SearchHistory(%s, %s): %v", demorepo.MultiContext, repository, err)
+	}
+	workspace := result.Context()
+	if len(workspace.Members) != 1 || workspace.Members[0].Repository != repository {
+		t.Fatalf("SearchHistory(%s, %s) answered for %+v, want the one member named", demorepo.MultiContext, repository, workspace.Members)
+	}
+
+	commits := make([]historyCommit, 0, len(result.Commits()))
+	for _, commit := range result.Commits() {
+		// No Repository: narrowed to one member, the context block says which.
+		commits = append(commits, historyCommit{
+			Commit: commit.Commit, Path: commit.Path, Author: commit.Author,
+			Timestamp: commit.Timestamp, Message: commit.Message,
+		})
+	}
+	direct := parityWire{
+		Context:  list([]vacctx.Workspace{workspace})[0],
+		Evidence: evidenceOnTheWire(t, workspace, result.Evidence()),
+		Commits:  commits,
+	}
+	args := map[string]any{"context": demorepo.MultiContext, "repository": repository}
+	wire, raw := parityResult(t, cfg, session, "search_history", args)
+	walked := assertParity(t, "search_history("+demorepo.MultiContext+", "+repository+")", direct, wire, raw)
+
+	if len(walked.Commits) == 0 {
+		t.Errorf("search_history narrowed to %s found nothing on either side, so agreeing on it proves nothing", repository)
+	}
+
+	// A repository the context does not name is refused identically: the
+	// argument selects a member, it is not a way out of the context.
+	_, err = eng.SearchHistory(t.Context(), engine.SearchHistoryRequest{
+		Context: demorepo.MultiContext, Repository: "example/not-a-member",
+	})
+	assertCodeParity(t, "search_history("+demorepo.MultiContext+", example/not-a-member)", directCode(t, err),
+		parityErrorCode(t, session, "search_history", map[string]any{
+			"context": demorepo.MultiContext, "repository": "example/not-a-member",
+		}),
+		vacerr.InvalidArgument)
 }
 
 // parityMultiSearch compares the two paths through search_code left unnarrowed
@@ -1144,6 +1319,7 @@ func paritySession(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 	AddGetCode(srv, eng)
 	AddCompareCode(srv, eng)
 	AddCompareCalls(srv, eng)
+	AddSearchHistory(srv, eng)
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
@@ -1186,6 +1362,7 @@ func paritySessionOverStdio(t *testing.T, cfg *config.Config) *mcp.ClientSession
 	AddGetCode(srv, eng)
 	AddCompareCode(srv, eng)
 	AddCompareCalls(srv, eng)
+	AddSearchHistory(srv, eng)
 
 	// Two pipes, one per direction: a client's Reader is the other end of the
 	// server's Writer, and the other way round, which is what turns two
