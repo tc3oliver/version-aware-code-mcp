@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tc3oliver/version-aware-code-mcp/internal/deadline"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
@@ -66,6 +67,12 @@ func (p *Provider) SearchHistory(ctx context.Context, codeCtx vacctx.CodeContext
 		)
 	}
 
+	// Generous, and the only git budget that is: `git log -S` walks every commit
+	// in range, which on a large history is minutes of work the caller actually
+	// asked for. See historyBudget.
+	ctx, cancel := deadline.With(ctx, historyBudget, deadline.Git, "history")
+	defer cancel()
+
 	// The pinned commit, resolved once. Everything below walks from THIS commit,
 	// which is what keeps the answer inside the version that was asked about.
 	revision, err := p.resolve(ctx, codeCtx, repo.Path)
@@ -100,10 +107,11 @@ func (p *Provider) SearchHistory(ctx context.Context, codeCtx vacctx.CodeContext
 
 	out, err := gitOutput(ctx, repo.Path, args...)
 	if err != nil {
-		// A cancelled or timed-out walk is the caller's deadline, not a broken
-		// repository: report it as itself so it is not classified as a bad query.
-		if cerr := ctx.Err(); cerr != nil {
-			return nil, cerr
+		// A walk that ran out of time is not a broken repository. Which clock ran
+		// out decides what is reported: this server's budget is OPERATION_TIMEOUT,
+		// and the caller's own cancellation or deadline is returned as itself.
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
 		}
 		return nil, vacerr.New(
 			vacerr.RepositoryNotFound,

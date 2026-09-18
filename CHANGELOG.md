@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A caller waiting on the first codebase-memory-mcp session now stops waiting on
+  its own clock. The session start is deliberately not on the caller's context —
+  it is the session every later trace shares, so a client that walks away must
+  not take it down — but the *waiting* was not on the caller's context either, so
+  the first request to arrive at a CBM that never finishes starting was held for
+  the whole connect budget with its own deadline long past. The start now runs as
+  a lifecycle of its own: one attempt at a time however many traces are waiting,
+  left running when a caller leaves so the next one gets the session it paid to
+  begin, never switched to the `cli` mode for good by a cancellation, and shut
+  down by `Close` — which waits for it, so no codebase-memory-mcp outlives the
+  provider that spawned it.
+- A timeout inside a diagnostic command is reported as the timeout it is. Several
+  paths answer a failed git by running another git to find out why it failed: a
+  rev-parse that failed is classified by asking for the git directory, a failed
+  `git show` by asking the tree whether the path is there, an empty diff by
+  asking whether it ever was. When that second command was the one that ran out
+  of time, its verdict was returned as though it had reached one —
+  `REPOSITORY_NOT_FOUND` for a repository nothing managed to read,
+  `INVALID_ARGUMENT` about a tree nothing managed to list — sending the caller to
+  correct a path or a context that was right all along. Resolution, reads, diffs
+  and the fail-closed worktree check now all put the clock ahead of the verdict.
 - The `repo` and `context` commands now honour SIGINT and SIGTERM. They called
   the management layer with `context.Background()`, so `exec.CommandContext` had
   nothing to cancel on: Ctrl-C reached the CLI and stopped there while the `git
@@ -39,7 +60,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A shutdown that was asked for exits 0. The STDIO transport reports a cancelled
   context by returning it, which `serve` used to pass up as a failed run.
 
+### Changed
+
+- **Wire behaviour correction, pre-v1.0.** A Zoekt request that runs out of time
+  is now `OPERATION_TIMEOUT`. It was `SEARCH_PROVIDER_UNAVAILABLE`, and had been
+  since v0.1.0, because the budget was an `http.Client` timeout — an error
+  indistinguishable from a connection failure. A Zoekt that accepted the request
+  and went quiet was therefore reported as a Zoekt that could not be reached,
+  which sends an operator to look at a server that is listening and healthy.
+
+  The duration is unchanged at 30 seconds. What changed is who owns it: the
+  budget is now on the request context, so the three outcomes are told apart.
+
+  ```
+  connection refused, bad response, HTTP failure  → SEARCH_PROVIDER_UNAVAILABLE
+  vacmcp's own request budget expired             → OPERATION_TIMEOUT
+  the caller cancelled or its deadline expired    → the raw context error
+  ```
+
+  A client that branches on `SEARCH_PROVIDER_UNAVAILABLE` to mean "slow or
+  absent" has to be updated. This is the one breaking change in the timeout work
+  and it is made now, before v1.0.0, rather than leaving Zoekt permanently
+  inconsistent with git and codebase-memory-mcp.
+
 ### Added
+
+- Every query-plane operation now has a budget vacmcp sets for itself, reported
+  as `OPERATION_TIMEOUT` when it expires: context resolution (30s), git source
+  reads (30s), git diffs (30s), git history walks (2m), codebase-memory-mcp
+  traversals (2m) and Zoekt requests (30s).
+
+  They are wedged-process guards, not performance targets. None is derived from
+  the test fixture, which is far too small to size them: against it on a
+  developer machine a resolve is 9ms, a read 9ms, a diff 17ms, a history walk
+  9ms, a Zoekt search 1ms and a trace 176ms. They follow the guards this project
+  already set — a Zoekt request and a doctor probe at 30 seconds, a CBM session
+  start at 2 minutes — and the two long ones are long because the work behind
+  them legitimately is: `git log -S` is a pickaxe over every commit in range, and
+  a CBM call with no session pays a cold start that has been measured at 8.5
+  seconds.
+
+  **Management-plane operations get no budget**: `repo add`, `repo sync`,
+  `zoekt-git-index` and `codebase-memory-mcp index_repository` still run for as
+  long as they need, and an operator ends them with Ctrl-C. A first clone or a
+  first index is hours of legitimate work on a large repository, and a wall-clock
+  guess there would fail exactly the cases those commands exist for.
 
 - `vacerr.OperationTimeout` (`OPERATION_TIMEOUT`): an operation budget vacmcp set
   for itself expired. It is a wedged-process guard — a git that never returns, a
@@ -62,8 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which settles the question at the moment the context ended rather than when it
   is asked about.
 
-  No adapter sets a budget yet. This release adds the contract and the code; the
-  deadlines follow.
+  The contract and the code that proves one are separate from the deadlines that
+  use them: the budgets are the entry above.
 
 ### Tests
 

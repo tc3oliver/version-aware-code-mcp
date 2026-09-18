@@ -30,22 +30,32 @@ import (
 	"time"
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/internal/deadline"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
-const (
-	// requestTimeout bounds a single search. Zoekt stops its own search after
-	// 20s, so this only has to cover a server that accepts the connection and
-	// then never answers; a tool call must not hang on it forever.
-	requestTimeout = 30 * time.Second
+// requestBudget bounds a single request to Zoekt. Zoekt stops its own search
+// after 20s, so this only has to cover a server that accepts the connection and
+// then never answers; a tool call must not hang on it forever.
+//
+// The duration is unchanged from the http.Client timeout it replaces. What
+// changed is who owns it: a client-level timeout produces an error
+// indistinguishable from a network failure, so a Zoekt that went quiet was
+// reported as a Zoekt that was unavailable. It is now a context budget, which
+// [deadline.Ended] can tell apart from the caller's own deadline and from a
+// server that really is unreachable.
+//
+// It is a var rather than a const for the reason cmd/vacmcp's goos is one: a
+// test has to be able to stand on the branch it guards without waiting out a
+// budget meant for a wedged process. Nothing outside a test ever assigns to it.
+var requestBudget = 30 * time.Second
 
-	// maxFiles caps how many files one search may return. The query comes from
-	// a caller who is free to make it match everything, and the whole result is
-	// held in memory and sent on as evidence.
-	maxFiles = 100
-)
+// maxFiles caps how many files one search may return. The query comes from a
+// caller who is free to make it match everything, and the whole result is held
+// in memory and sent on as evidence.
+const maxFiles = 100
 
 // Provider is the Zoekt implementation of [provider.SearchProvider].
 type Provider struct {
@@ -60,9 +70,12 @@ type Provider struct {
 func New(cfg *config.Config) *Provider {
 	base := strings.TrimRight(cfg.Providers.Zoekt.URL, "/")
 	return &Provider{
-		url:    base + "/api/search",
-		list:   base + "/api/list",
-		client: &http.Client{Timeout: requestTimeout},
+		url:  base + "/api/search",
+		list: base + "/api/list",
+		// No Timeout: the budget is the request context's, set per call in post
+		// and IndexedBranches. Two owners of the same deadline would race, and
+		// only one of them can say whose deadline it was.
+		client: &http.Client{},
 	}
 }
 
@@ -83,6 +96,9 @@ func (p *Provider) IndexedBranches(ctx context.Context, repository string) ([]st
 	if err != nil {
 		return nil, p.listUnavailable(repository, err)
 	}
+	ctx, cancel := deadline.With(ctx, requestBudget, deadline.Zoekt, "list")
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.list, bytes.NewReader(body))
 	if err != nil {
 		return nil, p.listUnavailable(repository, err)
@@ -91,6 +107,9 @@ func (p *Provider) IndexedBranches(ctx context.Context, repository string) ([]st
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, p.listUnavailable(repository, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -257,6 +276,9 @@ func (p *Provider) post(ctx context.Context, codeCtx vacctx.CodeContext, query s
 		return nil, p.unavailable(codeCtx, query, err)
 	}
 
+	ctx, cancel := deadline.With(ctx, requestBudget, deadline.Zoekt, "search")
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(body))
 	if err != nil {
 		return nil, p.unavailable(codeCtx, query, err)
@@ -265,6 +287,13 @@ func (p *Provider) post(ctx context.Context, codeCtx vacctx.CodeContext, query s
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		// The migration: a request that ran out of time used to arrive here as
+		// an unreachable engine. A budget that expired is this server's decision
+		// and says so; a caller that gave up is returned as itself; only a Zoekt
+		// that could not be reached or would not answer is still unavailable.
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, p.unavailable(codeCtx, query, err)
 	}
 	defer func() { _ = resp.Body.Close() }()

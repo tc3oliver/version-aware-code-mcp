@@ -70,14 +70,15 @@ func TestACancelledCallLeavesTheSessionAlone(t *testing.T) {
 func TestAFailedStartIsNotRetriedForever(t *testing.T) {
 	p := &Provider{command: filepath.Join(t.TempDir(), "codebase-memory-mcp")}
 
-	if session := p.persistent(t.Context()); session != nil {
-		t.Fatal("persistent() returned a session for a binary that does not exist")
+	session, err := p.persistent(t.Context())
+	if session != nil || err != nil {
+		t.Fatalf("persistent() = %v, %v for a binary that does not exist, want nil, nil", session, err)
 	}
 	if !p.cliOnly {
 		t.Error("a failed start did not switch the provider to the cli mode")
 	}
-	if session := p.persistent(t.Context()); session != nil {
-		t.Error("persistent() tried again after giving up")
+	if session, err := p.persistent(t.Context()); session != nil || err != nil {
+		t.Errorf("persistent() = %v, %v; it tried again after giving up", session, err)
 	}
 }
 

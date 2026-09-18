@@ -32,10 +32,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/internal/deadline"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
@@ -49,6 +51,22 @@ import (
 // hits the ceiling.
 const maxNodes = 1000
 
+// traceBudget bounds one whole traversal: resolve, trace and locate together.
+//
+// Generous on purpose, and anchored to what this package already knows about
+// codebase-memory-mcp rather than to the fixture. A session start is bounded at
+// 2 minutes here because CBM has taken 8.5 seconds just to come up on a cold
+// machine; a `cli` call that has no session pays that startup again before it
+// answers at all. Measured against the prepared fixture on a developer machine a
+// trace is 176ms, with 1.6s for the first one — which says only that nothing
+// normal is near this. The budget is for a graph engine that has stopped
+// answering, not for one that is working through a large graph.
+//
+// It is a var rather than a const for the reason cmd/vacmcp's goos is one: a
+// test has to be able to stand on the branch below without waiting out a budget
+// meant for a wedged process. Nothing outside a test ever assigns to it.
+var traceBudget = 2 * time.Minute
+
 // Provider is the CBM implementation of [provider.GraphProvider].
 //
 // One Provider is meant to be shared: it starts CBM once and holds the session,
@@ -57,12 +75,17 @@ const maxNodes = 1000
 type Provider struct {
 	command string
 
-	// The persistent session, and whether starting one has been given up on.
-	// Guarded by mu because tool calls arrive concurrently; the calls
-	// themselves are not serialised, only the session's own lifecycle is.
-	mu      sync.Mutex
-	session *mcp.ClientSession
-	cliOnly bool
+	// The session's whole lifecycle: the session itself, the attempt to start
+	// one that is currently in flight, whether starting one has been given up
+	// on, and whether Close is taking this provider down. Guarded by mu because
+	// tool calls arrive concurrently; the calls themselves are not serialised,
+	// only the lifecycle is — which is what keeps a hundred concurrent traces
+	// from starting a hundred CBMs.
+	mu       sync.Mutex
+	session  *mcp.ClientSession
+	cliOnly  bool
+	starting *startup
+	closed   bool
 }
 
 // New returns a Provider running the codebase-memory-mcp binary named in cfg.
@@ -74,7 +97,10 @@ func New(cfg *config.Config) *Provider {
 // TraceCalls returns the call graph around req.Symbol inside the CBM project
 // named by codeCtx.GraphRef.
 //
-// Every failure is a *[vacerr.Error]. A symbol no node matches is
+// Every failure is a *[vacerr.Error], except the caller's own two clocks: a
+// cancellation is [context.Canceled] and an expired caller deadline is
+// [context.DeadlineExceeded], both unwrapped, while this adapter's own budget
+// expiring is [vacerr.OperationTimeout]. A symbol no node matches is
 // [vacerr.SymbolNotFound], a symbol several nodes match is
 // [vacerr.SymbolAmbiguous] carrying the candidates, and anything wrong with CBM
 // itself — binary absent, process failed, graph not indexed, output not the
@@ -86,13 +112,32 @@ func (p *Provider) TraceCalls(ctx context.Context, codeCtx vacctx.CodeContext, r
 		return nil, err
 	}
 
+	// One budget for the whole traversal rather than one per CBM call: resolve,
+	// trace and locate are one answer to the caller, and a walk that spent the
+	// budget on its third hop has not half-answered, it has not come back.
+	//
+	// The session start inside has a budget of its own and is deliberately
+	// outside this one — it is built on context.WithoutCancel so that a client
+	// going away cannot take down the session every later call depends on. What
+	// is inside this budget is the *waiting*: a trace held behind a CBM that
+	// never finishes starting stops waiting here, on this clock, while the
+	// start it was waiting for carries on for whoever asks next.
+	ctx, cancel := deadline.With(ctx, traceBudget, deadline.CBM, "trace")
+	defer cancel()
+
 	root, err := p.resolve(ctx, codeCtx, req.Symbol)
 	if err != nil {
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, err
 	}
 
 	hops, err := p.trace(ctx, codeCtx, root, direction, req.Depth)
 	if err != nil {
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, err
 	}
 	if len(hops) == 0 {
@@ -109,6 +154,9 @@ func (p *Provider) TraceCalls(ctx context.Context, codeCtx vacctx.CodeContext, r
 
 	nodes, err := p.locate(ctx, codeCtx, hops)
 	if err != nil {
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, err
 	}
 	return &provider.CallGraph{Symbol: root.Name, Edges: edges(hops, nodes, req.Direction)}, nil

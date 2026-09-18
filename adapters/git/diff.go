@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tc3oliver/version-aware-code-mcp/internal/deadline"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
@@ -46,6 +47,9 @@ func (p *Provider) Diff(ctx context.Context, from, to vacctx.CodeContext, req pr
 		)
 	}
 
+	ctx, cancel := deadline.With(ctx, diffBudget, deadline.Git, "diff")
+	defer cancel()
+
 	fromRevision, err := p.resolve(ctx, from, repo.Path)
 	if err != nil {
 		return nil, err
@@ -67,11 +71,14 @@ func (p *Provider) Diff(ctx context.Context, from, to vacctx.CodeContext, req pr
 		"--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
 		fromRevision, toRevision, "--", cleanPath)
 	if err != nil {
-		return nil, vacerr.New(
+		// The diff itself is the command most likely to be the slow one here,
+		// and a repository "that cannot compare" is the wrong thing to tell a
+		// caller whose comparison simply ran out of time.
+		return nil, deadline.Override(ctx, vacerr.New(
 			vacerr.RepositoryNotFound,
 			fmt.Sprintf("compare_code: repository %q cannot compare %s between %s and %s: %v", from.Repository, cleanPath, fromRevision, toRevision, err),
 			map[string]any{"repository": from.Repository, "path": cleanPath, "from_revision": fromRevision, "to_revision": toRevision},
-		)
+		))
 	}
 	if out == "" {
 		return p.emptyDiff(ctx, repo.Path, cleanPath, fromRevision, toRevision)
@@ -91,10 +98,13 @@ func (p *Provider) Diff(ctx context.Context, from, to vacctx.CodeContext, req pr
 func (p *Provider) emptyDiff(ctx context.Context, repoPath, filePath, fromRevision, toRevision string) (*provider.SourceDiff, error) {
 	entry, err := gitLine(ctx, repoPath, "ls-tree", "--name-only", fromRevision, "--", filePath)
 	if err != nil || entry == "" {
-		return nil, invalid(
+		// The same rule as the failed read's ls-tree: this is the diagnostic
+		// deciding what an empty diff meant, so a diagnostic that never came
+		// back must not be allowed to decide it.
+		return nil, deadline.Override(ctx, invalid(
 			fmt.Sprintf("compare_code: neither revision %s nor %s has file %s", fromRevision, toRevision, filePath),
 			map[string]any{"path": filePath, "from_revision": fromRevision, "to_revision": toRevision},
-		)
+		))
 	}
 	return &provider.SourceDiff{Path: filePath, Change: provider.ChangeUnchanged}, nil
 }
