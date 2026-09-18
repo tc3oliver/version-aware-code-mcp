@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A shutdown that was asked for exits 0. The STDIO transport reports a cancelled
   context by returning it, which `serve` used to pass up as a failed run.
 
+### Documentation
+
+- The roadmap named v0.6.0 as operations — metrics, OpenTelemetry, garbage
+  collection, scheduled sync primitives — while the release that shipped under
+  that number was version-scoped commit history. The table now says what v0.6.0
+  was, and the operations row carries no version number: guessing a second one is
+  what produced this. The paragraph above the table, which stopped at v0.5.0,
+  covers v0.6.0 too.
+- The v0.6.0 entry now records that the release shipped no MCP surface for
+  `search_history`, which it described throughout in tool voice.
+- The install example downloaded `vacmcp_v0.1.0_linux_amd64.tar.gz` and said
+  `vacmcp version` would print v0.1.0, six releases after that stopped being the
+  current one.
+
 ### Added
 
 - `search_history` is now an MCP tool. The engine capability, the
@@ -74,7 +88,13 @@ v0.6.0 does not:
   case-insensitive substring test of the commit message;
 - parse issue, pull-request or merge-request references out of a commit;
 - report a partial history — a workspace member whose history cannot be read
-  fails the whole request rather than being skipped.
+  fails the whole request rather than being skipped;
+- **expose any of this over MCP.** Corrected after the fact: this release added
+  `engine.SearchHistory` and the provider interface behind it, and nothing
+  registered an MCP tool for them, so the capability was reachable only from a
+  program embedding the Go package. The entry below describes it by the tool name
+  the errors and the engine already used, which read as a tool a client could
+  call. `search_history` becomes one in the next release; see [Unreleased].
 
 ### Added
 
