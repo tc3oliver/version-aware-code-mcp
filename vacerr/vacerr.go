@@ -17,8 +17,8 @@ import (
 // Code is a vacmcp error code. The string values are part of the public tool
 // API and must not change.
 //
-// There are eleven: the ten the v0.1.0 specification fixed, in the block below,
-// and [SourceDiffUnavailable], which compare_code added after it.
+// The ten the v0.1.0 specification fixed are in the block below; the ones added
+// after it are declared beneath, each saying which release added it and why.
 type Code string
 
 // The ten v0.1.0 error codes. Each one documents where it is produced in
@@ -161,3 +161,38 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 // It is added after v0.5.0: searching a version's history is a query v0.5.0 did
 // not have.
 const SourceHistoryUnavailable Code = "SOURCE_HISTORY_UNAVAILABLE"
+
+// OperationTimeout: an operation budget vacmcp set for itself expired.
+//
+// It means one thing and nothing else: *this server* decided how long a single
+// provider call may take, and the call took longer. It is a wedged-process
+// guard — a git that never returns, a codebase-memory-mcp that stopped
+// answering, a Zoekt that accepted the connection and went quiet — not a
+// performance target, and not a statement that the query was too expensive.
+//
+// The two things it deliberately does NOT cover both belong to the caller, and
+// both propagate as the context error they already are rather than being
+// wrapped:
+//
+//   - the caller cancelled, which is [context.Canceled]. The client stopped
+//     waiting and already knows why; giving it a code would put an event the
+//     client itself caused into the vocabulary it branches on.
+//   - the caller's own deadline expired, which is [context.DeadlineExceeded].
+//     That budget is the caller's and reporting it as this server's would be
+//     a false attribution — the server would still have been answering.
+//
+// Telling the third case from the second cannot be done by inspecting the error:
+// a context whose deadline passed reports [context.DeadlineExceeded] whether the
+// deadline was this server's or the caller's. The producer is the one that knows,
+// which is why the budget is attached with a cause and read back through
+// [context.Cause] rather than guessed at afterwards.
+//
+// Details name the operation that ran out of time, the provider it was talking
+// to, and the budget in milliseconds — enough for a caller to decide whether to
+// retry with a narrower query, and nothing about the repository, the query text
+// or the environment.
+//
+// It is added after v0.6.0: before it, a provider that timed out was reported as
+// a provider that was unavailable, which is a different fact about a different
+// thing.
+const OperationTimeout Code = "OPERATION_TIMEOUT"

@@ -38,11 +38,14 @@ var codes = []struct {
 
 	// Added after v0.5.0, for search_history.
 	{vacerr.SourceHistoryUnavailable, "SOURCE_HISTORY_UNAVAILABLE"},
+
+	// Added after v0.6.0, for the operation budgets the query plane sets itself.
+	{vacerr.OperationTimeout, "OPERATION_TIMEOUT"},
 }
 
 func TestEveryCodeSerialisesToSpecShape(t *testing.T) {
-	if len(codes) != 12 {
-		t.Fatalf("expected the 10 v0.1.0 codes and the two added after them, got %d", len(codes))
+	if len(codes) != 13 {
+		t.Fatalf("expected the 10 v0.1.0 codes and the three added after them, got %d", len(codes))
 	}
 	for _, c := range codes {
 		t.Run(c.want, func(t *testing.T) {
@@ -99,6 +102,10 @@ func TestEveryDeclaredCodeIsDocumentedAndPinned(t *testing.T) {
 	for name, wants := range map[string][]string{
 		"SourceDiffUnavailable":    {"compare_code", "SourceDiffer"},
 		"SourceHistoryUnavailable": {"search_history", "HistoryProvider"},
+		// OperationTimeout reports no missing interface. What its comment has to
+		// say instead is the boundary it exists to hold: which deadline is this
+		// server's and which two belong to the caller.
+		"OperationTimeout": {"context.Canceled", "context.DeadlineExceeded", "context.Cause"},
 	} {
 		doc := declared[name].doc
 		for _, want := range wants {
