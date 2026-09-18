@@ -24,7 +24,7 @@ import (
 
 func TestResolveBudgetProducesOperationTimeout(t *testing.T) {
 	hangingGit(t)
-	shrinkResolveBudget(t, 500*time.Millisecond)
+	shrinkResolveBudget(t, 2*time.Second)
 
 	_, err := resolverFor(t).Resolve(context.Background(), "app")
 
@@ -49,7 +49,7 @@ func TestResolveReportsTheCallersOwnClock(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(700 * time.Millisecond)
 			cancel()
 		}()
 
@@ -64,7 +64,7 @@ func TestResolveReportsTheCallersOwnClock(t *testing.T) {
 		hangingGit(t)
 		shrinkResolveBudget(t, time.Hour)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		_, err := resolverFor(t).Resolve(ctx, "app")

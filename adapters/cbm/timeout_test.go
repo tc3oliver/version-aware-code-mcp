@@ -30,7 +30,9 @@ var traceContext = vacctx.CodeContext{
 // distinction the Zoekt migration makes, at the other provider.
 func TestAHangingCBMIsAnOperationTimeout(t *testing.T) {
 	pidFile := hangingCBM(t)
-	shrinkTraceBudget(t, 500*time.Millisecond, 500*time.Millisecond)
+	// Two seconds each, for the reason the git ones are: under -race the
+	// stub is slow enough to lose a tighter budget before it records itself.
+	shrinkTraceBudget(t, 2*time.Second, 2*time.Second)
 
 	p := New(&config.Config{Providers: config.Providers{CBM: config.CBM{Command: "codebase-memory-mcp"}}})
 	t.Cleanup(func() { _ = p.Close() })
@@ -59,7 +61,7 @@ func TestCBMReportsTheCallersOwnClock(t *testing.T) {
 	// session start is built on context.WithoutCancel on purpose, so a client
 	// going away cannot take down the session every later call depends on. The
 	// trace budget is an hour, so what ends this call can only be the caller.
-	shrinkTraceBudget(t, time.Hour, 300*time.Millisecond)
+	shrinkTraceBudget(t, time.Hour, 2*time.Second)
 
 	p := New(&config.Config{Providers: config.Providers{CBM: config.CBM{Command: "codebase-memory-mcp"}}})
 	t.Cleanup(func() { _ = p.Close() })
@@ -68,7 +70,7 @@ func TestCBMReportsTheCallersOwnClock(t *testing.T) {
 	go func() {
 		// After the session start has given up, so the cancellation lands on the
 		// `cli` call rather than on a start that would ignore it.
-		time.Sleep(900 * time.Millisecond)
+		time.Sleep(3 * time.Second)
 		cancel()
 	}()
 

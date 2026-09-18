@@ -62,10 +62,11 @@ func TestGitBudgetsProduceOperationTimeout(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			pidFile := hangingGit(t)
-			// Long enough for the stub to start and record its pid — a budget
-			// tighter than shell startup kills it before it can, and then the
-			// test cannot say whether the child was reaped or never ran.
-			shrinkBudget(t, testCase.budget, 500*time.Millisecond)
+			// Two seconds, not a few hundred milliseconds: the budget has to outlast the
+			// stub's own startup, and under -race that is slow enough to lose a
+			// tighter one — a child killed before it records its pid leaves the test
+			// unable to say whether it was reaped or never ran.
+			shrinkBudget(t, testCase.budget, 2*time.Second)
 
 			err := testCase.call(context.Background(), timeoutProvider(t))
 
@@ -109,7 +110,7 @@ func TestGitReportsTheCallersOwnClock(t *testing.T) {
 		shrinkBudget(t, &readBudget, time.Hour)
 		p := timeoutProvider(t)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		_, err := p.Read(ctx, timeoutContext, "a.go", 1, 2)
