@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A caller waiting on the first codebase-memory-mcp session now stops waiting on
+  its own clock. The session start is deliberately not on the caller's context —
+  it is the session every later trace shares, so a client that walks away must
+  not take it down — but the *waiting* was not on the caller's context either, so
+  the first request to arrive at a CBM that never finishes starting was held for
+  the whole connect budget with its own deadline long past. The start now runs as
+  a lifecycle of its own: one attempt at a time however many traces are waiting,
+  left running when a caller leaves so the next one gets the session it paid to
+  begin, never switched to the `cli` mode for good by a cancellation, and shut
+  down by `Close` — which waits for it, so no codebase-memory-mcp outlives the
+  provider that spawned it.
 - The `repo` and `context` commands now honour SIGINT and SIGTERM. They called
   the management layer with `context.Background()`, so `exec.CommandContext` had
   nothing to cancel on: Ctrl-C reached the CLI and stopped there while the `git
@@ -106,8 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which settles the question at the moment the context ended rather than when it
   is asked about.
 
-  No adapter sets a budget yet. This release adds the contract and the code; the
-  deadlines follow.
+  The contract and the code that proves one are separate from the deadlines that
+  use them: the budgets are the entry above.
 
 ### Tests
 
