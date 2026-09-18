@@ -116,6 +116,9 @@ func verifyGraph(ctx context.Context, id string, m store.ContextMember) error {
 
 	out, err := cmd.Output()
 	if err != nil {
+		if cerr := cancelled(ctx); cerr != nil {
+			return cerr
+		}
 		return graphUnavailable(id, m, fmt.Sprintf("cannot list the graphs it holds: %v: %s", err, lastLine(stderr.Bytes())))
 	}
 
@@ -148,6 +151,9 @@ func indexGraph(ctx context.Context, worktree, id string, m store.ContextMember)
 
 	out, err := cmd.Output()
 	if err != nil {
+		if cerr := cancelled(ctx); cerr != nil {
+			return cerr
+		}
 		return graphUnavailable(id, m, fmt.Sprintf("cannot index %s: %v: %s", worktree, err, lastLine(stderr.Bytes())))
 	}
 
@@ -179,6 +185,9 @@ func deleteGraph(ctx context.Context, id string, m store.ContextMember) error {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if cerr := cancelled(ctx); cerr != nil {
+			return cerr
+		}
 		reason := lastLine(stderr.Bytes())
 		if strings.Contains(reason, "not_found") {
 			return nil

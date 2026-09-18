@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -64,7 +63,9 @@ func repoAdd(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	added, err := repositories.Add(context.Background(), name, *url)
+	ctx, stop := commandContext()
+	defer stop()
+	added, err := repositories.Add(ctx, name, *url)
 	if err != nil {
 		return err
 	}
@@ -164,7 +165,9 @@ func repoSync(args []string, out io.Writer) error {
 		names = []string{name}
 	}
 
-	synced, syncErr := repositories.Sync(context.Background(), names)
+	ctx, stop := commandContext()
+	defer stop()
+	synced, syncErr := repositories.Sync(ctx, names)
 	for _, r := range synced {
 		if _, err := fmt.Fprintf(out, "%s\t%s\t%s\n", r.Name, r.State, lastSync(r.LastSyncAt)); err != nil {
 			return err

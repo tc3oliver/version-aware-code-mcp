@@ -121,6 +121,9 @@ func indexRepository(ctx context.Context, s *store.Store, repository string) err
 	// names a user chose.
 	cmd := exec.CommandContext(ctx, indexer, "-index", s.ZoektDir(), "-branches", strings.Join(refs, ","), repoDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if cerr := cancelled(ctx); cerr != nil {
+			return cerr
+		}
 		if message := strings.TrimSpace(string(out)); message != "" {
 			return fmt.Errorf("%s: cannot index repository %q: %w: %s", indexer, repository, err, message)
 		}

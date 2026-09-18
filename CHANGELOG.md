@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `repo` and `context` commands now honour SIGINT and SIGTERM. They called
+  the management layer with `context.Background()`, so `exec.CommandContext` had
+  nothing to cancel on: Ctrl-C reached the CLI and stopped there while the `git
+  clone`, `zoekt-git-index` or `codebase-memory-mcp index_repository` it had
+  started carried on behind the returned prompt. `doctor` is threaded the same
+  way. No timeout is introduced anywhere — an operation still runs as long as it
+  needs to, and only the operator ends it early.
+- A cancelled management command reports the cancellation rather than a fault in
+  an engine that was working. `exec.CommandContext` kills its child and `Wait`
+  reports how it died, never why, so the CBM calls classified an interrupted
+  `context create` or `context remove` as `GRAPH_PROVIDER_UNAVAILABLE`. Every
+  subprocess in `managed` now asks the context first.
+- `repo sync` stops at the interrupted repository instead of marking the rest
+  failed. The loop collected each repository's failure and carried on, so a
+  Ctrl-C during `repo sync --all` would have recorded every remaining repository
+  as `FAILED` against an already-dead context. An interrupted fetch now leaves
+  its record exactly as it was.
 - `serve` now stops on SIGINT and SIGTERM instead of dying where it stood. The
   signal makes the serve call return, so the cleanup `serve` had already
   registered runs: the engine is closed, the CBM session with it, and in managed

@@ -45,6 +45,11 @@ const (
 // before exiting.
 const cbmStubEnv = "VACMCP_TEST_CBM_STUB"
 
+// cliCommandEnv makes this test binary run the CLI arguments it was given
+// instead of running tests, so a `repo` or `context` command can be driven as a
+// real process and sent a real signal.
+const cliCommandEnv = "VACMCP_TEST_CLI_COMMAND"
+
 // discardPrepared checks and then takes down the installation the real-engine
 // tests share, and is set only in the build those tests are in. It cannot be a
 // t.Cleanup: the installation outlives the test that built it, and its graphs
@@ -70,6 +75,17 @@ func TestMain(m *testing.M) {
 			args = append(args, "--cbm-command", command)
 		}
 		os.Exit(serveAsChild(args))
+	}
+	// The CLI itself, run as a subprocess so a real signal can be sent to it.
+	// Before the serve branches is wrong and after the CBM stub is wrong: this
+	// one takes its arguments from the command line rather than from a variable
+	// naming a file, so it cannot collide with either.
+	if os.Getenv(cliCommandEnv) == "1" {
+		if err := run(os.Args[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 	// After both serve branches, because a serve child has this set too: it is
 	// what it passes on to the stub it starts, and it must serve rather than
