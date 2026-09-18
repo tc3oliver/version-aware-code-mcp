@@ -9,9 +9,7 @@ import (
 	"io"
 	"maps"
 	"os"
-	"os/signal"
 	"slices"
-	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -182,12 +180,8 @@ func serve(args []string) error {
 	// default disposition, so an operator who decides the drain is taking too
 	// long can end the process rather than wait for it. The first signal asks;
 	// the second insists.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := commandContext()
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		stop()
-	}()
 
 	srv := server.New(version)
 	eng := addTools(srv, cfg)

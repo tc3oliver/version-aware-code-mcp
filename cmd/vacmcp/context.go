@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -84,7 +83,9 @@ func contextCreate(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	created, err := contexts.Create(context.Background(), id, pins)
+	ctx, stop := commandContext()
+	defer stop()
+	created, err := contexts.Create(ctx, id, pins)
 	if err != nil {
 		return err
 	}
@@ -246,7 +247,9 @@ func contextVerify(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	verified, err := contexts.Verify(context.Background(), id)
+	ctx, stop := commandContext()
+	defer stop()
+	verified, err := contexts.Verify(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -268,7 +271,9 @@ func contextRetry(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	rebuilt, err := contexts.Retry(context.Background(), id)
+	ctx, stop := commandContext()
+	defer stop()
+	rebuilt, err := contexts.Retry(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -290,7 +295,9 @@ func contextRemove(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := contexts.Remove(context.Background(), id); err != nil {
+	ctx, stop := commandContext()
+	defer stop()
+	if err := contexts.Remove(ctx, id); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(out, "%s\tREMOVED\n", id)

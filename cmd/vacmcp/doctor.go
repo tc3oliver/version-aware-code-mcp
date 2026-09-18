@@ -111,7 +111,8 @@ func doctor(args []string, out io.Writer) error {
 		return errors.New("doctor: --config is required")
 	}
 
-	ctx := context.Background()
+	ctx, stop := commandContext()
+	defer stop()
 
 	// In managed mode the configuration is the generated one, so the row below
 	// names the file the server would serve and every check after it runs on

@@ -161,6 +161,14 @@ func (m *RepositoryManager) Sync(ctx context.Context, names []string) ([]Reposit
 			r.State = RepositoryReady
 			fetchErr = runGit(ctx, "-C", path, "fetch", "--prune", "--tags")
 			if fetchErr != nil {
+				// An interrupted fetch is not a failed repository. The record is
+				// left exactly as it was — unwritten, not written back — because
+				// the only thing that happened is that the operator stopped
+				// waiting, and a FAILED state would outlive the Ctrl-C that
+				// caused it and have to be explained later.
+				if cancelled(ctx) != nil {
+					return nil
+				}
 				r.State = RepositoryFailed
 			} else {
 				r.LastSyncAt = time.Now().UTC()
@@ -172,6 +180,15 @@ func (m *RepositoryManager) Sync(ctx context.Context, names []string) ([]Reposit
 		}
 
 		if fetchErr != nil {
+			// Cancellation ends the whole sync rather than being collected
+			// alongside real failures: every repository after this one would
+			// fail instantly on the same dead context, so `repo sync --all`
+			// interrupted at the first repository would report all of them as
+			// broken. It is also returned as itself, so a caller can tell an
+			// operator stopping the command from a fetch that went wrong.
+			if cerr := cancelled(ctx); cerr != nil {
+				return synced, cerr
+			}
 			failures = append(failures, fmt.Sprintf("%s: %v", r.Name, fetchErr))
 			continue
 		}
@@ -322,6 +339,9 @@ func runGit(ctx context.Context, args ...string) error {
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
+	}
+	if cerr := cancelled(ctx); cerr != nil {
+		return cerr
 	}
 	if message := strings.TrimSpace(string(out)); message != "" {
 		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, message)

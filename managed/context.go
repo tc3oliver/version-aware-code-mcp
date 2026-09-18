@@ -789,6 +789,9 @@ func gitOutput(ctx context.Context, args ...string) (string, error) {
 	if err == nil {
 		return strings.TrimSpace(string(out)), nil
 	}
+	if cerr := cancelled(ctx); cerr != nil {
+		return "", cerr
+	}
 	if message := strings.TrimSpace(stderr.String()); message != "" {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, message)
 	}
