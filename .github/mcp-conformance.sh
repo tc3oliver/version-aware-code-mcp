@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # doc-1's protocol layer, checked with the reference client: MCP Inspector's CLI
-# drives the built vacmcp binary over STDIO and calls all six tools for real.
+# drives the built vacmcp binary over STDIO and calls all seven tools for real.
 #
-# All six, not just the ones tools/list reports. Listing a tool proves it was
+# All seven, not just the ones tools/list reports. Listing a tool proves it was
 # registered; only calling it proves a third-party client can invoke it, and
 # compare_code and compare_calls went two releases listed but never called.
-# One of the six calls is made against a multi-repository context, because a
+# Two of the calls are made against a multi-repository context, because a
 # fixture that merely contains one is not a fixture that exercised it.
 #
 # Real is the point. An in-process test can register a tool and call it without
@@ -114,6 +114,17 @@ inspect compare_calls --method tools/call --tool-name compare_calls \
 inspect get_code_multi --method tools/call --tool-name get_code \
 	--tool-arg context=demo-multi repository=second-demo-repo path=handler.go \
 	start_line=1 end_line=9
+# search_history is the capability v0.6.0 shipped with no MCP surface at all, so
+# this is the first release where a third-party client can reach it — which is
+# exactly what this script is for. The filter is a message only release/v2 has,
+# so an answer proves the walk started at the commit demo-v2 pins rather than at
+# HEAD or at the default branch.
+inspect search_history --method tools/call --tool-name search_history \
+	--tool-arg context=demo-v2 query="v2 handler"
+# Spanning a workspace, where every commit has to say which repository it is
+# from: the shape a narrowed read never produces.
+inspect search_history_multi --method tools/call --tool-name search_history \
+	--tool-arg context=demo-multi
 
 # Every call is checked for what it was supposed to prove: that the answer came
 # back over 2026-07-28, and that it is release/v2's answer. A tool that returned
@@ -162,6 +173,7 @@ if tools:
         "get_code",
         "list_contexts",
         "search_code",
+        "search_history",
         "trace_calls",
     ]
     check("tools/list", got == want, f"tools are {got}, want {want}")
@@ -265,6 +277,31 @@ if multi:
         " the colliding one in versioned-demo-repo",
     )
 
+history = structured("search_history")
+if history:
+    messages = [c["message"] for c in history["commits"]]
+    check(
+        "search_history",
+        history["context"]["branch"] == "release/v2"
+        and any("v2 handler" in message for message in messages),
+        f"commits are {messages} on branch {history['context']['branch']!r};"
+        " want release/v2's own commit, which is only reachable from the"
+        " revision demo-v2 pins",
+    )
+
+# Both members answer, and every commit says which one it came from. A history
+# that covered one repository would still be a real history, which is why the
+# repositories are what is asserted rather than merely that something came back.
+history_multi = structured("search_history_multi")
+if history_multi:
+    repositories = sorted({c.get("repository") for c in history_multi["commits"]})
+    check(
+        "search_history_multi",
+        repositories == ["second-demo-repo", "versioned-demo-repo"],
+        f"commits came from {repositories}, want both members named and every"
+        " commit attributed",
+    )
+
 if failures:
     print("\nmcp-conformance: FAILED", file=sys.stderr)
     for failure in failures:
@@ -272,6 +309,7 @@ if failures:
     sys.exit(1)
 
 print("\nmcp-conformance: 2026-07-28 negotiated by server/discover; "
-      "list_contexts, search_code, trace_calls, get_code, compare_code and "
-      "compare_calls all invoked, get_code again on a multi-repository context")
+      "list_contexts, search_code, trace_calls, get_code, compare_code, "
+      "compare_calls and search_history all invoked, get_code and "
+      "search_history again on a multi-repository context")
 PY

@@ -127,6 +127,13 @@ func (b *cancelBlocker) Diff(ctx context.Context, _, _ vacctx.CodeContext, _ pro
 	return nil, b.block(ctx)
 }
 
+// SearchHistory is the same arrangement for search_history: without it this is
+// not a [provider.HistoryProvider], and the tool would refuse with
+// SOURCE_HISTORY_UNAVAILABLE before reaching anything there was to cancel.
+func (b *cancelBlocker) SearchHistory(ctx context.Context, _ vacctx.CodeContext, _ provider.HistoryQuery) ([]provider.HistoryEntry, error) {
+	return nil, b.block(ctx)
+}
+
 // cancelOutcome is everything one side of the comparison can be judged on when
 // the caller gives up: what the caller was told, whether an answer arrived
 // anyway, and whether the work itself stopped.
@@ -186,6 +193,14 @@ func TestEngineAndMCPCancelIdentically(t *testing.T) {
 				return err
 			},
 			args: map[string]any{"context": v1, "path": "processor.go", "start_line": 4, "end_line": 6},
+		},
+		{
+			name: "search_history",
+			direct: func(ctx context.Context, eng *engine.Engine) error {
+				_, err := eng.SearchHistory(ctx, engine.SearchHistoryRequest{Context: v1, Query: "Process"})
+				return err
+			},
+			args: map[string]any{"context": v1, "query": "Process"},
 		},
 	}
 
@@ -559,6 +574,7 @@ func cancelSession(t *testing.T, cfg *config.Config, blocked *cancelBlocker) *mc
 	AddGetCode(srv, eng)
 	AddCompareCode(srv, eng)
 	AddCompareCalls(srv, eng)
+	AddSearchHistory(srv, eng)
 
 	httpServer := httptest.NewServer(server.Handler(srv))
 	t.Cleanup(httpServer.Close)

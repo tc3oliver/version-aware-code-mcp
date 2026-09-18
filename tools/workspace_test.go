@@ -245,10 +245,10 @@ func TestSearchCodeNarrowedToOneRepositoryAnswersInTheFlatShape(t *testing.T) {
 }
 
 // TestEveryToolRegistersWithAnInferredOutputSchema is what a client sees before
-// it calls anything: six tools, and an output schema on exactly the one whose
+// it calls anything: seven tools, and an output schema on exactly the one whose
 // payload is its own type.
 //
-// The five that declare none answer with an [evidence.Output], whose wire shape
+// The six that declare none answer with an [evidence.Output], whose wire shape
 // is the evidence package's to decide and has two forms. A schema here would not
 // document them, it would enforce one: the SDK validates every result against a
 // declared schema, so a copy that described the flat context block would stop the
@@ -270,7 +270,7 @@ func TestEveryToolRegistersWithAnInferredOutputSchema(t *testing.T) {
 		registered[tool.Name] = tool
 	}
 
-	for _, name := range []string{"search_code", "get_code", "trace_calls", "compare_code", "compare_calls"} {
+	for _, name := range []string{"search_code", "get_code", "trace_calls", "compare_code", "compare_calls", "search_history"} {
 		tool, ok := registered[name]
 		if !ok {
 			t.Fatalf("tools/list returned %v, none named %s", slices.Sorted(maps.Keys(registered)), name)
@@ -337,7 +337,7 @@ func assertSchemaMatchesType(t *testing.T, path string, raw json.RawMessage, typ
 	}
 }
 
-// workspaceSession serves the six tools over two contexts naming two
+// workspaceSession serves the seven tools over two contexts naming two
 // repositories each, plus the one-repository context, with every provider wired:
 // a tool that answered from the wrong member would answer rather than fail, which
 // is the mistake these tests are looking for.

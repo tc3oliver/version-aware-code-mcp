@@ -239,8 +239,8 @@ func listenAddress(flagValue string, explicit bool, cfg *config.Config) string {
 	return cfg.Server.Address
 }
 
-// addTools registers the six tools on srv, backed by cfg: the four of doc-1 §5
-// and the two comparison tools added after it.
+// addTools registers the seven tools on srv, backed by cfg: the four of doc-1
+// §5, the two comparison tools added after it, and search_history.
 //
 // All of them are registered whether or not a configuration was given. The tool
 // surface is what the server can do, not what it happens to be configured for,
@@ -252,7 +252,7 @@ func listenAddress(flagValue string, explicit bool, cfg *config.Config) string {
 // doctor registers them too, on a server of its own, which is how it can report
 // on the MCP layer without going near a port.
 //
-// The six tools share one engine, and the engine is what they are: the tools
+// The seven tools share one engine, and the engine is what they are: the tools
 // decode a call and encode a result, everything about which version answers it
 // is the engine's. It is returned so a caller that owns the server's lifetime
 // can shut it down.
@@ -265,6 +265,7 @@ func addTools(srv *mcp.Server, cfg *config.Config) *engine.Engine {
 	tools.AddGetCode(srv, eng)
 	tools.AddCompareCode(srv, eng)
 	tools.AddCompareCalls(srv, eng)
+	tools.AddSearchHistory(srv, eng)
 	return eng
 }
 

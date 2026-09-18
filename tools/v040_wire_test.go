@@ -21,7 +21,9 @@ import (
 )
 
 // v040Source is a source backend that both reads and diffs, so one server can
-// serve all six tools at once. The two other fakes this file needs already exist
+// serve every tool v0.4.0 had at once. It deliberately does not walk history:
+// search_history is registered alongside them by [serveTools] but is not one of
+// v0.4.0's tools and no golden here covers it. The two other fakes this file needs already exist
 // — [wiredSearch] answers one match per repository and [compareGraph] holds one
 // call graph per version — and reusing them is what keeps the answers below
 // fixed strings rather than whatever a repository on the machine happens to say.
@@ -116,7 +118,8 @@ func TestSingleMemberToolsMatchV040Bytes(t *testing.T) {
 			}
 
 			// The graph reference is internal in every shape, and this is the one
-			// document where all six tools can be checked for it at once.
+			// document where all six of v0.4.0's tools can be checked for it at
+			// once.
 			if strings.Contains(block.Text, "graph") {
 				t.Errorf("%s leaked a graph reference: %s", name, block.Text)
 			}
@@ -189,7 +192,7 @@ func assertSameDocument(t *testing.T, name string, got, want []byte) {
 	}
 }
 
-// v040Session serves the six tools over three contexts naming one repository
+// v040Session serves every tool over three contexts naming one repository
 // each.
 func v040Session(t *testing.T) *mcp.ClientSession {
 	t.Helper()
@@ -202,13 +205,15 @@ func v040Session(t *testing.T) *mcp.ClientSession {
 	))
 }
 
-// serveTools serves all six tools off one engine over stateless Streamable HTTP
-// and connects a client to it, so every assertion is made on what came back over
-// a real wire rather than on a Go value.
+// serveTools serves every tool off one engine over stateless Streamable HTTP and
+// connects a client to it, so every assertion is made on what came back over a
+// real wire rather than on a Go value.
 //
-// All six on one server, because that is how vacmcp serves them: a client
+// All of them on one server, because that is how vacmcp serves them: a client
 // discovers them together, and a document that only holds its shape when its
-// tool is registered alone would not be the one anybody receives.
+// tool is registered alone would not be the one anybody receives. That includes
+// search_history, which no v0.4.0 golden covers — it did not exist then — but
+// whose presence must not change what the six that did come back with.
 func serveTools(t *testing.T, eng *engine.Engine) *mcp.ClientSession {
 	t.Helper()
 
@@ -219,6 +224,7 @@ func serveTools(t *testing.T, eng *engine.Engine) *mcp.ClientSession {
 	AddTraceCalls(srv, eng)
 	AddCompareCode(srv, eng)
 	AddCompareCalls(srv, eng)
+	AddSearchHistory(srv, eng)
 
 	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return srv },
