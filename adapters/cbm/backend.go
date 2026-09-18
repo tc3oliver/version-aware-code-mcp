@@ -40,7 +40,11 @@ import (
 // indexing in the background can be slower still, so the limit is generous —
 // it exists to stop a CBM that never finishes starting from hanging every
 // trace_calls behind it, not to time a healthy one.
-const connectTimeout = 2 * time.Minute
+//
+// A var rather than a const for the reason the budgets are: a test standing on a
+// codebase-memory-mcp that never finishes starting would otherwise wait out the
+// whole two minutes. Nothing outside a test ever assigns to it.
+var connectTimeout = 2 * time.Minute
 
 // reported is a failure CBM described, as opposed to a failure to reach CBM at
 // all: a non-zero `cli` exit or a tool result marked as an error. The

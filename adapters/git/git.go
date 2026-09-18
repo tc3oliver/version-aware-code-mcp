@@ -28,8 +28,10 @@ import (
 	"os/exec"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/internal/deadline"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/resolver"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
@@ -79,8 +81,17 @@ func (p *Provider) Read(ctx context.Context, codeCtx vacctx.CodeContext, filePat
 		)
 	}
 
+	// The budget covers resolving and reading together, because they are one
+	// answer to the caller: a read that pinned its revision and then hung is not
+	// half-finished, it is a call that did not come back.
+	ctx, cancel := deadline.With(ctx, readBudget, deadline.Git, "read")
+	defer cancel()
+
 	revision, err := p.resolve(ctx, codeCtx, repo.Path)
 	if err != nil {
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, err
 	}
 
@@ -90,6 +101,11 @@ func (p *Provider) Read(ctx context.Context, codeCtx vacctx.CodeContext, filePat
 	// against being read as a flag.
 	blob, err := gitOutput(ctx, repo.Path, "show", revision+":"+cleanPath)
 	if err != nil {
+		// Whose deadline it was is asked first: a budget that expired, or a
+		// caller that stopped waiting, is not a repository that cannot be read.
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, p.readFailure(ctx, codeCtx, repo.Path, cleanPath, revision, err)
 	}
 
@@ -198,6 +214,31 @@ func splitLines(content string) []string {
 	}
 	return lines
 }
+
+// The budgets this adapter sets for itself. They are wedged-process guards, not
+// performance targets: a git that never returns has to stop being waited on, and
+// a git that is merely slow because the repository is large must not be killed.
+//
+// Neither number comes from the fixture. Measured against it on a developer
+// machine, a read is 9ms and a diff 17ms, which says only that nothing normal is
+// anywhere near these — a real monorepo's `git show` of a large blob is orders of
+// magnitude more, and the point of the budget is the process that has stopped
+// making progress at all. They follow the guards this project already sets: a
+// Zoekt request at 30s, a doctor probe at 30s, a CBM session start at 2 minutes.
+//
+// history is the outlier and deliberately so. `git log -S` is a pickaxe over
+// every commit in range, and on a large history that is minutes of real work for
+// a question the caller genuinely asked; defaultHistoryLimit bounds the result,
+// not the walk. Killing it at 30s would fail the query this adapter exists to
+// answer.//
+// They are vars rather than consts for the reason cmd/vacmcp's goos is one: a
+// test has to be able to stand on the branch below without waiting out a budget
+// meant for a wedged process. Nothing outside a test ever assigns to them.
+var (
+	readBudget    = 30 * time.Second
+	diffBudget    = 30 * time.Second
+	historyBudget = 2 * time.Minute
+)
 
 // gitOutput runs one git command in the repository at repoPath and returns its
 // standard output verbatim, which is what reading file content needs. Any

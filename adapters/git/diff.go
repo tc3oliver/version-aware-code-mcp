@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tc3oliver/version-aware-code-mcp/internal/deadline"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
@@ -46,12 +47,21 @@ func (p *Provider) Diff(ctx context.Context, from, to vacctx.CodeContext, req pr
 		)
 	}
 
+	ctx, cancel := deadline.With(ctx, diffBudget, deadline.Git, "diff")
+	defer cancel()
+
 	fromRevision, err := p.resolve(ctx, from, repo.Path)
 	if err != nil {
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, err
 	}
 	toRevision, err := p.resolve(ctx, to, repo.Path)
 	if err != nil {
+		if ended := deadline.Ended(ctx); ended != nil {
+			return nil, ended
+		}
 		return nil, err
 	}
 

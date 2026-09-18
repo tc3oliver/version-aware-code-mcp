@@ -32,8 +32,10 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/tc3oliver/version-aware-code-mcp/config"
+	"github.com/tc3oliver/version-aware-code-mcp/internal/deadline"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
@@ -104,6 +106,17 @@ func membersOf(workspace vacctx.Workspace, id string) []vacctx.CodeContext {
 // A resolved context says the version exists, not that any particular working
 // tree is on it. A caller serving content from a checkout must additionally
 // call [VerifyWorktree].
+// resolveBudget bounds resolving one context, however many repositories it
+// names. `git rev-parse` is cheap — 9ms against the prepared fixture — so this
+// is not a limit on the work, it is the guard for a git that never returns:
+// a repository on a network filesystem that has gone away, or a process wedged
+// on an index lock. It matches the guard this project sets elsewhere, a Zoekt
+// request and a doctor probe at 30 seconds.//
+// They are vars rather than consts for the reason cmd/vacmcp's goos is one: a
+// test has to be able to stand on the branch below without waiting out a budget
+// meant for a wedged process. Nothing outside a test ever assigns to them.
+var resolveBudget = 30 * time.Second
+
 func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.Workspace, error) {
 	workspace, ok := r.contexts[id]
 	if !ok {
@@ -118,6 +131,12 @@ func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.Workspace, er
 	}
 	members := membersOf(workspace, id)
 
+	// Every query passes through here, so an unbounded rev-parse hangs all seven
+	// tools rather than one. The budget covers resolving the whole workspace:
+	// a context naming several repositories is resolved or it is not.
+	ctx, cancel := deadline.With(ctx, resolveBudget, deadline.Git, "resolve")
+	defer cancel()
+
 	for _, member := range members {
 		repo, ok := r.repositories[member.Repository]
 		if !ok {
@@ -129,6 +148,11 @@ func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.Workspace, er
 		}
 
 		if _, err := revParse(ctx, repo.Path, member.Revision); err != nil {
+			// Before the two causes below are told apart, because neither of
+			// them is what happened when the clock ran out.
+			if ended := deadline.Ended(ctx); ended != nil {
+				return vacctx.Workspace{}, ended
+			}
 			// One failure, two causes worth telling apart: a path that is not a
 			// usable repository, and a repository that simply does not have this
 			// revision. Only the second one is the user's context being wrong.
