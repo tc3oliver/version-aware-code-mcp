@@ -60,6 +60,10 @@ func New(cfg *config.Config) *Provider {
 // repository that is not on this machine is [vacerr.RepositoryNotFound], a
 // revision it does not have is [vacerr.RevisionNotFound], and a repository that
 // cannot produce the declared revision's content is [vacerr.SourceMismatch].
+// The exceptions are the caller's own two clocks: a cancellation comes back as
+// [context.Canceled] and an expired caller deadline as
+// [context.DeadlineExceeded], unwrapped, while this adapter's own budget
+// expiring is [vacerr.OperationTimeout].
 func (p *Provider) Read(ctx context.Context, codeCtx vacctx.CodeContext, filePath string, start, end int) (*provider.SourceContent, error) {
 	cleanPath, err := validatePath(filePath)
 	if err != nil {
@@ -89,9 +93,6 @@ func (p *Provider) Read(ctx context.Context, codeCtx vacctx.CodeContext, filePat
 
 	revision, err := p.resolve(ctx, codeCtx, repo.Path)
 	if err != nil {
-		if ended := deadline.Ended(ctx); ended != nil {
-			return nil, ended
-		}
 		return nil, err
 	}
 
@@ -133,23 +134,31 @@ func (p *Provider) Read(ctx context.Context, codeCtx vacctx.CodeContext, filePat
 // or a branch name — into the full SHA of the commit it names, telling apart a
 // path that is not a usable repository from a repository that does not have
 // this revision.
+//
+// It classifies its own failures against the budget it was handed, which is the
+// rule everything below the three entry points follows: whoever ran the git
+// command answers for the clock, so a caller does not have to remember to ask
+// again after every helper that might have run one.
 func (p *Provider) resolve(ctx context.Context, codeCtx vacctx.CodeContext, repoPath string) (string, error) {
 	revision, err := gitLine(ctx, repoPath, "rev-parse", "--verify", "--end-of-options", codeCtx.Revision+"^{commit}")
 	if err == nil {
 		return revision, nil
 	}
+	// The probe is a second git command, so it is a second one that can hang,
+	// and the verdict below would then be a claim about a repository nothing
+	// ever read. deadline.Override is what keeps the clock ahead of the verdict.
 	if _, repoErr := gitLine(ctx, repoPath, "rev-parse", "--git-dir"); repoErr != nil {
-		return "", vacerr.New(
+		return "", deadline.Override(ctx, vacerr.New(
 			vacerr.RepositoryNotFound,
 			fmt.Sprintf("context %q: cannot read repository %q at %s: %v", codeCtx.ID, codeCtx.Repository, repoPath, repoErr),
 			map[string]any{"context": codeCtx.ID, "repository": codeCtx.Repository, "path": repoPath},
-		)
+		))
 	}
-	return "", vacerr.New(
+	return "", deadline.Override(ctx, vacerr.New(
 		vacerr.RevisionNotFound,
 		fmt.Sprintf("context %q: repository %q has no revision %q: %v", codeCtx.ID, codeCtx.Repository, codeCtx.Revision, err),
 		map[string]any{"context": codeCtx.ID, "repository": codeCtx.Repository, "revision": codeCtx.Revision, "path": repoPath},
-	)
+	))
 }
 
 // readFailure classifies a failed read of a commit that exists. ls-tree answers
@@ -159,10 +168,14 @@ func (p *Provider) resolve(ctx context.Context, codeCtx vacctx.CodeContext, repo
 func (p *Provider) readFailure(ctx context.Context, codeCtx vacctx.CodeContext, repoPath, filePath, revision string, cause error) error {
 	entry, err := gitLine(ctx, repoPath, "ls-tree", "--name-only", revision, "--", filePath)
 	if err != nil || entry == "" {
-		return invalid(
+		// An ls-tree that did not come back says nothing about the tree, and
+		// "this revision has no such file" is the worst thing to say about a
+		// path when the truth is that nobody looked: the caller would go and
+		// correct a path that was right all along.
+		return deadline.Override(ctx, invalid(
 			fmt.Sprintf("get_code: revision %s has no file %s", revision, filePath),
 			map[string]any{"context": codeCtx.ID, "path": filePath, "revision": revision},
-		)
+		))
 	}
 
 	// The revision records this file but the object database cannot hand it
@@ -172,13 +185,16 @@ func (p *Provider) readFailure(ctx context.Context, codeCtx vacctx.CodeContext, 
 	// cross-version answer this server exists to prevent, so the tree goes to
 	// the resolver's fail-closed check and its verdict is returned unchanged.
 	if err := resolver.VerifyWorktree(ctx, repoPath, codeCtx); err != nil {
-		return err
+		// VerifyWorktree honours the budget it was handed, so a check that ran
+		// out of time already arrives as one; Override is what covers this
+		// function's last verdict below, and costs nothing here.
+		return deadline.Override(ctx, err)
 	}
-	return vacerr.New(
+	return deadline.Override(ctx, vacerr.New(
 		vacerr.RepositoryNotFound,
 		fmt.Sprintf("context %q: repository %q cannot read %s at revision %s: %v", codeCtx.ID, codeCtx.Repository, filePath, revision, cause),
 		map[string]any{"context": codeCtx.ID, "repository": codeCtx.Repository, "path": filePath, "revision": revision},
-	)
+	))
 }
 
 // validatePath rejects everything that is not a plain path inside the
@@ -230,7 +246,8 @@ func splitLines(content string) []string {
 // every commit in range, and on a large history that is minutes of real work for
 // a question the caller genuinely asked; defaultHistoryLimit bounds the result,
 // not the walk. Killing it at 30s would fail the query this adapter exists to
-// answer.//
+// answer.
+//
 // They are vars rather than consts for the reason cmd/vacmcp's goos is one: a
 // test has to be able to stand on the branch below without waiting out a budget
 // meant for a wedged process. Nothing outside a test ever assigns to them.

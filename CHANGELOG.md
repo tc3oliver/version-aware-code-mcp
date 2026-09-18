@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   begin, never switched to the `cli` mode for good by a cancellation, and shut
   down by `Close` — which waits for it, so no codebase-memory-mcp outlives the
   provider that spawned it.
+- A timeout inside a diagnostic command is reported as the timeout it is. Several
+  paths answer a failed git by running another git to find out why it failed: a
+  rev-parse that failed is classified by asking for the git directory, a failed
+  `git show` by asking the tree whether the path is there, an empty diff by
+  asking whether it ever was. When that second command was the one that ran out
+  of time, its verdict was returned as though it had reached one —
+  `REPOSITORY_NOT_FOUND` for a repository nothing managed to read,
+  `INVALID_ARGUMENT` about a tree nothing managed to list — sending the caller to
+  correct a path or a context that was right all along. Resolution, reads, diffs
+  and the fail-closed worktree check now all put the clock ahead of the verdict.
 - The `repo` and `context` commands now honour SIGINT and SIGTERM. They called
   the management layer with `context.Background()`, so `exec.CommandContext` had
   nothing to cancel on: Ctrl-C reached the CLI and stopped there while the `git

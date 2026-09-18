@@ -104,3 +104,25 @@ func Ended(ctx context.Context) error {
 	}
 	return cause
 }
+
+// Override returns how ctx ended if it ended, and err otherwise.
+//
+// It is [Ended] at the call sites that need it most: the ones that answer a
+// failed operation by running *another* external command to find out why it
+// failed. `git rev-parse` failing is classified by asking git for the git
+// directory; `git show` failing is classified by asking git for the tree; an
+// empty diff is classified by asking git whether the path was ever there. Every
+// one of those diagnostics can itself be the thing that runs out of time, and
+// when it does, the classification it produced describes a command that never
+// answered — a repository reported as missing because the question about it was
+// never returned.
+//
+// So the rule is that a classification built after an external command is
+// returned through here rather than directly. Whose clock ran out outranks what
+// the diagnostic concluded, because the diagnostic did not conclude anything.
+func Override(ctx context.Context, err error) error {
+	if ended := Ended(ctx); ended != nil {
+		return ended
+	}
+	return err
+}

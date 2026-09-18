@@ -77,11 +77,6 @@ func (p *Provider) SearchHistory(ctx context.Context, codeCtx vacctx.CodeContext
 	// which is what keeps the answer inside the version that was asked about.
 	revision, err := p.resolve(ctx, codeCtx, repo.Path)
 	if err != nil {
-		// Same question as below, asked at the other place the walk can run out
-		// of time: pinning the revision is git too.
-		if ended := deadline.Ended(ctx); ended != nil {
-			return nil, ended
-		}
 		return nil, err
 	}
 

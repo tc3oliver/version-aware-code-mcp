@@ -198,6 +198,51 @@ func TestOperationTimeoutSerialises(t *testing.T) {
 	}
 }
 
+// TestOverrideKeepsTheClockAheadOfTheVerdict is the rule the diagnostic paths
+// rely on: an adapter that answers a failed command by running another one ends
+// up holding a classification that describes a command which never came back,
+// and the clock outranks it.
+func TestOverrideKeepsTheClockAheadOfTheVerdict(t *testing.T) {
+	notFound := vacerr.New(vacerr.RepositoryNotFound, "cannot read the repository", nil)
+
+	t.Run("still running", func(t *testing.T) {
+		ctx, cancel := deadline.With(context.Background(), time.Hour, deadline.Git, "read")
+		defer cancel()
+
+		// Nothing has run out, so the verdict stands: this must not turn an
+		// ordinary failure into a timeout.
+		if err := deadline.Override(ctx, notFound); err != notFound {
+			t.Errorf("Override = %v, want the error it was given back unchanged", err)
+		}
+	})
+
+	t.Run("the budget expired", func(t *testing.T) {
+		ctx, cancel := deadline.With(context.Background(), time.Nanosecond, deadline.Git, "read")
+		defer cancel()
+		<-ctx.Done()
+
+		var vErr *vacerr.Error
+		if err := deadline.Override(ctx, notFound); !errors.As(err, &vErr) || vErr.Code != vacerr.OperationTimeout {
+			t.Fatalf("Override = %v, want %s", err, vacerr.OperationTimeout)
+		}
+		assertDetails(t, vErr, deadline.Git, "read")
+	})
+
+	t.Run("the caller stopped waiting", func(t *testing.T) {
+		caller, stop := context.WithCancel(context.Background())
+		ctx, cancel := deadline.With(caller, time.Hour, deadline.Git, "read")
+		defer cancel()
+		stop()
+		<-ctx.Done()
+
+		err := deadline.Override(ctx, notFound)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Override = %v, want context.Canceled", err)
+		}
+		assertNotClassified(t, err)
+	})
+}
+
 func assertDetails(t *testing.T, vErr *vacerr.Error, provider, operation string) {
 	t.Helper()
 

@@ -87,6 +87,18 @@ func membersOf(workspace vacctx.Workspace, id string) []vacctx.CodeContext {
 	return members
 }
 
+// resolveBudget bounds resolving one context, however many repositories it
+// names. `git rev-parse` is cheap — 9ms against the prepared fixture — so this
+// is not a limit on the work, it is the guard for a git that never returns:
+// a repository on a network filesystem that has gone away, or a process wedged
+// on an index lock. It matches the guard this project sets elsewhere, a Zoekt
+// request and a doctor probe at 30 seconds.
+//
+// It is a var rather than a const for the reason cmd/vacmcp's goos is one: a
+// test has to be able to stand on the branch below without waiting out a budget
+// meant for a wedged process. Nothing outside a test ever assigns to it.
+var resolveBudget = 30 * time.Second
+
 // Resolve returns the [vacctx.Workspace] named by id, once every one of its
 // members has a readable repository and a revision that resolves to a commit
 // there.
@@ -106,17 +118,12 @@ func membersOf(workspace vacctx.Workspace, id string) []vacctx.CodeContext {
 // A resolved context says the version exists, not that any particular working
 // tree is on it. A caller serving content from a checkout must additionally
 // call [VerifyWorktree].
-// resolveBudget bounds resolving one context, however many repositories it
-// names. `git rev-parse` is cheap — 9ms against the prepared fixture — so this
-// is not a limit on the work, it is the guard for a git that never returns:
-// a repository on a network filesystem that has gone away, or a process wedged
-// on an index lock. It matches the guard this project sets elsewhere, a Zoekt
-// request and a doctor probe at 30 seconds.//
-// They are vars rather than consts for the reason cmd/vacmcp's goos is one: a
-// test has to be able to stand on the branch below without waiting out a budget
-// meant for a wedged process. Nothing outside a test ever assigns to them.
-var resolveBudget = 30 * time.Second
-
+//
+// The two exceptions are the two clocks that are not this package's: a caller
+// that cancels gets [context.Canceled] and a caller whose own deadline expires
+// gets [context.DeadlineExceeded], both unwrapped, because neither is a claim
+// about the context being resolved. This resolver's own budget expiring is a
+// *[vacerr.Error] like the rest, with [vacerr.OperationTimeout].
 func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.Workspace, error) {
 	workspace, ok := r.contexts[id]
 	if !ok {
@@ -156,18 +163,24 @@ func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.Workspace, er
 			// One failure, two causes worth telling apart: a path that is not a
 			// usable repository, and a repository that simply does not have this
 			// revision. Only the second one is the user's context being wrong.
+			//
+			// gitDir is a second git, so it is a second thing that can fail to
+			// come back — and the verdict it hands down is about a repository it
+			// never managed to read. Both answers go through deadline.Override
+			// for that reason: the check above cannot cover a command it ran
+			// before.
 			if _, repoErr := gitDir(ctx, repo.Path); repoErr != nil {
-				return vacctx.Workspace{}, vacerr.New(
+				return vacctx.Workspace{}, deadline.Override(ctx, vacerr.New(
 					vacerr.RepositoryNotFound,
 					fmt.Sprintf("context %q: cannot read repository %q at %s: %v", id, member.Repository, repo.Path, repoErr),
 					map[string]any{"context": id, "repository": member.Repository, "path": repo.Path},
-				)
+				))
 			}
-			return vacctx.Workspace{}, vacerr.New(
+			return vacctx.Workspace{}, deadline.Override(ctx, vacerr.New(
 				vacerr.RevisionNotFound,
 				fmt.Sprintf("context %q: repository %q has no revision %q: %v", id, member.Repository, member.Revision, err),
 				map[string]any{"context": id, "repository": member.Repository, "revision": member.Revision, "path": repo.Path},
-			)
+			))
 		}
 	}
 
@@ -190,6 +203,13 @@ func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.Workspace, er
 // another commit, [vacerr.RevisionNotFound] or [vacerr.RepositoryNotFound] when
 // the comparison could not be made at all. A check that could not be carried
 // out is not a check that passed.
+//
+// It sets no budget of its own — it is called from inside an operation that
+// already has one — but it is the last thing a failed read does before giving
+// the caller a verdict, so it honours the budget it was handed: a comparison
+// this server stopped waiting for is [vacerr.OperationTimeout], and a caller's
+// own cancellation or deadline comes back unwrapped. A tree that could not be
+// compared in time has still not been compared, so this remains fail-closed.
 func VerifyWorktree(ctx context.Context, repoPath string, codeCtx vacctx.CodeContext) error {
 	// Both sides go through rev-parse so a context declaring a short SHA, a tag
 	// or a branch name is compared as the commit it names. Comparing the raw
@@ -197,26 +217,26 @@ func VerifyWorktree(ctx context.Context, repoPath string, codeCtx vacctx.CodeCon
 	declared, err := revParse(ctx, repoPath, codeCtx.Revision)
 	if err != nil {
 		if _, repoErr := gitDir(ctx, repoPath); repoErr != nil {
-			return vacerr.New(
+			return deadline.Override(ctx, vacerr.New(
 				vacerr.RepositoryNotFound,
 				fmt.Sprintf("context %q: cannot read repository at %s: %v", codeCtx.ID, repoPath, repoErr),
 				map[string]any{"context": codeCtx.ID, "path": repoPath},
-			)
+			))
 		}
-		return vacerr.New(
+		return deadline.Override(ctx, vacerr.New(
 			vacerr.RevisionNotFound,
 			fmt.Sprintf("context %q: repository at %s has no revision %q: %v", codeCtx.ID, repoPath, codeCtx.Revision, err),
 			map[string]any{"context": codeCtx.ID, "revision": codeCtx.Revision, "path": repoPath},
-		)
+		))
 	}
 
 	actual, err := revParse(ctx, repoPath, "HEAD")
 	if err != nil {
-		return vacerr.New(
+		return deadline.Override(ctx, vacerr.New(
 			vacerr.RepositoryNotFound,
 			fmt.Sprintf("context %q: cannot read HEAD of the repository at %s: %v", codeCtx.ID, repoPath, err),
 			map[string]any{"context": codeCtx.ID, "path": repoPath},
-		)
+		))
 	}
 
 	if declared != actual {
