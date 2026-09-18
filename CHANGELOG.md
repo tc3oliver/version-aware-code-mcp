@@ -39,6 +39,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A shutdown that was asked for exits 0. The STDIO transport reports a cancelled
   context by returning it, which `serve` used to pass up as a failed run.
 
+### Added
+
+- `vacerr.OperationTimeout` (`OPERATION_TIMEOUT`): an operation budget vacmcp set
+  for itself expired. It is a wedged-process guard — a git that never returns, a
+  graph engine that stopped answering — and not a performance target.
+  Its details name the operation, the provider (`git`, `cbm` or `zoekt`) and the
+  budget in milliseconds, and nothing about the repository, the query or the
+  machine.
+
+  Two things it deliberately does not cover, both the caller's, both propagated
+  as the context error they already are: a caller that cancelled
+  (`context.Canceled`) and a caller whose own deadline expired
+  (`context.DeadlineExceeded`). A cancellation is something the client caused and
+  already knows about; a caller's deadline is the caller's, and reporting it as
+  this server's would be a false attribution.
+
+  Telling this server's expired deadline from the caller's cannot be done by
+  inspecting the error — a context reports `context.DeadlineExceeded` either way,
+  and reading the parent afterwards is a race. The budget therefore carries a
+  cause only the producing code can make, read back through `context.Cause`,
+  which settles the question at the moment the context ended rather than when it
+  is asked about.
+
+  No adapter sets a budget yet. This release adds the contract and the code; the
+  deadlines follow.
+
 ### Tests
 
 - `trace_calls` has a tag-free test file. It was the one tool without one: its

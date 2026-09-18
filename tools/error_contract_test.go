@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/tc3oliver/version-aware-code-mcp/engine"
+	"github.com/tc3oliver/version-aware-code-mcp/internal/deadline"
 	"github.com/tc3oliver/version-aware-code-mcp/provider"
 	"github.com/tc3oliver/version-aware-code-mcp/server"
 	"github.com/tc3oliver/version-aware-code-mcp/vacctx"
@@ -132,6 +134,95 @@ func (mismatchingSource) Read(_ context.Context, codeCtx vacctx.CodeContext, pat
 		"0000000000000000000000000000000000000000",
 		map[string]any{"context": codeCtx.ID, "path": path},
 	)
+}
+
+// TestOperationTimeoutReachesTheWire is the contract half of the timeout work
+// that exists before any adapter sets a budget: whatever produces the code, it
+// has to arrive in doc-1's envelope with the three details a caller acts on.
+//
+// No adapter has a deadline yet, so the code is produced here the way one will
+// produce it — through the helper, on a budget that has expired — rather than by
+// a literal a real producer would not match.
+func TestOperationTimeoutReachesTheWire(t *testing.T) {
+	srv := server.New(testVersion)
+	AddGetCode(srv, engine.New(tracedContexts{}, nil, nil, timingOutSource{}))
+
+	failure, raw := failedCall(t, connectTo(t, srv), "get_code",
+		map[string]any{"context": "traced", "path": "alpha.go", "start_line": 1, "end_line": 2})
+
+	if failure.Code != vacerr.OperationTimeout {
+		t.Fatalf("get_code failed with %s, want %s: %s", failure.Code, vacerr.OperationTimeout, raw)
+	}
+	for key, want := range map[string]any{
+		"provider":   deadline.Git,
+		"operation":  "read",
+		"timeout_ms": float64(1),
+	} {
+		if failure.Details[key] != want {
+			t.Errorf("details[%s] = %v, want %v: %s", key, failure.Details[key], want, raw)
+		}
+	}
+	if len(failure.Details) != 3 {
+		t.Errorf("details = %v, want exactly operation, provider and timeout_ms: %s", failure.Details, raw)
+	}
+}
+
+// TestACallersCancellationIsNotAnOperationTimeout is the boundary, checked where
+// it matters: at the tool layer, a caller's own context error must not arrive as
+// this server's code.
+//
+// tools/errors.go hands anything that is not a *vacerr.Error back to the SDK, so
+// what a client sees for these is an error result with no code at all — which is
+// correct, and is what stops a cancellation from entering the vocabulary clients
+// branch on.
+func TestACallersCancellationIsNotAnOperationTimeout(t *testing.T) {
+	for name, source := range map[string]provider.SourceProvider{
+		"caller cancelled":       cancellingSource{err: context.Canceled},
+		"caller deadline passed": cancellingSource{err: context.DeadlineExceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := server.New(testVersion)
+			AddGetCode(srv, engine.New(tracedContexts{}, nil, nil, source))
+
+			res, err := connectTo(t, srv).CallTool(t.Context(), &mcp.CallToolParams{
+				Name:      "get_code",
+				Arguments: map[string]any{"context": "traced", "path": "alpha.go", "start_line": 1, "end_line": 2},
+			})
+			if err != nil {
+				t.Fatalf("tools/call get_code: %v", err)
+			}
+			text, ok := res.Content[0].(*mcp.TextContent)
+			if !ok {
+				t.Fatalf("result content = %#v, want text", res.Content[0])
+			}
+			if strings.Contains(text.Text, string(vacerr.OperationTimeout)) {
+				t.Errorf("a %s arrived as %s: %s", name, vacerr.OperationTimeout, text.Text)
+			}
+			// Nor as any other code: it is not this server's failure to classify.
+			if strings.Contains(text.Text, `"code"`) {
+				t.Errorf("a %s arrived carrying an error code: %s", name, text.Text)
+			}
+		})
+	}
+}
+
+// timingOutSource is a source backend whose budget has already expired, which is
+// what an adapter with a deadline will look like once one is added.
+type timingOutSource struct{}
+
+func (timingOutSource) Read(ctx context.Context, _ vacctx.CodeContext, _ string, _, _ int) (*provider.SourceContent, error) {
+	budget, cancel := deadline.With(ctx, time.Millisecond, deadline.Git, "read")
+	defer cancel()
+	<-budget.Done()
+	return nil, deadline.Ended(budget)
+}
+
+// cancellingSource fails with a caller's own context error, unwrapped, which is
+// what an adapter does when the caller is the one that ended the call.
+type cancellingSource struct{ err error }
+
+func (s cancellingSource) Read(context.Context, vacctx.CodeContext, string, int, int) (*provider.SourceContent, error) {
+	return nil, s.err
 }
 
 // TestContextAmbiguousHasNoProducer records the one code that is reserved rather
