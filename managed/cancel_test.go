@@ -52,7 +52,7 @@ func TestCancellingRepositoryAddStopsGit(t *testing.T) {
 	pid := waitForStub(t, pidFile)
 	cancel()
 
-	assertCancelled(t, "repo add", done)
+	_ = assertCancelled(t, "repo add", done)
 	assertProcessGone(t, "git", pid)
 	assertRepositoryLockFree(t, data, "demo")
 }
@@ -79,7 +79,7 @@ func TestCancellingRepositorySyncStopsGit(t *testing.T) {
 	pid := waitForStub(t, pidFile)
 	cancel()
 
-	assertCancelled(t, "repo sync", done)
+	_ = assertCancelled(t, "repo sync", done)
 	assertProcessGone(t, "git", pid)
 	assertRepositoryLockFree(t, data, "demo")
 
