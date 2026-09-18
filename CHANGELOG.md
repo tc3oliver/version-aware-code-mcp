@@ -39,6 +39,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A shutdown that was asked for exits 0. The STDIO transport reports a cancelled
   context by returning it, which `serve` used to pass up as a failed run.
 
+### Tests
+
+- `trace_calls` has a tag-free test file. It was the one tool without one: its
+  success wire shape and its error codes were proven only under
+  `-tags=integration` against a real codebase-memory-mcp, which the fast CI tier
+  does not build — so the tier meant to answer a pull request in a minute never
+  checked either, and the asymmetry ran the wrong way round from the usual one.
+- `search_code` has error cases. `CONTEXT_NOT_FOUND` and
+  `SEARCH_PROVIDER_UNAVAILABLE` came only from its integration file.
+- `REPOSITORY_NOT_FOUND` reaches the wire in a test. It has more producers than
+  any other code in the module and appeared in no test under `tools/` at all; it
+  is now asserted for each of the three tools that read source.
+- `SOURCE_MISMATCH` carries its two revisions through the envelope, which is what
+  a caller compares to see which side is stale.
+- `CONTEXT_AMBIGUOUS` is recorded as reserved rather than tested. Nothing in the
+  module produces it, so a wire test would have to invent the producer it asserts
+  against; a test asserts the absence instead and fails the day one appears,
+  which is the day a wire test becomes both possible and required.
+
 ### Documentation
 
 - The roadmap named v0.6.0 as operations — metrics, OpenTelemetry, garbage
