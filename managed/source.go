@@ -110,32 +110,102 @@ func verifySource(ctx context.Context, worktree, id string, m store.ContextMembe
 // succeeded is still there: a graph can be deleted out from under a context by
 // anything else driving the same CBM store.
 func verifyGraph(ctx context.Context, id string, m store.ContextMember) error {
-	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "list_projects")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	for offset := 0; ; {
+		out, stderr, err := cbmCLI(ctx, "list_projects", map[string]any{"offset": offset})
+		if err != nil {
+			if cerr := cancelled(ctx); cerr != nil {
+				return cerr
+			}
+			return graphUnavailable(id, m, fmt.Sprintf("cannot list the graphs it holds: %v: %s", err, lastLine(stderr)))
+		}
+
+		// has_more and next_offset are absent from a CBM that does not
+		// paginate, and absent means the zero value: one page, holding
+		// everything, which is exactly what such a CBM sent. Nothing here needs
+		// to know which kind it is talking to.
+		var body struct {
+			Projects []struct {
+				Name string `json:"name"`
+			} `json:"projects"`
+			HasMore    bool `json:"has_more"`
+			NextOffset *int `json:"next_offset"`
+		}
+		if err := json.Unmarshal(out, &body); err != nil {
+			return graphUnavailable(id, m, fmt.Sprintf("list_projects did not answer with the JSON it promises: %v", err))
+		}
+		for _, project := range body.Projects {
+			if project.Name == m.GraphRef {
+				return nil
+			}
+		}
+
+		if !body.HasMore {
+			// The server says this was the last page, so the graph is not
+			// there. This is the only place that conclusion may be drawn.
+			return graphUnavailable(id, m, "it holds no graph of that name")
+		}
+		if len(body.Projects) == 0 {
+			// More pages promised and none delivered: asking again would ask
+			// the identical question for ever. Report what is actually known,
+			// which is that CBM is not answering usefully, rather than spin.
+			return graphUnavailable(id, m, "list_projects reports more pages but returns none")
+		}
+		// Where the next page starts is the server's to say. It says so
+		// outright when it can, and a server that promises more pages without
+		// saying where they begin is taken at the word it did give: the page it
+		// just sent ended somewhere, and that is where asking again continues
+		// from. Either way this walks by what arrived, never by a page size of
+		// its own.
+		if body.NextOffset != nil {
+			if *body.NextOffset <= offset {
+				// A continuation that does not continue would re-read this page
+				// for ever.
+				return graphUnavailable(id, m, "list_projects reports more pages but does not advance")
+			}
+			offset = *body.NextOffset
+			continue
+		}
+		offset += len(body.Projects)
+	}
+}
+
+// cbmCLI runs one codebase-memory-mcp tool and returns its standard output and
+// standard error.
+//
+// The arguments go in as JSON on standard input, not as command-line flags, and
+// "format": "json" is one of them. Both halves of that are deliberate.
+//
+// Asking for JSON explicitly is what keeps this plane off CBM's default output.
+// That default is not a stable interface: 0.11.0 made the CLI compact by
+// default and moved JSON behind an opt-in, so code that parsed what 0.10.1
+// happened to print gets a formatted table from 0.11.0 and reports a graph
+// engine that is working fine as one that is broken.
+//
+// Standard input rather than --format is what makes one call work on both.
+// 0.10.1 has no --format flag on these tools and refuses the whole invocation
+// when given one — `error: unknown flag --format for this tool`, exit 1 — so
+// the flag that fixes 0.11.0 breaks the version this repository pins. The
+// piped-JSON form is documented by both (`echo '<json>' | cli <tool>`), is
+// accepted by both, and is not the raw-argv form that both now warn is
+// deprecated. Keys a version does not know are ignored by it, which is what
+// lets the pagination arguments above be sent unconditionally.
+func cbmCLI(ctx context.Context, tool string, args map[string]any) (stdout, stderr []byte, err error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	args["format"] = "json"
+	body, err := json.Marshal(args)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cmd := exec.CommandContext(ctx, CBMCommand, "cli", tool)
+	cmd.Stdin = bytes.NewReader(body)
+	var errOut bytes.Buffer
+	cmd.Stderr = &errOut
 
 	out, err := cmd.Output()
-	if err != nil {
-		if cerr := cancelled(ctx); cerr != nil {
-			return cerr
-		}
-		return graphUnavailable(id, m, fmt.Sprintf("cannot list the graphs it holds: %v: %s", err, lastLine(stderr.Bytes())))
-	}
-
-	var body struct {
-		Projects []struct {
-			Name string `json:"name"`
-		} `json:"projects"`
-	}
-	if err := json.Unmarshal(out, &body); err != nil {
-		return graphUnavailable(id, m, fmt.Sprintf("list_projects did not answer with the JSON it promises: %v", err))
-	}
-	for _, project := range body.Projects {
-		if project.Name == m.GraphRef {
-			return nil
-		}
-	}
-	return graphUnavailable(id, m, "it holds no graph of that name")
+	return out, errOut.Bytes(), err
 }
 
 // indexGraph builds the context's graph out of its checkout.
@@ -145,16 +215,15 @@ func verifyGraph(ctx context.Context, id string, m store.ContextMember) error {
 // too. The status field is therefore read, so a context only carries on with a
 // graph CBM said it indexed.
 func indexGraph(ctx context.Context, worktree, id string, m store.ContextMember) error {
-	cmd := exec.CommandContext(ctx, CBMCommand, "cli", "index_repository", "--repo-path", worktree, "--name", m.GraphRef)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	out, err := cmd.Output()
+	out, stderr, err := cbmCLI(ctx, "index_repository", map[string]any{
+		"repo_path": worktree,
+		"name":      m.GraphRef,
+	})
 	if err != nil {
 		if cerr := cancelled(ctx); cerr != nil {
 			return cerr
 		}
-		return graphUnavailable(id, m, fmt.Sprintf("cannot index %s: %v: %s", worktree, err, lastLine(stderr.Bytes())))
+		return graphUnavailable(id, m, fmt.Sprintf("cannot index %s: %v: %s", worktree, err, lastLine(stderr)))
 	}
 
 	var body struct {
