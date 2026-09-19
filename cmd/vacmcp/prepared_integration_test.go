@@ -4,8 +4,8 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,7 +15,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/tc3oliver/version-aware-code-mcp/managed"
 	"github.com/tc3oliver/version-aware-code-mcp/store"
 )
 
@@ -237,21 +236,13 @@ func preparedFingerprint(data string) (string, error) {
 
 	// And the graphs, which are the one artifact that does not live in the
 	// directory above: a deleted graph is invisible to everything else here.
-	out, err := exec.Command(managed.CBMCommand, "cli", "list_projects").Output()
+	held, err := graphsCBMHolds(context.Background())
 	if err != nil {
-		return "", fmt.Errorf("codebase-memory-mcp cli list_projects: %w", err)
+		return "", err
 	}
-	var listed struct {
-		Projects []struct {
-			Name string `json:"name"`
-		} `json:"projects"`
-	}
-	if err := json.Unmarshal(out, &listed); err != nil {
-		return "", fmt.Errorf("list_projects did not answer with the JSON it promises: %w", err)
-	}
-	for _, project := range listed.Projects {
-		if _, ours := graphs[project.Name]; ours {
-			graphs[project.Name] = true
+	for name := range held {
+		if _, ours := graphs[name]; ours {
+			graphs[name] = true
 		}
 	}
 	for ref, held := range graphs {

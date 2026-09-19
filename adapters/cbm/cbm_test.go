@@ -5,7 +5,7 @@
 // The request validation is here, because it is decided before any subprocess
 // starts and a CBM on the machine could only hide a check that let something
 // through. Everything that claims to exercise CBM is in
-// cbm_integration_test.go, against a real codebase-memory-mcp >=0.10.1 and the
+// cbm_integration_test.go, against a real codebase-memory-mcp >=0.11.0 and the
 // graphs testdata/prepare-fixture.sh built from the versioned demo repository:
 // there is no fake CBM anywhere here, because a mock would only prove that the
 // adapter agrees with our own idea of CBM.

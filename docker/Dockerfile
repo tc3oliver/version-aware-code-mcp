@@ -37,12 +37,12 @@ FROM golang:1.26.6-trixie@sha256:ab563819a16cfe5faff0f96a8bb598fbb0e400ab2ac7519
 # The portable Linux build is the fully static one; the plain linux archive
 # links glibc 2.38+ and would tie this image to a base new enough to have it.
 #
-# The digests are the ones the v0.10.1 release publishes in checksums.txt. They
+# The digests are the ones the v0.11.0 release publishes in checksums.txt. They
 # are written per architecture because the archive differs per architecture: a
 # single digest here would either fail on one of them or, worse, be skipped.
-ARG CBM_VERSION=0.10.1
-ARG CBM_SHA256_amd64=97c6580a13d772d040e936584f3c5234586ab03f31a77354af8a763851a39a7f
-ARG CBM_SHA256_arm64=ad457b306fa5bf5a1b97d160eeb867260a7946018097222a622fb14e896c6c72
+ARG CBM_VERSION=0.11.0
+ARG CBM_SHA256_amd64=1f9e8293eb2bc5c05cfa27a7e8fc033da6d729ffad525ccfcdaa3fd606306683
+ARG CBM_SHA256_arm64=d62eeb224d5ee3eba3070938ec62cf1033f10b041ec1c4b2fb67f7aef390cc7b
 ARG TARGETARCH
 RUN set -eux; \
 	case "$TARGETARCH" in \

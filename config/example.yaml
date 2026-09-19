@@ -16,7 +16,7 @@ providers:
     # Zoekt web server that holds the indexes of the branches below.
     url: http://127.0.0.1:6070
   cbm:
-    # codebase-memory-mcp >=0.10.1 binary, run as a subprocess.
+    # codebase-memory-mcp >=0.11.0 binary, run as a subprocess.
     command: codebase-memory-mcp
 
 repositories:

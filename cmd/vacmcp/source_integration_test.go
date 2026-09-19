@@ -9,6 +9,7 @@ package main
 // answer differently — is exactly what a stub could not tell the truth about.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -52,24 +53,66 @@ func cbmOrSkip(t *testing.T) {
 // a create built and what a removal took away are observed from outside the code
 // that did either.
 func graphExists(ctx context.Context, id string, m store.ContextMember) error {
-	out, err := exec.CommandContext(ctx, managed.CBMCommand, "cli", "list_projects").Output()
+	held, err := graphsCBMHolds(ctx)
 	if err != nil {
-		return fmt.Errorf("%s cli list_projects: %w", managed.CBMCommand, err)
+		return err
 	}
-	var body struct {
-		Projects []struct {
-			Name string `json:"name"`
-		} `json:"projects"`
-	}
-	if err := json.Unmarshal(out, &body); err != nil {
-		return fmt.Errorf("list_projects did not answer with the JSON it promises: %w", err)
-	}
-	for _, project := range body.Projects {
-		if project.Name == m.GraphRef {
-			return nil
-		}
+	if held[m.GraphRef] {
+		return nil
 	}
 	return fmt.Errorf("codebase-memory-mcp holds no graph %q for context %q", m.GraphRef, id)
+}
+
+// graphsCBMHolds is every graph name codebase-memory-mcp currently has.
+//
+// It asks the way managed/source.go asks, and for the same two reasons. JSON is
+// requested explicitly, on standard input, because CBM's default output is not
+// an interface — 0.11.0 made the CLI compact by default — and because the
+// --format flag that says so to 0.11.0 is refused outright by 0.10.1. And the
+// answer is read to the end, because a CBM that paginates sends the first page
+// and says there are more: a test that read one page would report a graph as
+// deleted the moment the store grew past a page, which is a false failure about
+// the code under test rather than a finding.
+func graphsCBMHolds(ctx context.Context) (map[string]bool, error) {
+	held := map[string]bool{}
+	for offset := 0; ; {
+		args, err := json.Marshal(map[string]any{"format": "json", "offset": offset})
+		if err != nil {
+			return nil, err
+		}
+		cmd := exec.CommandContext(ctx, managed.CBMCommand, "cli", "list_projects")
+		cmd.Stdin = bytes.NewReader(args)
+		out, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("%s cli list_projects: %w", managed.CBMCommand, err)
+		}
+
+		var body struct {
+			Projects []struct {
+				Name string `json:"name"`
+			} `json:"projects"`
+			HasMore    bool `json:"has_more"`
+			NextOffset *int `json:"next_offset"`
+		}
+		if err := json.Unmarshal(out, &body); err != nil {
+			return nil, fmt.Errorf("list_projects did not answer with the JSON it promises: %w", err)
+		}
+		for _, project := range body.Projects {
+			held[project.Name] = true
+		}
+
+		if !body.HasMore || len(body.Projects) == 0 {
+			return held, nil
+		}
+		if body.NextOffset != nil {
+			if *body.NextOffset <= offset {
+				return nil, fmt.Errorf("list_projects reports more pages but does not advance past %d", offset)
+			}
+			offset = *body.NextOffset
+			continue
+		}
+		offset += len(body.Projects)
+	}
 }
 
 // discardGraphs deletes the graph of every context still recorded in dataDir.

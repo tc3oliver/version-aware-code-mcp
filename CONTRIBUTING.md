@@ -146,7 +146,7 @@ Integration tests query real engines, so the fixtures have to be indexed
 before they can run. That needs [Zoekt](https://github.com/sourcegraph/zoekt)
 (`zoekt-git-index` to build the index and `zoekt-webserver` to serve it, both
 on `PATH`) and
-[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.10.1
+[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) 0.11.0
 or newer (on `PATH`, or pointed at with `CBM_BIN`):
 
 ```bash
