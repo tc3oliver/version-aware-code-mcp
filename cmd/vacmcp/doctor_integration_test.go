@@ -63,10 +63,10 @@ func TestDoctorReportsZoektDownWithoutHidingTheRest(t *testing.T) {
 	t.Logf("doctor with Zoekt unreachable:\n%s", out)
 }
 
-// TestDoctorReportsAnOldCBM is AC #3: a CBM below the 0.10.1 decision-3 pins is
+// TestDoctorReportsAnOldCBM is AC #3: a CBM below the floor doctor enforces is
 // reported as a version mismatch, and nothing else is affected by it.
 //
-// The installed binary is 0.10.1 and cannot report anything else, so the
+// The installed binary is the pinned one and cannot report anything else, so the
 // configuration points at a stand-in that prints an older version string. That
 // fakes no integration — doctor traces no graph — it supplies the one input
 // this check parses.

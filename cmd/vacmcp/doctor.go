@@ -46,9 +46,17 @@ const (
 )
 
 const (
-	// minCBM is the codebase-memory-mcp version decision-3 pins. An older one
-	// is reported as a version mismatch rather than left to fail later inside
-	// trace_calls.
+	// minCBM is the oldest codebase-memory-mcp this server is known to work
+	// against. An older one is reported as a version mismatch rather than left
+	// to fail later inside trace_calls.
+	//
+	// It is deliberately lower than the version CI pins. The pin says which
+	// engine every test was green against; this says which engines are
+	// supported, and those are different claims. Both are supported here on
+	// purpose: the management plane asks CBM for JSON explicitly and reads a
+	// paged answer, which is what the two versions disagree about, so raising
+	// this floor would refuse an engine that works rather than describe one
+	// that does not.
 	minCBM = "0.10.1"
 
 	// sdkModule is the MCP Go SDK, looked up in this binary's build

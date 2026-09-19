@@ -1,5 +1,5 @@
 // Package cbm answers structural questions about code by driving
-// codebase-memory-mcp (>=0.10.1) as an external graph engine.
+// codebase-memory-mcp (>=0.11.0) as an external graph engine.
 //
 // CBM is not forked and not linked: it is run as an external process, either as
 // a long-lived MCP server the adapter keeps a session on or, when that cannot

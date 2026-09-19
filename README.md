@@ -110,7 +110,7 @@ go install github.com/sourcegraph/zoekt/cmd/zoekt@latest          # optional, to
 
 For the graph, download
 [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp/releases)
-0.10.1 or newer for your platform and put the binary on your `PATH`.
+0.11.0 or newer for your platform and put the binary on your `PATH`.
 
 Install vacmcp. Every release publishes an archive per platform — linux, macOS
 and Windows, amd64 and arm64 — next to a `SHA256SUMS` file covering all of
@@ -201,7 +201,7 @@ if any of them did not pass:
 MCP SDK       OK    go-sdk v1.7.0, 6 tools
 Config        OK    vacmcp.yaml: 1 repositories, 2 contexts
 Zoekt         OK    http://127.0.0.1:6070
-CBM           OK    0.10.1
+CBM           OK    0.11.0
 Git repo      OK    backend
 
 Contexts

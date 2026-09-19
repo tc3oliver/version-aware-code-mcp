@@ -43,8 +43,8 @@ runs:
         # CBM ships release archives, so the pin is the tag plus the SHA-256
         # recorded from that release's checksums.txt. Linux gets the
         # `-portable` build: the plain linux archive dynamically links glibc.
-        CBM_VERSION: v0.10.1
-        CBM_SHA256: 97c6580a13d772d040e936584f3c5234586ab03f31a77354af8a763851a39a7f
+        CBM_VERSION: v0.11.0
+        CBM_SHA256: 1f9e8293eb2bc5c05cfa27a7e8fc033da6d729ffad525ccfcdaa3fd606306683
       run: |
         gobin="$(go env GOPATH)/bin"
         echo "$gobin" >>"$GITHUB_PATH"
@@ -128,13 +128,14 @@ runs:
     - name: Prepare the versioned demo fixture
       shell: bash
       run: |
-        # doc-1 §9: CBM must be 0.10.1 or newer. The pin should already
-        # guarantee it; asserting costs nothing and catches a mis-pin. Read
-        # into a variable rather than piped into grep, because under pipefail
-        # a grep that exits on its first match can SIGPIPE the writer.
+        # The pin is what this asserts: the binary on PATH is the version
+        # named above, not merely one new enough. doc-1 §9's floor is lower
+        # and is enforced separately, by `vacmcp doctor`. Read into a variable
+        # rather than piped into grep, because under pipefail a grep that
+        # exits on its first match can SIGPIPE the writer.
         cbm_version=$(codebase-memory-mcp --version)
         echo "$cbm_version"
-        grep -q '0\.10\.1' <<<"$cbm_version"
+        grep -q '0\.11\.0' <<<"$cbm_version"
 
         # CBM has no --data-dir flag; it derives its store from this variable,
         # falling back to ~/.cache/codebase-memory-mcp. The runner's HOME is

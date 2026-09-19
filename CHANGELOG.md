@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The pinned codebase-memory-mcp moves from v0.10.1 to **v0.11.0**, in CI and in
+  the Docker image. The floor `vacmcp doctor` enforces stays at 0.10.1: the pin
+  says which engine every test was green against, the floor says which engines
+  are supported, and both versions are supported since the management plane now
+  asks for JSON explicitly and reads a paged answer.
+
+  What 0.11.0 changes that reaches this project: the CLI is compact by default
+  with JSON behind an opt-in, `list_projects` paginates at 50, and an index
+  built by an older CBM is taken through one reindex the first time it is
+  written to. Migration was verified on a copy of the fixture store rather than
+  reasoned about — a 0.10.1 store is stamped `user_version` 0, 0.11.0 queries it
+  unchanged, the first `index_repository` moves it to 1 and yields an identical
+  graph, and a stamped store is still readable by 0.10.1, so the upgrade is not
+  a one-way door.
+
 ### Fixed
 
 - A caller waiting on the first codebase-memory-mcp session now stops waiting on
