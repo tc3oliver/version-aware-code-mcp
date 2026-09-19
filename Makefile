@@ -13,18 +13,24 @@ build:
 test:
 	go test ./...
 
-# -timeout because go's own default is 10 minutes, which is a watchdog for
-# tests that hang rather than a budget: these drive real git, Zoekt and CBM
-# subprocesses, and cmd/vacmcp alone spends longer than that building and
-# tearing down the repositories, indexes and graphs it asserts against. The tag
-# adds the real-engine tests to the run rather than replacing anything, so this
-# is every test in the module; it needs testdata/prepare-fixture.sh to have run.
+# A script rather than a recipe, because what it adds is a lifecycle: a
+# codebase-memory-mcp daemon this run may or may not own, cleaned up on
+# success, failure and signal, without swallowing the status the tests
+# produced. That does not fit in a Make recipe and stays readable in a file.
 #
-# CBM_CACHE_DIR points every CBM subprocess these tests spawn at the fixture's
-# own store instead of the developer's global ~/.cache/codebase-memory-mcp —
-# see testdata/prepare-fixture.sh, which builds that store at the same path.
+# It is worth having because every CBM `cli` call otherwise starts a throwaway
+# daemon: 1357s for this suite without a resident one and 657s with. CI has
+# warmed a daemon since .github/actions/prepare-engines started one, so until
+# now a developer running the gate paid twice what the gate guarding the branch
+# pays.
+#
+# The script keeps what this recipe always did: CBM_CACHE_DIR pointed at the
+# fixture's own store rather than the developer's global
+# ~/.cache/codebase-memory-mcp, and -timeout because go's own default is a
+# ten-minute watchdog for hanging tests rather than a budget for a suite that
+# drives real git, Zoekt and CBM.
 test-integration:
-	CBM_CACHE_DIR=$(CURDIR)/testdata/fixture/cbm-data go test -tags=integration -timeout 30m ./...
+	.github/test-integration.sh
 
 # With the tag, because that is the build every file is in: nothing carries
 # `!integration`, so the tagged build is the tag-free one plus the
