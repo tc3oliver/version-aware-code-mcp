@@ -9,11 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The oldest supported codebase-memory-mcp is now 0.11.0.** `vacmcp doctor`
+  reports anything older as a version mismatch, where it previously accepted
+  0.10.1.
+
+  The rule from here is that the supported floor equals the real-engine baseline
+  CI pins. Supporting a version is a promise, and the only evidence for that
+  promise is a gate that runs against it; an engine no tier exercises is one this
+  project would learn about from a bug report. Widening the floor again needs a
+  compatibility matrix that actually runs the older engine, not a lower number.
+
+  0.10.1 is likely to keep working — the management plane asks for JSON
+  explicitly and reads a paged answer, which is what the two versions disagree
+  about — but "likely to keep working" is not what a supported version means.
+
 - The pinned codebase-memory-mcp moves from v0.10.1 to **v0.11.0**, in CI and in
-  the Docker image. The floor `vacmcp doctor` enforces stays at 0.10.1: the pin
-  says which engine every test was green against, the floor says which engines
-  are supported, and both versions are supported since the management plane now
-  asks for JSON explicitly and reads a paged answer.
+  the Docker image.
 
   What 0.11.0 changes that reaches this project: the CLI is compact by default
   with JSON behind an opt-in, `list_projects` paginates at 50, and an index

@@ -27,11 +27,12 @@ import (
 // otherwise. Building and deleting a graph is not a query: it happens once per
 // context, at management-plane speed, and is a one-shot `cli` subprocess here.
 //
-// CBM 0.10.1 indexes different projects concurrently without interfering with
-// them — measured, not assumed: two, four and six `cli index_repository` runs
-// launched together, with and without a warm daemon, all exited 0 and left
-// graphs that query independently. So there is deliberately no semaphore around
-// the call below. If a later CBM ever needs one, this file is the only place it
+// CBM indexes different projects concurrently without interfering with them —
+// measured, not assumed: on 0.10.1, two, four and six `cli index_repository`
+// runs launched together, with and without a warm daemon, all exited 0 and left
+// graphs that query independently, and managed/discovery_integration_test.go
+// now leans on the same property against 0.11.0, eight at a time. So there is
+// deliberately no semaphore around the call below. If a later CBM ever needs one, this file is the only place it
 // goes, and it wraps runIndex alone: the per-repository concurrency of git,
 // Zoekt and the context lifecycle is a separate question that must not be
 // answered with a global lock.
@@ -181,14 +182,17 @@ func verifyGraph(ctx context.Context, id string, m store.ContextMember) error {
 // happened to print gets a formatted table from 0.11.0 and reports a graph
 // engine that is working fine as one that is broken.
 //
-// Standard input rather than --format is what makes one call work on both.
-// 0.10.1 has no --format flag on these tools and refuses the whole invocation
-// when given one — `error: unknown flag --format for this tool`, exit 1 — so
-// the flag that fixes 0.11.0 breaks the version this repository pins. The
-// piped-JSON form is documented by both (`echo '<json>' | cli <tool>`), is
-// accepted by both, and is not the raw-argv form that both now warn is
-// deprecated. Keys a version does not know are ignored by it, which is what
-// lets the pagination arguments above be sent unconditionally.
+// Standard input rather than --format is what keeps that independent of which
+// CBM is installed. The flag is not portable across versions — 0.10.1 has none
+// on these tools and refuses the whole invocation when given one, `error:
+// unknown flag --format for this tool`, exit 1 — whereas the piped-JSON form is
+// documented by every version that has either (`echo '<json>' | cli <tool>`)
+// and is not the raw-argv form they now warn is deprecated. The supported floor
+// is 0.11.0 today, so that particular refusal is history rather than a live
+// constraint; what is not history is that flags come and go per tool and per
+// release, and this call site does not want to track that. Keys a version does
+// not know are ignored by it, which is what lets the pagination arguments above
+// be sent unconditionally.
 func cbmCLI(ctx context.Context, tool string, args map[string]any) (stdout, stderr []byte, err error) {
 	if args == nil {
 		args = map[string]any{}
