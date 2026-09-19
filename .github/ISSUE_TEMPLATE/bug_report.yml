@@ -43,7 +43,7 @@ body:
     id: cbm-version
     attributes:
       label: codebase-memory-mcp version
-      description: Version of the CBM binary in use (must be >=0.10.1).
+      description: Version of the CBM binary in use (must be >=0.11.0).
     validations:
       required: false
 

@@ -51,15 +51,17 @@ func TestAtLeastComparesReleases(t *testing.T) {
 		got, want string
 		pass      bool
 	}{
-		{"0.10.1", "0.10.1", true},
-		{"0.10.2", "0.10.1", true},
-		{"0.11.0", "0.10.1", true},
-		{"1.0.0", "0.10.1", true},
-		{"0.10.0", "0.10.1", false},
-		{"0.10", "0.10.1", false},
-		{"0.9.9", "0.10.1", false},
-		// A plain 0.9 must not win on "9 > 10" read as strings.
-		{"0.9", "0.10.1", false},
+		{"0.11.0", "0.11.0", true},
+		{"0.11.1", "0.11.0", true},
+		{"0.12.0", "0.11.0", true},
+		{"1.0.0", "0.11.0", true},
+		// The version this project supported until the floor moved, now below
+		// it: the case that says the floor is enforced rather than nominal.
+		{"0.10.1", "0.11.0", false},
+		{"0.10.9", "0.11.0", false},
+		{"0.11", "0.11.1", false},
+		// A plain 0.9 must not win on "9 > 11" read as strings.
+		{"0.9", "0.11.0", false},
 	} {
 		if got := atLeast(c.got, c.want); got != c.pass {
 			t.Errorf("atLeast(%q, %q) = %v, want %v", c.got, c.want, got, c.pass)

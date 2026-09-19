@@ -46,18 +46,20 @@ const (
 )
 
 const (
-	// minCBM is the oldest codebase-memory-mcp this server is known to work
-	// against. An older one is reported as a version mismatch rather than left
-	// to fail later inside trace_calls.
+	// minCBM is the oldest codebase-memory-mcp this server supports. An older
+	// one is reported as a version mismatch rather than left to fail later
+	// inside trace_calls.
 	//
-	// It is deliberately lower than the version CI pins. The pin says which
-	// engine every test was green against; this says which engines are
-	// supported, and those are different claims. Both are supported here on
-	// purpose: the management plane asks CBM for JSON explicitly and reads a
-	// paged answer, which is what the two versions disagree about, so raising
-	// this floor would refuse an engine that works rather than describe one
-	// that does not.
-	minCBM = "0.10.1"
+	// The rule is that it equals the real-engine baseline CI pins. Supporting a
+	// version is a promise, and the only evidence for that promise is a gate
+	// that runs against it: an engine no tier ever exercises is one this project
+	// would find out about from a bug report. Accepting an older CBM here
+	// because it happens to work today is how a second supported version
+	// arrives without anyone deciding to maintain it.
+	//
+	// Widening this needs a compatibility matrix that actually runs the older
+	// engine, not a lower number. Raise it in step with the pin.
+	minCBM = "0.11.0"
 
 	// sdkModule is the MCP Go SDK, looked up in this binary's build
 	// information to report which version it was built against.
@@ -475,9 +477,10 @@ func checkContexts(ctx context.Context, cfg *config.Config) []check {
 
 // atLeast reports whether the version got is at least want, comparing their
 // dot-separated numbers. A part want has and got does not counts as zero, so
-// 0.10 is below 0.10.1.
+// 0.11 is below 0.11.0 only when want carries the third part, and 0.11 is below
+// 0.11.1 always.
 //
-// ponytail: not semver. A pre-release of the required version, 0.10.1-rc1,
+// ponytail: not semver. A pre-release of the required version, 0.11.0-rc1,
 // compares equal to it and passes; use a semver comparison if CBM ever ships
 // one of those.
 func atLeast(got, want string) bool {
@@ -495,7 +498,7 @@ func atLeast(got, want string) bool {
 }
 
 // release returns the numbers of a version string, stopping at the first part
-// that is not one: "0.10.1" and "v0.10.1-rc1" are both [0 10 1], and a string
+// that is not one: "0.11.0" and "v0.11.0-rc1" are both [0 11 0], and a string
 // carrying no version at all is empty.
 func release(v string) []int {
 	v, _, _ = strings.Cut(v, "-")
