@@ -47,7 +47,7 @@ func (p *Provider) Diff(ctx context.Context, from, to vacctx.CodeContext, req pr
 		)
 	}
 
-	ctx, cancel := deadline.With(ctx, diffBudget, deadline.Git, "diff")
+	ctx, cancel := deadline.With(ctx, p.diffBudget, deadline.Git, "diff")
 	defer cancel()
 
 	fromRevision, err := p.resolve(ctx, from, repo.Path)

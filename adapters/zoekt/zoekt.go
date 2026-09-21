@@ -36,7 +36,7 @@ import (
 	"github.com/tc3oliver/version-aware-code-mcp/vacerr"
 )
 
-// requestBudget bounds a single request to Zoekt. Zoekt stops its own search
+// defaultRequestBudget bounds a single request to Zoekt. Zoekt stops its own search
 // after 20s, so this only has to cover a server that accepts the connection and
 // then never answers; a tool call must not hang on it forever.
 //
@@ -47,10 +47,11 @@ import (
 // [deadline.Ended] can tell apart from the caller's own deadline and from a
 // server that really is unreachable.
 //
-// It is a var rather than a const for the reason cmd/vacmcp's goos is one: a
-// test has to be able to stand on the branch it guards without waiting out a
-// budget meant for a wedged process. Nothing outside a test ever assigns to it.
-var requestBudget = 30 * time.Second
+// It is a default rather than a fixed limit. Nothing reads it after [New] has
+// run: each Provider carries its own, and [WithRequestBudget] replaces it for
+// one Provider. The tests take that same path, so the path an embedder uses is
+// the one CI exercises.
+const defaultRequestBudget = 30 * time.Second
 
 // maxFiles caps how many files one search may return. The query comes from a
 // caller who is free to make it match everything, and the whole result is held
@@ -62,21 +63,43 @@ type Provider struct {
 	url    string
 	list   string
 	client *http.Client
+
+	// This provider's own budget, per-Provider rather than package-level so an
+	// embedder can raise it and the tests can lower it by the same route.
+	requestBudget time.Duration
+}
+
+// Option adjusts a Provider at construction. See [WithRequestBudget].
+type Option func(*Provider)
+
+// WithRequestBudget sets how long one request to Zoekt may take. d must be
+// greater than zero; zero is not unlimited and panics, as does a negative
+// duration.
+func WithRequestBudget(d time.Duration) Option {
+	return func(p *Provider) { p.requestBudget = deadline.Positive("zoekt.WithRequestBudget", d) }
 }
 
 // New returns a Provider talking to the Zoekt web server configured under
 // providers.zoekt.url. That server must have its JSON API enabled
 // (zoekt-webserver -rpc).
-func New(cfg *config.Config) *Provider {
+//
+// With no options the budget is [defaultRequestBudget], which is what every
+// caller before the options existed gets.
+func New(cfg *config.Config, opts ...Option) *Provider {
 	base := strings.TrimRight(cfg.Providers.Zoekt.URL, "/")
-	return &Provider{
+	p := &Provider{
 		url:  base + "/api/search",
 		list: base + "/api/list",
 		// No Timeout: the budget is the request context's, set per call in post
 		// and IndexedBranches. Two owners of the same deadline would race, and
 		// only one of them can say whose deadline it was.
-		client: &http.Client{},
+		client:        &http.Client{},
+		requestBudget: defaultRequestBudget,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // IndexedBranches returns the branches Zoekt has in its index for repository,
@@ -96,7 +119,7 @@ func (p *Provider) IndexedBranches(ctx context.Context, repository string) ([]st
 	if err != nil {
 		return nil, p.listUnavailable(repository, err)
 	}
-	ctx, cancel := deadline.With(ctx, requestBudget, deadline.Zoekt, "list")
+	ctx, cancel := deadline.With(ctx, p.requestBudget, deadline.Zoekt, "list")
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.list, bytes.NewReader(body))
@@ -276,7 +299,7 @@ func (p *Provider) post(ctx context.Context, codeCtx vacctx.CodeContext, query s
 		return nil, p.unavailable(codeCtx, query, err)
 	}
 
-	ctx, cancel := deadline.With(ctx, requestBudget, deadline.Zoekt, "search")
+	ctx, cancel := deadline.With(ctx, p.requestBudget, deadline.Zoekt, "search")
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(body))

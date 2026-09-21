@@ -35,16 +35,16 @@ import (
 // graph, so which mode answered cannot change which version answered — there is
 // no per-connection project to inherit, and nothing is cached between calls.
 
-// connectTimeout bounds one attempt to start the persistent session. CBM has
+// defaultConnectTimeout bounds one attempt to start the persistent session. CBM has
 // taken 8.5 seconds to come up on a cold machine, and a cold CI runner
 // indexing in the background can be slower still, so the limit is generous —
 // it exists to stop a CBM that never finishes starting from hanging every
 // trace_calls behind it, not to time a healthy one.
 //
-// A var rather than a const for the reason the budgets are: a test standing on a
-// codebase-memory-mcp that never finishes starting would otherwise wait out the
-// whole two minutes. Nothing outside a test ever assigns to it.
-var connectTimeout = 2 * time.Minute
+// A default rather than a fixed limit. Nothing reads it after [New] has run:
+// each Provider carries its own, and [WithConnectTimeout] replaces it for one
+// Provider.
+const defaultConnectTimeout = 2 * time.Minute
 
 // reported is a failure CBM described, as opposed to a failure to reach CBM at
 // all: a non-zero `cli` exit or a tool result marked as an error. The
@@ -155,9 +155,9 @@ func (p *Provider) persistent(ctx context.Context) (*mcp.ClientSession, error) {
 // begin starts the one session attempt. Called with mu held.
 func (p *Provider) begin(ctx context.Context) *startup {
 	// context.WithoutCancel, still: what the attempt inherits from the caller is
-	// its values, never its lifetime. connectTimeout is the attempt's own bound,
-	// and it is the only thing besides Close that can end it.
-	startCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), connectTimeout)
+	// its values, never its lifetime. The connect timeout is the attempt's own
+	// bound, and it is the only thing besides Close that can end it.
+	startCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.connectTimeout)
 	attempt := &startup{done: make(chan struct{}), cancel: cancel}
 	p.starting = attempt
 

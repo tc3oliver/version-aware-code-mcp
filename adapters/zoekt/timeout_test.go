@@ -31,8 +31,7 @@ var searchContext = vacctx.CodeContext{
 // server accepts and never answers, and that is now this server's budget saying
 // so rather than a claim about reachability.
 func TestAHangingZoektIsAnOperationTimeout(t *testing.T) {
-	p := providerFor(t, hangingServer(t))
-	shrinkBudget(t, 300*time.Millisecond)
+	p := providerFor(t, hangingServer(t), WithRequestBudget(300*time.Millisecond))
 
 	_, err := p.Search(context.Background(), searchContext, provider.SearchQuery{Query: "Process"})
 
@@ -79,8 +78,7 @@ func TestAnUnreachableZoektIsStillUnavailable(t *testing.T) {
 // a call becomes this server's code.
 func TestZoektReportsTheCallersOwnClock(t *testing.T) {
 	t.Run("caller cancelled", func(t *testing.T) {
-		p := providerFor(t, hangingServer(t))
-		shrinkBudget(t, time.Hour)
+		p := providerFor(t, hangingServer(t), WithRequestBudget(time.Hour))
 
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
@@ -96,8 +94,7 @@ func TestZoektReportsTheCallersOwnClock(t *testing.T) {
 	})
 
 	t.Run("caller deadline expired", func(t *testing.T) {
-		p := providerFor(t, hangingServer(t))
-		shrinkBudget(t, time.Hour)
+		p := providerFor(t, hangingServer(t), WithRequestBudget(time.Hour))
 
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
@@ -129,16 +126,15 @@ func hangingServer(t *testing.T) string {
 	return srv.URL
 }
 
-func providerFor(t *testing.T, url string) *Provider {
+// providerFor builds the provider under test, with whatever budget the test
+// needs passed as an option.
+//
+// The option is the point, not a convenience: it is the exact call an embedder
+// makes to move the budget, so these tests exercise that path on every run
+// rather than a test-only one beside it.
+func providerFor(t *testing.T, url string, opts ...Option) *Provider {
 	t.Helper()
-	return New(&config.Config{Providers: config.Providers{Zoekt: config.Zoekt{URL: url}}})
-}
-
-func shrinkBudget(t *testing.T, d time.Duration) {
-	t.Helper()
-	previous := requestBudget
-	requestBudget = d
-	t.Cleanup(func() { requestBudget = previous })
+	return New(&config.Config{Providers: config.Providers{Zoekt: config.Zoekt{URL: url}}}, opts...)
 }
 
 func assertUnclassified(t *testing.T, err error) {

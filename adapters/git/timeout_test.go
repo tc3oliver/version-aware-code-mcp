@@ -33,25 +33,25 @@ func TestGitBudgetsProduceOperationTimeout(t *testing.T) {
 	cases := []struct {
 		name      string
 		operation string
-		budget    *time.Duration
+		budget    func(time.Duration) Option
 		call      func(context.Context, *Provider) error
 	}{
 		{
-			name: "read", operation: "read", budget: &readBudget,
+			name: "read", operation: "read", budget: WithReadBudget,
 			call: func(ctx context.Context, p *Provider) error {
 				_, err := p.Read(ctx, timeoutContext, "a.go", 1, 2)
 				return err
 			},
 		},
 		{
-			name: "diff", operation: "diff", budget: &diffBudget,
+			name: "diff", operation: "diff", budget: WithDiffBudget,
 			call: func(ctx context.Context, p *Provider) error {
 				_, err := p.Diff(ctx, timeoutContext, timeoutContext, provider.SourceDiffRequest{Path: "a.go"})
 				return err
 			},
 		},
 		{
-			name: "history", operation: "history", budget: &historyBudget,
+			name: "history", operation: "history", budget: WithHistoryBudget,
 			call: func(ctx context.Context, p *Provider) error {
 				_, err := p.SearchHistory(ctx, timeoutContext, provider.HistoryQuery{})
 				return err
@@ -62,9 +62,8 @@ func TestGitBudgetsProduceOperationTimeout(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			pidFile := hangingGit(t)
-			shrinkBudget(t, testCase.budget, stubBudget)
 
-			err := testCase.call(context.Background(), timeoutProvider(t))
+			err := testCase.call(context.Background(), timeoutProvider(t, testCase.budget(stubBudget)))
 
 			var vErr *vacerr.Error
 			if !errors.As(err, &vErr) || vErr.Code != vacerr.OperationTimeout {
@@ -103,8 +102,7 @@ func TestGitReportsTheCallersOwnClock(t *testing.T) {
 	t.Run("caller deadline expired", func(t *testing.T) {
 		pidFile := hangingGit(t)
 		// The caller's deadline is the tighter one, so it is the one that fires.
-		shrinkBudget(t, &readBudget, time.Hour)
-		p := timeoutProvider(t)
+		p := timeoutProvider(t, WithReadBudget(time.Hour))
 
 		ctx, cancel := context.WithTimeout(context.Background(), stubBudget)
 		defer cancel()
@@ -139,7 +137,7 @@ func TestAGitFailureBeforeTheBudgetKeepsItsOwnCode(t *testing.T) {
 	}
 }
 
-// stubBudget is what every budget in this file is shrunk to, and every caller
+// stubBudget is what every budget in this file is set to, and every caller
 // deadline set to.
 //
 // It has to outlast the operating system starting the stub, not the stub doing
@@ -156,20 +154,18 @@ var timeoutContext = vacctx.CodeContext{
 	Revision: "7777777777777777777777777777777777777777", GraphRef: "demo-main",
 }
 
-func timeoutProvider(t *testing.T) *Provider {
+// timeoutProvider builds the provider under test, with whatever budgets the
+// test needs passed as options.
+//
+// The options are the point, not a convenience: waiting out a real budget would
+// make the suite take minutes, and the only way to shorten one is the exact
+// call an embedder makes. Nothing here reaches into the package's state, so
+// there is no test-only path left to rot.
+func timeoutProvider(t *testing.T, opts ...Option) *Provider {
 	t.Helper()
 	return New(&config.Config{Repositories: map[string]config.Repository{
 		"demo": {Path: t.TempDir()},
-	}})
-}
-
-// shrinkBudget stands the budget at d for one test. The budgets are vars for
-// exactly this: waiting out a real one would make the suite take minutes.
-func shrinkBudget(t *testing.T, budget *time.Duration, d time.Duration) {
-	t.Helper()
-	previous := *budget
-	*budget = d
-	t.Cleanup(func() { *budget = previous })
+	}}, opts...)
 }
 
 // hangingGit puts a `git` on PATH that records its pid and parks for ever.
@@ -274,14 +270,14 @@ func TestATimeoutInTheDiagnosticIsStillATimeout(t *testing.T) {
 	cases := []struct {
 		name      string
 		operation string
-		budget    *time.Duration
+		budget    func(time.Duration) Option
 		script    string
 		call      func(context.Context, *Provider) error
 		// what the diagnostic would have concluded, had it been allowed to
 		wrong vacerr.Code
 	}{
 		{
-			name: "the read's ls-tree hangs", operation: "read", budget: &readBudget,
+			name: "the read's ls-tree hangs", operation: "read", budget: WithReadBudget,
 			script: `
 				"rev-parse --verify"*) echo ` + stubRevision + `; exit 0 ;;
 				"ls-tree"*) hang ;;
@@ -293,7 +289,7 @@ func TestATimeoutInTheDiagnosticIsStillATimeout(t *testing.T) {
 			wrong: vacerr.InvalidArgument,
 		},
 		{
-			name: "the read's worktree check hangs", operation: "read", budget: &readBudget,
+			name: "the read's worktree check hangs", operation: "read", budget: WithReadBudget,
 			// The path IS in the tree, so the read goes on to the fail-closed
 			// worktree check — and that check runs two more gits of its own.
 			script: `
@@ -307,7 +303,7 @@ func TestATimeoutInTheDiagnosticIsStillATimeout(t *testing.T) {
 			wrong: vacerr.RepositoryNotFound,
 		},
 		{
-			name: "the empty diff's ls-tree hangs", operation: "diff", budget: &diffBudget,
+			name: "the empty diff's ls-tree hangs", operation: "diff", budget: WithDiffBudget,
 			// git prints nothing for two identical revisions and for a path
 			// neither of them has; ls-tree is what tells those apart.
 			script: `
@@ -326,9 +322,8 @@ func TestATimeoutInTheDiagnosticIsStillATimeout(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			pidFile := scriptedGit(t, testCase.script)
-			shrinkBudget(t, testCase.budget, stubBudget)
 
-			err := testCase.call(context.Background(), timeoutProvider(t))
+			err := testCase.call(context.Background(), timeoutProvider(t, testCase.budget(stubBudget)))
 
 			var vErr *vacerr.Error
 			if !errors.As(err, &vErr) {

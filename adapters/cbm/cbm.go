@@ -51,7 +51,7 @@ import (
 // hits the ceiling.
 const maxNodes = 1000
 
-// traceBudget bounds one whole traversal: resolve, trace and locate together.
+// defaultTraceBudget bounds one whole traversal: resolve, trace and locate together.
 //
 // Generous on purpose, and anchored to what this package already knows about
 // codebase-memory-mcp rather than to the fixture. A session start is bounded at
@@ -62,10 +62,11 @@ const maxNodes = 1000
 // normal is near this. The budget is for a graph engine that has stopped
 // answering, not for one that is working through a large graph.
 //
-// It is a var rather than a const for the reason cmd/vacmcp's goos is one: a
-// test has to be able to stand on the branch below without waiting out a budget
-// meant for a wedged process. Nothing outside a test ever assigns to it.
-var traceBudget = 2 * time.Minute
+// It is a default rather than a fixed limit. Nothing reads it after [New] has
+// run: each Provider carries its own, and [WithTraceBudget] replaces it for one
+// Provider. The tests take that same path, so the path an embedder uses is the
+// one CI exercises.
+const defaultTraceBudget = 2 * time.Minute
 
 // Provider is the CBM implementation of [provider.GraphProvider].
 //
@@ -86,12 +87,52 @@ type Provider struct {
 	cliOnly  bool
 	starting *startup
 	closed   bool
+
+	// This provider's own two budgets: one trace, and one attempt to start the
+	// session a trace runs over. Per-Provider rather than package-level so an
+	// embedder can raise them and the tests can lower them by the same route.
+	traceBudget    time.Duration
+	connectTimeout time.Duration
+}
+
+// Option adjusts a Provider at construction. See [WithTraceBudget] and
+// [WithConnectTimeout].
+type Option func(*Provider)
+
+// WithTraceBudget sets how long one whole traversal may take. d must be greater
+// than zero; zero is not unlimited and panics, as does a negative duration.
+func WithTraceBudget(d time.Duration) Option {
+	return func(p *Provider) { p.traceBudget = deadline.Positive("cbm.WithTraceBudget", d) }
+}
+
+// WithConnectTimeout sets how long one attempt to start the persistent CBM
+// session may take. d must be greater than zero; zero is not unlimited and
+// panics, as does a negative duration.
+//
+// It is not a query budget — it bounds a session start, which happens once and
+// is deliberately outside the trace budget — but it is the same kind of number
+// and it is spent before the first trace can begin, so an embedder whose CBM
+// indexes on startup has the same reason to raise it and no other way to.
+func WithConnectTimeout(d time.Duration) Option {
+	return func(p *Provider) { p.connectTimeout = deadline.Positive("cbm.WithConnectTimeout", d) }
 }
 
 // New returns a Provider running the codebase-memory-mcp binary named in cfg.
 // CBM is not started here: nothing is spawned until a trace actually needs it.
-func New(cfg *config.Config) *Provider {
-	return &Provider{command: cfg.Providers.CBM.Command}
+//
+// With no options the budgets are [defaultTraceBudget] and
+// [defaultConnectTimeout], which is what every caller before the options
+// existed gets.
+func New(cfg *config.Config, opts ...Option) *Provider {
+	p := &Provider{
+		command:        cfg.Providers.CBM.Command,
+		traceBudget:    defaultTraceBudget,
+		connectTimeout: defaultConnectTimeout,
+	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // TraceCalls returns the call graph around req.Symbol inside the CBM project
@@ -122,7 +163,7 @@ func (p *Provider) TraceCalls(ctx context.Context, codeCtx vacctx.CodeContext, r
 	// is inside this budget is the *waiting*: a trace held behind a CBM that
 	// never finishes starting stops waiting here, on this clock, while the
 	// start it was waiting for carries on for whoever asks next.
-	ctx, cancel := deadline.With(ctx, traceBudget, deadline.CBM, "trace")
+	ctx, cancel := deadline.With(ctx, p.traceBudget, deadline.CBM, "trace")
 	defer cancel()
 
 	root, err := p.resolve(ctx, codeCtx, req.Symbol)

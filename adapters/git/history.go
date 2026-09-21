@@ -70,7 +70,7 @@ func (p *Provider) SearchHistory(ctx context.Context, codeCtx vacctx.CodeContext
 	// Generous, and the only git budget that is: `git log -S` walks every commit
 	// in range, which on a large history is minutes of work the caller actually
 	// asked for. See historyBudget.
-	ctx, cancel := deadline.With(ctx, historyBudget, deadline.Git, "history")
+	ctx, cancel := deadline.With(ctx, p.historyBudget, deadline.Git, "history")
 	defer cancel()
 
 	// The pinned commit, resolved once. Everything below walks from THIS commit,

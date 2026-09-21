@@ -36,11 +36,9 @@ var traceContext = vacctx.CodeContext{
 // distinction the Zoekt migration makes, at the other provider.
 func TestAHangingCBMIsAnOperationTimeout(t *testing.T) {
 	pidFile := hangingCBM(t)
-	// Both, because they are spent in sequence: see shrinkTraceBudget. The
+	// Both, because they are spent in sequence: see timeoutProvider. The
 	// length is stubBudget's, for the reason given there.
-	shrinkTraceBudget(t, stubBudget, stubBudget)
-
-	p := New(&config.Config{Providers: config.Providers{CBM: config.CBM{Command: "codebase-memory-mcp"}}})
+	p := timeoutProvider(t, stubBudget, stubBudget)
 	t.Cleanup(func() { _ = p.Close() })
 
 	_, err := p.TraceCalls(context.Background(), traceContext, provider.TraceRequest{
@@ -67,9 +65,7 @@ func TestCBMReportsTheCallersOwnClock(t *testing.T) {
 	// session start is built on context.WithoutCancel on purpose, so a client
 	// going away cannot take down the session every later call depends on. The
 	// trace budget is an hour, so what ends this call can only be the caller.
-	shrinkTraceBudget(t, time.Hour, stubBudget)
-
-	p := New(&config.Config{Providers: config.Providers{CBM: config.CBM{Command: "codebase-memory-mcp"}}})
+	p := timeoutProvider(t, time.Hour, stubBudget)
 	t.Cleanup(func() { _ = p.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,8 +104,8 @@ func hangingCBM(t *testing.T) string {
 	return pidFile
 }
 
-// shrinkTraceBudget stands the trace budget at d, and the session-start budget
-// with it.
+// timeoutProvider builds the provider under test with both budgets set: the
+// trace budget and the session-start one.
 //
 // Both, because they are sequential and the session one is deliberately outside
 // the trace budget: it is built on context.WithoutCancel so a client going away
@@ -117,11 +113,18 @@ func hangingCBM(t *testing.T) string {
 // never finishes starting, that means the start budget is spent in full before
 // the trace budget begins — two minutes of it, which is the right behaviour in
 // production and an unusable test.
-func shrinkTraceBudget(t *testing.T, trace, connect time.Duration) {
+//
+// They are passed as options rather than assigned to package state, and that is
+// the point: [WithTraceBudget] and [WithConnectTimeout] are the exact calls an
+// embedder makes, so every run of this suite exercises the embedder's path
+// instead of a test-only one beside it.
+func timeoutProvider(t *testing.T, trace, connect time.Duration) *Provider {
 	t.Helper()
-	previousTrace, previousConnect := traceBudget, connectTimeout
-	traceBudget, connectTimeout = trace, connect
-	t.Cleanup(func() { traceBudget, connectTimeout = previousTrace, previousConnect })
+	return New(
+		&config.Config{Providers: config.Providers{CBM: config.CBM{Command: "codebase-memory-mcp"}}},
+		WithTraceBudget(trace),
+		WithConnectTimeout(connect),
+	)
 }
 
 func assertReaped(t *testing.T, pidFile string) {
@@ -182,7 +185,6 @@ func TestAHangingFirstStartDoesNotHoldTheCaller(t *testing.T) {
 	// Both budgets far out of reach, so nothing but the caller's own clock can
 	// end these calls — and so a return proves the wait was not the connect
 	// budget quietly expiring.
-	shrinkTraceBudget(t, time.Hour, time.Hour)
 
 	for _, testCase := range []struct {
 		name string
@@ -210,7 +212,7 @@ func TestAHangingFirstStartDoesNotHoldTheCaller(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			pidFile := hangingCBM(t)
-			p := New(&config.Config{Providers: config.Providers{CBM: config.CBM{Command: "codebase-memory-mcp"}}})
+			p := timeoutProvider(t, time.Hour, time.Hour)
 
 			ctx, want := testCase.caller(t)
 			started := time.Now()
@@ -262,9 +264,7 @@ func TestAHangingFirstStartDoesNotHoldTheCaller(t *testing.T) {
 // the worst possible moment.
 func TestOneHangingStartServesEveryWaiter(t *testing.T) {
 	pidFile := hangingCBM(t)
-	shrinkTraceBudget(t, time.Hour, time.Hour)
-
-	p := New(&config.Config{Providers: config.Providers{CBM: config.CBM{Command: "codebase-memory-mcp"}}})
+	p := timeoutProvider(t, time.Hour, time.Hour)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

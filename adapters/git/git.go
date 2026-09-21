@@ -41,13 +41,59 @@ import (
 // Provider is the git implementation of [provider.SourceProvider].
 type Provider struct {
 	repositories map[string]config.Repository
+
+	// This provider's own budgets. Per-Provider rather than package-level so
+	// that an embedder whose repository is bigger than the defaults assume can
+	// raise them, and so that the tests do it the same way. See the defaults
+	// below.
+	readBudget    time.Duration
+	diffBudget    time.Duration
+	historyBudget time.Duration
+}
+
+// Option adjusts a Provider at construction. See [WithReadBudget],
+// [WithDiffBudget] and [WithHistoryBudget].
+type Option func(*Provider)
+
+// WithReadBudget sets how long one Read may take. d must be greater than zero;
+// zero is not unlimited and panics, as does a negative duration.
+func WithReadBudget(d time.Duration) Option {
+	return func(p *Provider) { p.readBudget = deadline.Positive("git.WithReadBudget", d) }
+}
+
+// WithDiffBudget sets how long one Diff may take. d must be greater than zero;
+// zero is not unlimited and panics, as does a negative duration.
+func WithDiffBudget(d time.Duration) Option {
+	return func(p *Provider) { p.diffBudget = deadline.Positive("git.WithDiffBudget", d) }
+}
+
+// WithHistoryBudget sets how long one SearchHistory may take. d must be greater
+// than zero; zero is not unlimited and panics, as does a negative duration.
+//
+// It is the one most likely to need raising: `git log -S` is a pickaxe over
+// every commit in range, and a history large enough to outrun two minutes is a
+// real repository asking a real question, not a wedged git.
+func WithHistoryBudget(d time.Duration) Option {
+	return func(p *Provider) { p.historyBudget = deadline.Positive("git.WithHistoryBudget", d) }
 }
 
 // New returns a Provider serving the repositories declared in cfg. A context
 // names its repository by the key it is filed under there, not by a path, so
 // the adapter owns that lookup.
-func New(cfg *config.Config) *Provider {
-	return &Provider{repositories: cfg.Repositories}
+//
+// With no options the budgets are the defaults below, which is what every
+// caller before they existed gets.
+func New(cfg *config.Config, opts ...Option) *Provider {
+	p := &Provider{
+		repositories:  cfg.Repositories,
+		readBudget:    defaultReadBudget,
+		diffBudget:    defaultDiffBudget,
+		historyBudget: defaultHistoryBudget,
+	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Read returns lines [start, end] of filePath as they are at the revision
@@ -88,7 +134,7 @@ func (p *Provider) Read(ctx context.Context, codeCtx vacctx.CodeContext, filePat
 	// The budget covers resolving and reading together, because they are one
 	// answer to the caller: a read that pinned its revision and then hung is not
 	// half-finished, it is a call that did not come back.
-	ctx, cancel := deadline.With(ctx, readBudget, deadline.Git, "read")
+	ctx, cancel := deadline.With(ctx, p.readBudget, deadline.Git, "read")
 	defer cancel()
 
 	revision, err := p.resolve(ctx, codeCtx, repo.Path)
@@ -248,13 +294,17 @@ func splitLines(content string) []string {
 // not the walk. Killing it at 30s would fail the query this adapter exists to
 // answer.
 //
-// They are vars rather than consts for the reason cmd/vacmcp's goos is one: a
-// test has to be able to stand on the branch below without waiting out a budget
-// meant for a wedged process. Nothing outside a test ever assigns to them.
-var (
-	readBudget    = 30 * time.Second
-	diffBudget    = 30 * time.Second
-	historyBudget = 2 * time.Minute
+// They are defaults rather than fixed limits. Nothing reads them after [New]
+// has run: each Provider carries its own three, and [WithReadBudget],
+// [WithDiffBudget] and [WithHistoryBudget] replace them for one Provider. A
+// caller's own context deadline can only ever shorten an operation, so before
+// the options existed an embedder whose `git log -S` needed longer than
+// historyBudget had no way to say so. The tests take that same path, so the
+// path an embedder uses is the one CI exercises.
+const (
+	defaultReadBudget    = 30 * time.Second
+	defaultDiffBudget    = 30 * time.Second
+	defaultHistoryBudget = 2 * time.Minute
 )
 
 // gitOutput runs one git command in the repository at repoPath and returns its
