@@ -118,8 +118,8 @@ them, on the [releases page](https://github.com/tc3oliver/version-aware-code-mcp
 
 ```bash
 sha256sum -c SHA256SUMS --ignore-missing
-tar -xzf vacmcp_v0.6.0_linux_amd64.tar.gz
-./vacmcp version          # v0.6.0, the release this binary was built from
+tar -xzf vacmcp_v0.7.0_linux_amd64.tar.gz
+./vacmcp version          # v0.7.0, the release this binary was built from
 ```
 
 Or build it from source, which reports `0.0.0-dev` because no release built it:
@@ -993,7 +993,10 @@ search spans all of them, and the graph and the comparisons stay scoped to one
 repository at a time — see [Multi-Repo Context](#multi-repo-context). v0.6.0 is
 version-scoped commit history: `search_history` walks from the commit a context
 pins rather than from HEAD or the default branch, so a context pinned to an older
-commit does not see the commits made after it. Ahead of those:
+commit does not see the commits made after it. v0.7.0 is operational
+correctness: every query-plane operation carries a budget it reports as
+`OPERATION_TIMEOUT`, shutdown and cancellation are honoured throughout, and the
+supported codebase-memory-mcp floor moves to 0.11.0. Ahead of those:
 
 | Version | Direction |
 | --- | --- |
@@ -1003,6 +1006,7 @@ commit does not see the commits made after it. Ahead of those:
 | v0.4.0 | version intelligence: `compare_code`, `compare_calls`, revision and graph diff within one repository — done |
 | v0.5.0 | multi-repo contexts: a workspace of several repositories under one context id, search spanning every member, and multi-repo graph query — each member keeps its own revision-scoped graph, so there is no cross-repository call edge — done |
 | v0.6.0 | version-scoped commit history: `search_history` over the revision a context pins, one entry per commit-path occurrence, spanning a workspace or narrowed to one member — done |
+| v0.7.0 | operational correctness: per-operation `OPERATION_TIMEOUT` budgets on the query plane, signal-honouring `serve`, `repo` and `context`, HTTP drain on shutdown, and codebase-memory-mcp 0.11.0 as the supported floor — done |
 | unscheduled | operations: metrics, OpenTelemetry, garbage collection, scheduled sync primitives |
 | v1.0.0 | stable public API and compatibility contract |
 

@@ -5,7 +5,84 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-09-21
+
+**Breaking, pre-v1.0.** A Zoekt request that runs out of time now reports
+`OPERATION_TIMEOUT` where it reported `SEARCH_PROVIDER_UNAVAILABLE`, and
+`OPERATION_TIMEOUT` is a failure mode every query-plane operation can now
+produce where none of them could before. A client that branches on error codes
+has to be read against **Changed** and **Added** below before upgrading. The
+oldest supported codebase-memory-mcp also moves to 0.11.0.
+
+### Added
+
+- Every query-plane operation now has a budget vacmcp sets for itself, reported
+  as `OPERATION_TIMEOUT` when it expires: context resolution (30s), git source
+  reads (30s), git diffs (30s), git history walks (2m), codebase-memory-mcp
+  traversals (2m) and Zoekt requests (30s).
+
+  They are wedged-process guards, not performance targets. None is derived from
+  the test fixture, which is far too small to size them: against it on a
+  developer machine a resolve is 9ms, a read 9ms, a diff 17ms, a history walk
+  9ms, a Zoekt search 1ms and a trace 176ms. They follow the guards this project
+  already set — a Zoekt request and a doctor probe at 30 seconds, a CBM session
+  start at 2 minutes — and the two long ones are long because the work behind
+  them legitimately is: `git log -S` is a pickaxe over every commit in range, and
+  a CBM call with no session pays a cold start that has been measured at 8.5
+  seconds.
+
+  **Management-plane operations get no budget**: `repo add`, `repo sync`,
+  `zoekt-git-index` and `codebase-memory-mcp index_repository` still run for as
+  long as they need, and an operator ends them with Ctrl-C. A first clone or a
+  first index is hours of legitimate work on a large repository, and a wall-clock
+  guess there would fail exactly the cases those commands exist for.
+
+- `vacerr.OperationTimeout` (`OPERATION_TIMEOUT`): an operation budget vacmcp set
+  for itself expired. It is a wedged-process guard — a git that never returns, a
+  graph engine that stopped answering — and not a performance target.
+  Its details name the operation, the provider (`git`, `cbm` or `zoekt`) and the
+  budget in milliseconds, and nothing about the repository, the query or the
+  machine.
+
+  Two things it deliberately does not cover, both the caller's, both propagated
+  as the context error they already are: a caller that cancelled
+  (`context.Canceled`) and a caller whose own deadline expired
+  (`context.DeadlineExceeded`). A cancellation is something the client caused and
+  already knows about; a caller's deadline is the caller's, and reporting it as
+  this server's would be a false attribution.
+
+  Telling this server's expired deadline from the caller's cannot be done by
+  inspecting the error — a context reports `context.DeadlineExceeded` either way,
+  and reading the parent afterwards is a race. The budget therefore carries a
+  cause only the producing code can make, read back through `context.Cause`,
+  which settles the question at the moment the context ended rather than when it
+  is asked about.
+
+  The contract and the code that proves one are separate from the deadlines that
+  use them: the budgets are the entry above.
+
+- `search_history` is now an MCP tool. The engine capability, the
+  `provider.HistoryProvider` interface and the `adapters/git` implementation all
+  shipped in v0.6.0, but nothing registered a tool for them — the feature was
+  reachable only by embedding the Go package, while the release notes described
+  it in tool voice. It takes `context`, and optionally `repository`, `query`,
+  `symbol`, `path` and `limit`; it answers with the commits, the context they
+  were found in and one citation per commit-path occurrence. Behaviour is the
+  engine's unchanged: the walk starts at the commit the context pins, history
+  spans every member of a workspace unless `repository` narrows it to one, a
+  member that cannot answer fails the whole request, and a source provider that
+  cannot walk history is refused with `SOURCE_HISTORY_UNAVAILABLE`.
+- `server.ServeHTTPContext`, which is `server.ServeHTTP` with a context to be
+  told about a shutdown through. `ServeHTTP` keeps its signature and its
+  behaviour, and is now a call to it with a background context.
+
+- `serve --managed` now carries the Windows locking warning that `repo` and
+  `context` already did. On Windows both managed locks are no-ops, so the server
+  starts holding no cross-process lock on its data directory and the refusal
+  that keeps management commands away from a running server does not happen —
+  the one command that holds the lock for its whole run was the one saying
+  nothing about the lock not being there. No lock mechanism changed; this makes
+  an existing limitation audible where it was silent.
 
 ### Changed
 
@@ -35,8 +112,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graph, and a stamped store is still readable by 0.10.1, so the upgrade is not
   a one-way door.
 
+- The MCP Go SDK moves to v1.8.0 and `golang.org/x/sys` to v0.48.0. No call site
+  changed; downstream modules inherit both transitively.
+
+- **Wire behaviour correction, pre-v1.0.** A Zoekt request that runs out of time
+  is now `OPERATION_TIMEOUT`. It was `SEARCH_PROVIDER_UNAVAILABLE`, and had been
+  since v0.1.0, because the budget was an `http.Client` timeout — an error
+  indistinguishable from a connection failure. A Zoekt that accepted the request
+  and went quiet was therefore reported as a Zoekt that could not be reached,
+  which sends an operator to look at a server that is listening and healthy.
+
+  The duration is unchanged at 30 seconds. What changed is who owns it: the
+  budget is now on the request context, so the three outcomes are told apart.
+
+  ```
+  connection refused, bad response, HTTP failure  → SEARCH_PROVIDER_UNAVAILABLE
+  vacmcp's own request budget expired             → OPERATION_TIMEOUT
+  the caller cancelled or its deadline expired    → the raw context error
+  ```
+
+  A client that branches on `SEARCH_PROVIDER_UNAVAILABLE` to mean "slow or
+  absent" has to be updated. This is the one breaking change in the timeout work
+  and it is made now, before v1.0.0, rather than leaving Zoekt permanently
+  inconsistent with git and codebase-memory-mcp.
+
 ### Fixed
 
+- **A graph past the fiftieth project was reported as missing.** The management
+  plane confirmed a codebase-memory-mcp graph by listing projects and looking
+  for the one it had just built, but it read only the first page of that answer.
+  codebase-memory-mcp 0.11.0 paginates `list_projects` at 50, so on any
+  installation holding more than fifty projects the verification of a graph that
+  existed, was indexed and was queryable returned "not found" — a wrong answer,
+  not a slow one, and one that turned a healthy `context create` into a failure
+  and a healthy context into an unverifiable one. The call now asks for JSON
+  explicitly and walks every page until it finds the graph or the engine says
+  there are no more, reading the page size from the response rather than
+  assuming it. 0.10.1 did not paginate, so the defect was unreachable before the
+  engine upgrade and is fixed in the same release that could first expose it.
 - A caller waiting on the first codebase-memory-mcp session now stops waiting on
   its own clock. The session start is deliberately not on the caller's context —
   it is the session every later trace shares, so a client that walks away must
@@ -88,76 +201,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A shutdown that was asked for exits 0. The STDIO transport reports a cancelled
   context by returning it, which `serve` used to pass up as a failed run.
 
-### Changed
-
-- **Wire behaviour correction, pre-v1.0.** A Zoekt request that runs out of time
-  is now `OPERATION_TIMEOUT`. It was `SEARCH_PROVIDER_UNAVAILABLE`, and had been
-  since v0.1.0, because the budget was an `http.Client` timeout — an error
-  indistinguishable from a connection failure. A Zoekt that accepted the request
-  and went quiet was therefore reported as a Zoekt that could not be reached,
-  which sends an operator to look at a server that is listening and healthy.
-
-  The duration is unchanged at 30 seconds. What changed is who owns it: the
-  budget is now on the request context, so the three outcomes are told apart.
-
-  ```
-  connection refused, bad response, HTTP failure  → SEARCH_PROVIDER_UNAVAILABLE
-  vacmcp's own request budget expired             → OPERATION_TIMEOUT
-  the caller cancelled or its deadline expired    → the raw context error
-  ```
-
-  A client that branches on `SEARCH_PROVIDER_UNAVAILABLE` to mean "slow or
-  absent" has to be updated. This is the one breaking change in the timeout work
-  and it is made now, before v1.0.0, rather than leaving Zoekt permanently
-  inconsistent with git and codebase-memory-mcp.
-
-### Added
-
-- Every query-plane operation now has a budget vacmcp sets for itself, reported
-  as `OPERATION_TIMEOUT` when it expires: context resolution (30s), git source
-  reads (30s), git diffs (30s), git history walks (2m), codebase-memory-mcp
-  traversals (2m) and Zoekt requests (30s).
-
-  They are wedged-process guards, not performance targets. None is derived from
-  the test fixture, which is far too small to size them: against it on a
-  developer machine a resolve is 9ms, a read 9ms, a diff 17ms, a history walk
-  9ms, a Zoekt search 1ms and a trace 176ms. They follow the guards this project
-  already set — a Zoekt request and a doctor probe at 30 seconds, a CBM session
-  start at 2 minutes — and the two long ones are long because the work behind
-  them legitimately is: `git log -S` is a pickaxe over every commit in range, and
-  a CBM call with no session pays a cold start that has been measured at 8.5
-  seconds.
-
-  **Management-plane operations get no budget**: `repo add`, `repo sync`,
-  `zoekt-git-index` and `codebase-memory-mcp index_repository` still run for as
-  long as they need, and an operator ends them with Ctrl-C. A first clone or a
-  first index is hours of legitimate work on a large repository, and a wall-clock
-  guess there would fail exactly the cases those commands exist for.
-
-- `vacerr.OperationTimeout` (`OPERATION_TIMEOUT`): an operation budget vacmcp set
-  for itself expired. It is a wedged-process guard — a git that never returns, a
-  graph engine that stopped answering — and not a performance target.
-  Its details name the operation, the provider (`git`, `cbm` or `zoekt`) and the
-  budget in milliseconds, and nothing about the repository, the query or the
-  machine.
-
-  Two things it deliberately does not cover, both the caller's, both propagated
-  as the context error they already are: a caller that cancelled
-  (`context.Canceled`) and a caller whose own deadline expired
-  (`context.DeadlineExceeded`). A cancellation is something the client caused and
-  already knows about; a caller's deadline is the caller's, and reporting it as
-  this server's would be a false attribution.
-
-  Telling this server's expired deadline from the caller's cannot be done by
-  inspecting the error — a context reports `context.DeadlineExceeded` either way,
-  and reading the parent afterwards is a race. The budget therefore carries a
-  cause only the producing code can make, read back through `context.Cause`,
-  which settles the question at the moment the context ended rather than when it
-  is asked about.
-
-  The contract and the code that proves one are separate from the deadlines that
-  use them: the budgets are the entry above.
-
 ### Tests
 
 - `trace_calls` has a tag-free test file. It was the one tool without one: its
@@ -177,6 +220,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against; a test asserts the absence instead and fails the day one appears,
   which is the day a wire test becomes both possible and required.
 
+- `make test-integration` keeps one codebase-memory-mcp daemon warm for the
+  whole run, the way CI already did, instead of paying a cold start per call.
+  Ownership is bound to the daemon's pid: a daemon already running is adopted
+  and never stopped, only one this run started is stopped, and the pid is
+  re-read at cleanup so a daemon that was replaced mid-run is reported rather
+  than killed. Cleanup runs on success, on failure and on SIGINT or SIGTERM, and
+  preserves the `go test` exit code.
+
 ### Documentation
 
 - The roadmap named v0.6.0 as operations — metrics, OpenTelemetry, garbage
@@ -190,31 +241,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The install example downloaded `vacmcp_v0.1.0_linux_amd64.tar.gz` and said
   `vacmcp version` would print v0.1.0, six releases after that stopped being the
   current one.
-
-### Added
-
-- `search_history` is now an MCP tool. The engine capability, the
-  `provider.HistoryProvider` interface and the `adapters/git` implementation all
-  shipped in v0.6.0, but nothing registered a tool for them — the feature was
-  reachable only by embedding the Go package, while the release notes described
-  it in tool voice. It takes `context`, and optionally `repository`, `query`,
-  `symbol`, `path` and `limit`; it answers with the commits, the context they
-  were found in and one citation per commit-path occurrence. Behaviour is the
-  engine's unchanged: the walk starts at the commit the context pins, history
-  spans every member of a workspace unless `repository` narrows it to one, a
-  member that cannot answer fails the whole request, and a source provider that
-  cannot walk history is refused with `SOURCE_HISTORY_UNAVAILABLE`.
-- `server.ServeHTTPContext`, which is `server.ServeHTTP` with a context to be
-  told about a shutdown through. `ServeHTTP` keeps its signature and its
-  behaviour, and is now a call to it with a background context.
-
-- `serve --managed` now carries the Windows locking warning that `repo` and
-  `context` already did. On Windows both managed locks are no-ops, so the server
-  starts holding no cross-process lock on its data directory and the refusal
-  that keeps management commands away from a running server does not happen —
-  the one command that holds the lock for its whole run was the one saying
-  nothing about the lock not being there. No lock mechanism changed; this makes
-  an existing limitation audible where it was silent.
 
 ### Notes
 
@@ -627,3 +653,12 @@ cloning, indexing, checking out and writing a configuration file by hand.
   binary again for every query: about 8.6 seconds per trace before, about 50
   milliseconds after. The graph project is still sent with every query, and a
   CBM that cannot serve MCP falls back to `codebase-memory-mcp cli`.
+
+[0.7.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/tc3oliver/version-aware-code-mcp/releases/tag/v0.1.0
