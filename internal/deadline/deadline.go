@@ -126,3 +126,28 @@ func Override(ctx context.Context, err error) error {
 	}
 	return err
 }
+
+// Positive returns d, and panics unless it is greater than zero. option is the
+// exported option's name, so the panic says which call was wrong.
+//
+// It is what every budget option runs its argument through, and the reason it
+// panics rather than returning an error is the shape of the mistake it catches.
+// The argument comes from an embedder's own source — very nearly always a
+// literal — so a non-positive one is a bug in that source, not a condition the
+// running server can find itself in. The constructors it guards return no error
+// and must keep not returning one, because every existing call site depends on
+// that; recording the fault and failing at the first call instead would report
+// a construction-time mistake at a moment that could be hours later, in a stack
+// that has nothing to do with it.
+//
+// Zero is rejected along with negatives, and deliberately so: [With] treats a
+// budget of zero or less as no budget at all, so accepting one here would make
+// WithReadBudget(0) the documented way to run an unbounded git — the exact
+// thing these budgets exist to prevent, spelled the way this kind of API is
+// most often misread.
+func Positive(option string, d time.Duration) time.Duration {
+	if d <= 0 {
+		panic(fmt.Sprintf("%s(%s): a budget must be greater than zero; zero does not mean unlimited", option, d))
+	}
+	return d
+}

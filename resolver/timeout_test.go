@@ -27,9 +27,8 @@ import (
 
 func TestResolveBudgetProducesOperationTimeout(t *testing.T) {
 	hangingGit(t)
-	shrinkResolveBudget(t, stubBudget)
 
-	_, err := resolverFor(t).Resolve(context.Background(), "app")
+	_, err := resolverFor(t, WithResolveBudget(stubBudget)).Resolve(context.Background(), "app")
 
 	var vErr *vacerr.Error
 	if !errors.As(err, &vErr) {
@@ -48,7 +47,6 @@ func TestResolveBudgetProducesOperationTimeout(t *testing.T) {
 func TestResolveReportsTheCallersOwnClock(t *testing.T) {
 	t.Run("caller cancelled", func(t *testing.T) {
 		hangingGit(t)
-		shrinkResolveBudget(t, time.Hour)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
@@ -56,7 +54,7 @@ func TestResolveReportsTheCallersOwnClock(t *testing.T) {
 			cancel()
 		}()
 
-		_, err := resolverFor(t).Resolve(ctx, "app")
+		_, err := resolverFor(t, WithResolveBudget(time.Hour)).Resolve(ctx, "app")
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Resolve = %v, want context.Canceled", err)
 		}
@@ -65,12 +63,11 @@ func TestResolveReportsTheCallersOwnClock(t *testing.T) {
 
 	t.Run("caller deadline expired", func(t *testing.T) {
 		hangingGit(t)
-		shrinkResolveBudget(t, time.Hour)
 
 		ctx, cancel := context.WithTimeout(context.Background(), stubBudget)
 		defer cancel()
 
-		_, err := resolverFor(t).Resolve(ctx, "app")
+		_, err := resolverFor(t, WithResolveBudget(time.Hour)).Resolve(ctx, "app")
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("Resolve = %v, want context.DeadlineExceeded", err)
 		}
@@ -89,12 +86,18 @@ func TestAnUnconfiguredContextIsStillNotFound(t *testing.T) {
 	}
 }
 
-// stubBudget is what the budget is shrunk to here, and what a caller deadline
+// stubBudget is what the budget is set to here, and what a caller deadline
 // is set to: long enough that starting the stub is never what the test races
 // against. See the git adapter's copy for the whole reason.
 const stubBudget = 5 * time.Second
 
-func resolverFor(t *testing.T) *Resolver {
+// resolverFor builds the resolver under test, with whatever budget the test
+// needs passed as an option.
+//
+// The option is the point, not a convenience: it is the exact call an embedder
+// makes to move the budget, so these tests exercise that path on every run
+// rather than a test-only one beside it.
+func resolverFor(t *testing.T, opts ...Option) *Resolver {
 	t.Helper()
 
 	return New(&config.Config{
@@ -106,7 +109,7 @@ func resolverFor(t *testing.T) *Resolver {
 				GraphRef: "demo-main",
 			}}},
 		},
-	})
+	}, opts...)
 }
 
 func hangingGit(t *testing.T) {
@@ -118,13 +121,6 @@ func hangingGit(t *testing.T) {
 		t.Fatalf("write the git stub: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-func shrinkResolveBudget(t *testing.T, d time.Duration) {
-	t.Helper()
-	previous := resolveBudget
-	resolveBudget = d
-	t.Cleanup(func() { resolveBudget = previous })
 }
 
 func assertUnclassified(t *testing.T, err error) {
@@ -147,9 +143,8 @@ func TestATimeoutInTheDiagnosticIsStillATimeout(t *testing.T) {
 	pidFile := scriptedGit(t, `
 		"rev-parse --git-dir"*) hang ;;
 	`)
-	shrinkResolveBudget(t, stubBudget)
 
-	_, err := resolverFor(t).Resolve(context.Background(), "app")
+	_, err := resolverFor(t, WithResolveBudget(stubBudget)).Resolve(context.Background(), "app")
 
 	var vErr *vacerr.Error
 	if !errors.As(err, &vErr) {

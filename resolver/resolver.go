@@ -44,11 +44,36 @@ import (
 type Resolver struct {
 	contexts     map[string]vacctx.Workspace
 	repositories map[string]config.Repository
+
+	// This resolver's own budget, per-Resolver rather than package-level so an
+	// embedder can raise it and the tests can lower it by the same route.
+	resolveBudget time.Duration
+}
+
+// Option adjusts a Resolver at construction. See [WithResolveBudget].
+type Option func(*Resolver)
+
+// WithResolveBudget sets how long resolving one context may take. d must be
+// greater than zero; zero is not unlimited and panics, as does a negative
+// duration.
+func WithResolveBudget(d time.Duration) Option {
+	return func(r *Resolver) { r.resolveBudget = deadline.Positive("resolver.WithResolveBudget", d) }
 }
 
 // New returns a Resolver serving the contexts of cfg.
-func New(cfg *config.Config) *Resolver {
-	return &Resolver{contexts: cfg.Contexts, repositories: cfg.Repositories}
+//
+// With no options the budget is [defaultResolveBudget], which is what every
+// caller before the options existed gets.
+func New(cfg *config.Config, opts ...Option) *Resolver {
+	r := &Resolver{
+		contexts:      cfg.Contexts,
+		repositories:  cfg.Repositories,
+		resolveBudget: defaultResolveBudget,
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // Contexts returns every configured context, sorted by ID so repeated calls
@@ -87,17 +112,18 @@ func membersOf(workspace vacctx.Workspace, id string) []vacctx.CodeContext {
 	return members
 }
 
-// resolveBudget bounds resolving one context, however many repositories it
+// defaultResolveBudget bounds resolving one context, however many repositories it
 // names. `git rev-parse` is cheap — 9ms against the prepared fixture — so this
 // is not a limit on the work, it is the guard for a git that never returns:
 // a repository on a network filesystem that has gone away, or a process wedged
 // on an index lock. It matches the guard this project sets elsewhere, a Zoekt
 // request and a doctor probe at 30 seconds.
 //
-// It is a var rather than a const for the reason cmd/vacmcp's goos is one: a
-// test has to be able to stand on the branch below without waiting out a budget
-// meant for a wedged process. Nothing outside a test ever assigns to it.
-var resolveBudget = 30 * time.Second
+// It is a default rather than a fixed limit. Nothing reads it after [New] has
+// run: each Resolver carries its own, and [WithResolveBudget] replaces it for
+// one Resolver. The tests take that same path, so the path an embedder uses is
+// the one CI exercises.
+const defaultResolveBudget = 30 * time.Second
 
 // Resolve returns the [vacctx.Workspace] named by id, once every one of its
 // members has a readable repository and a revision that resolves to a commit
@@ -141,7 +167,7 @@ func (r *Resolver) Resolve(ctx context.Context, id string) (vacctx.Workspace, er
 	// Every query passes through here, so an unbounded rev-parse hangs all seven
 	// tools rather than one. The budget covers resolving the whole workspace:
 	// a context naming several repositories is resolved or it is not.
-	ctx, cancel := deadline.With(ctx, resolveBudget, deadline.Git, "resolve")
+	ctx, cancel := deadline.With(ctx, r.resolveBudget, deadline.Git, "resolve")
 	defer cancel()
 
 	for _, member := range members {

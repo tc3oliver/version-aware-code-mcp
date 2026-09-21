@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The six operation budgets v0.7.0 introduced are now adjustable by a Go
+  embedder, through variadic options on the four constructors that own them:
+  `git.WithReadBudget`, `git.WithDiffBudget`, `git.WithHistoryBudget`,
+  `zoekt.WithRequestBudget`, `cbm.WithTraceBudget` and
+  `resolver.WithResolveBudget`. `cbm.WithConnectTimeout` comes with them: it
+  bounds a session start rather than a query, but it is spent in full before the
+  first trace can begin, so an embedder whose codebase-memory-mcp indexes on
+  startup has the same reason to raise it and had no other way to.
+
+  Every default is unchanged and every existing call site compiles untouched:
+  `New(cfg)` is still `New(cfg)` and still gets 30s, 30s, 2m, 30s, 2m, 30s and
+  2m. This is additive.
+
+  The defect is that until now there was no way at all to move them. They were
+  package-private variables only in-package tests could reach, and a caller's
+  own context deadline can only ever *shorten* an operation — so a downstream
+  with a repository whose `git log -S` genuinely needs more than two minutes had
+  no workaround, not a bad one. The budgets were always meant as wedged-process
+  guards sized from this project's own fixture, and a fixture cannot know how
+  big somebody else's history is.
+
+  **These options are not an entry point to unlimited.** A duration of zero is
+  rejected, and so is a negative one; only a positive duration is accepted, and
+  the rejection is a panic from the constructor, at the moment the bad value is
+  passed rather than at the first call that would have used it. The argument
+  comes from an embedder's own source, very nearly always a literal, so a
+  non-positive one is a bug in that source and not a state the running server
+  can be in.
+
+  Zero is called out because it is the most common misreading of an API shaped
+  like this, and because internally it very nearly works: the budget machinery
+  treats a duration of zero or less as *no budget at all*, so a silently
+  accepted `WithHistoryBudget(0)` would be the documented way to run an
+  unbounded `git log -S`. An unbounded query is precisely what the v0.7.0
+  budgets exist to prevent. If a budget is too small, raise it to a number; there
+  is deliberately no way to remove it.
+
+  The options are also the only route the tests take. Nothing assigns to a
+  package-level budget any more — the variables are now unexported constants
+  serving as defaults — so the path an embedder uses is the one CI exercises on
+  every run, rather than a test-only path beside it that could drift.
+
 ## [0.7.0] - 2026-09-21
 
 **Breaking, pre-v1.0.** A Zoekt request that runs out of time now reports
@@ -654,6 +700,7 @@ cloning, indexing, checking out and writing a configuration file by hand.
   milliseconds after. The graph project is still sent with every query, and a
   CBM that cannot serve MCP falls back to `codebase-memory-mcp cli`.
 
+[Unreleased]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/tc3oliver/version-aware-code-mcp/compare/v0.4.0...v0.5.0
