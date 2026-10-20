@@ -1,0 +1,133 @@
+
+name: Jules CI Auto Fix
+
+on:
+  workflow_run:
+    workflows: ["Portable E2E"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jules-ci-autofix-main
+  cancel-in-progress: false
+
+jobs:
+  autofix:
+    if: >-
+      ${{
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository &&
+        (
+          github.event.workflow_run.conclusion == 'failure' ||
+          github.event.workflow_run.conclusion == 'success'
+        )
+      }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Check and track CI failure
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const run = context.payload.workflow_run;
+            const marker = `<!-- jules-ci:${run.name}:main -->`;
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+
+            const existing = issues.find(
+              i => !i.pull_request && i.body?.includes(marker)
+            );
+
+            // CI recovered: close the tracking issue.
+            if (run.conclusion === 'success') {
+              if (existing) {
+                await github.rest.issues.update({
+                  owner, repo,
+                  issue_number: existing.number,
+                  state: 'closed'
+                });
+              }
+              core.setOutput('invoke', 'false');
+              return;
+            }
+
+            // An existing issue means Jules was already dispatched.
+            if (existing) {
+              core.info(`Already tracked: ${existing.html_url}`);
+              core.setOutput('invoke', 'false');
+              return;
+            }
+
+            const created = await github.rest.issues.create({
+              owner,
+              repo,
+              title: `[Jules CI] ${run.name} failure on main`,
+              body: [
+                marker,
+                `Failed run: ${run.html_url}`,
+                `Commit: ${run.head_sha}`,
+                '',
+                'Jules repair dispatched automatically.',
+                'Review the fix PR before merging.',
+                'This issue closes when main CI passes.',
+                '',
+                'If dispatch fails, close this issue',
+                'manually before retrying.'
+              ].join('\n')
+            });
+
+            core.setOutput('tracking_url', created.data.html_url);
+            core.setOutput('invoke', 'true');
+
+      - name: Ask Jules to repair CI
+        if: steps.gate.outputs.invoke == 'true'
+        uses: google-labs-code/jules-action@v1.0.0
+        with:
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+          starting_branch: main
+          include_last_commit: true
+          include_commit_log: true
+          prompt: |
+            Fix a failing GitHub Actions workflow.
+
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.event.workflow_run.name }}
+            Run: ${{ github.event.workflow_run.html_url }}
+            Commit: ${{ github.event.workflow_run.head_sha }}
+            Tracking issue: ${{ steps.gate.outputs.tracking_url }}
+
+            Requirements:
+            1. Inspect the failed run and available logs.
+            2. Reproduce the failure when possible.
+            3. Identify the actual root cause.
+            4. Implement the smallest correct fix.
+            5. Add regression tests where appropriate.
+            6. Run relevant verification.
+            7. Create a PR titled:
+               [Jules CI] Fix failing workflow
+
+            Constraints:
+            - Never disable or weaken CI checks.
+            - Never remove security scanners.
+            - Never modify secrets or credentials.
+            - Never merge or push directly to main.
+            - Check for existing repair PRs.
+            - Do not create duplicate PRs.
+            - If blocked, report why.
+            - Report unexecuted tests accurately.
+
+            Include root cause, changes, and test
+            results in the PR description.
