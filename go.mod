@@ -2,7 +2,7 @@ module github.com/tc3oliver/version-aware-code-mcp
 
 go 1.26.10
 
-require go.yaml.in/yaml/v4 v4.0.0-rc.6
+require go.yaml.in/yaml/v4 v4.0.0-rc.7
 
 require (
 	github.com/google/jsonschema-go v0.4.3
