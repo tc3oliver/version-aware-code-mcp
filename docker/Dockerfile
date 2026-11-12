@@ -11,7 +11,7 @@
 
 ########################  build vacmcp  ########################
 
-FROM golang:1.26.10-trixie@sha256:9ba7dc6d09ebf6e9317263973174bbf44e15bdf58cb0103747d7376f7cfa2d2f AS vacmcp-build
+FROM golang:1.26.11-trixie@sha256:fa340cb59ebeb1d53ac1cccfc334201d938fe5f3458003cccb767096d8e032b8 AS vacmcp-build
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -21,7 +21,7 @@ RUN CGO_ENABLED=0 go build -o /out/vacmcp ./cmd/vacmcp
 
 ########################  build zoekt  ########################
 
-FROM golang:1.26.10-trixie@sha256:9ba7dc6d09ebf6e9317263973174bbf44e15bdf58cb0103747d7376f7cfa2d2f AS zoekt-build
+FROM golang:1.26.11-trixie@sha256:fa340cb59ebeb1d53ac1cccfc334201d938fe5f3458003cccb767096d8e032b8 AS zoekt-build
 
 # The commit decision-3 pins. Only the two commands this stack uses are built:
 # one to index the repository, one to serve the index.
@@ -32,7 +32,7 @@ RUN CGO_ENABLED=0 GOBIN=/out go install \
 
 ########################  fetch codebase-memory-mcp  ########################
 
-FROM golang:1.26.10-trixie@sha256:9ba7dc6d09ebf6e9317263973174bbf44e15bdf58cb0103747d7376f7cfa2d2f AS cbm-fetch
+FROM golang:1.26.11-trixie@sha256:fa340cb59ebeb1d53ac1cccfc334201d938fe5f3458003cccb767096d8e032b8 AS cbm-fetch
 
 # The portable Linux build is the fully static one; the plain linux archive
 # links glibc 2.38+ and would tie this image to a base new enough to have it.

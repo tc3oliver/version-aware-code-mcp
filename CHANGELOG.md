@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Update Go version to `1.26.10` in `go.mod` and `docker/Dockerfile` to fix reachable
+- Update Go version to `1.26.11` in `go.mod` and `docker/Dockerfile` to fix reachable
   Go standard-library vulnerabilities reported by `govulncheck` in the nightly gate.
 
 ## [0.8.0] - 2026-09-21
