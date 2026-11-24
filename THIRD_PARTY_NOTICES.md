@@ -15,15 +15,11 @@ so a dependency added, removed or upgraded without updating this table fails CI.
 | [github.com/segmentio/asm](https://github.com/segmentio/asm) | v1.1.3 | MIT |
 | [github.com/segmentio/encoding](https://github.com/segmentio/encoding) | v0.5.4 | MIT |
 | [github.com/yosida95/uritemplate/v3](https://github.com/yosida95/uritemplate) | v3.0.2 | BSD-3-Clause |
-| [go.yaml.in/yaml/v4](https://github.com/yaml/go-yaml) | v4.0.0-rc.6 | Apache-2.0, with MIT for the files ported from libyaml |
+| [go.yaml.in/yaml/v4](https://github.com/yaml/go-yaml) | v4.0.0 | Apache-2.0, with MIT for the files ported from libyaml |
 | [golang.org/x/oauth2](https://github.com/golang/oauth2) | v0.35.0 | BSD-3-Clause |
 | [golang.org/x/sync](https://github.com/golang/sync) | v0.20.0 | BSD-3-Clause |
 | [golang.org/x/sys](https://github.com/golang/sys) | v0.48.0 | BSD-3-Clause |
 | [golang.org/x/time](https://github.com/golang/time) | v0.15.0 | BSD-3-Clause |
-
-`go.yaml.in/yaml/v4` is a release candidate: no stable v4 has been published
-yet. v0.1.x ships with it deliberately; the dependency is re-evaluated before
-v1.0.0 and upgraded once a stable release exists.
 
 The YAML parser is Apache-2.0 (Copyright 2011-2019 Canonical Ltd, Copyright 2025
 The go-yaml Project Contributors). Its `internal/libyaml` files were ported from
